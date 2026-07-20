@@ -1,3 +1,14 @@
+//go:build ignore
+
+// orderbook_v0.go — the original float64 prototype, frozen for posterity.
+//
+// This is the "before" that the rest of this repo improves upon: floats for
+// money, map[float64] price keys, a no-op per-level sort, and matching that
+// only crosses when a bid price exactly equals an ask price. It is excluded
+// from the build by the //go:build ignore tag above and kept purely as a
+// historical reference point.
+//
+// See docs/SPEC.md for the design that replaces it.
 package main
 
 import (

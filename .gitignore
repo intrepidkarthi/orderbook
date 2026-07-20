@@ -1,0 +1,29 @@
+# Binaries & build output
+/bin/
+/dist/
+*.exe
+*.out
+*.test
+*.wasm
+
+# Coverage / profiling
+coverage.out
+coverage.html
+*.prof
+cpu.pprof
+mem.pprof
+
+# Go workspace
+go.work
+go.work.sum
+
+# Web (arrives with the demo milestone)
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
