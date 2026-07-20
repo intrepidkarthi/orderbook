@@ -153,6 +153,24 @@ func TestUpdateOrderQuantity(t *testing.T) {
 	}
 }
 
+func TestRestoreOrderQuantity(t *testing.T) {
+	ob := New(Config{Symbol: "BTC-USD"})
+	o := limit(t, "a", types.SideSell, "101", "10")
+	mustAdd(t, ob, o)
+
+	// Simulate a partial fill in place, then undo it.
+	ob.UpdateOrderQuantity(o.ID, dec("4"))
+	if _, qty, _ := ob.BestAsk(); !qty.Equal(dec("6")) {
+		t.Fatalf("after partial: level qty = %s, want 6", qty)
+	}
+	ob.RestoreOrderQuantity(o.ID, dec("4"))
+	if _, qty, _ := ob.BestAsk(); !qty.Equal(dec("10")) {
+		t.Errorf("after restore: level qty = %s, want 10", qty)
+	}
+	// Restoring an unknown id is a no-op (no panic).
+	ob.RestoreOrderQuantity("missing", dec("1"))
+}
+
 func TestDuplicateAddIgnored(t *testing.T) {
 	ob := New(Config{Symbol: "BTC-USD"})
 	o := limit(t, "a", types.SideBuy, "100", "1")

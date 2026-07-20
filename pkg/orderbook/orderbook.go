@@ -325,6 +325,29 @@ func (ob *OrderBook) UpdateOrderQuantity(orderID string, filledQty decimal.Decim
 	}
 }
 
+// RestoreOrderQuantity adds qty back to the aggregate total at a resting order's
+// level, undoing a prior UpdateOrderQuantity. Used by the matching engine to
+// unwind partial fills against a still-resting maker when a Fill-or-Kill order
+// cannot be completed (see matching.Engine.reverseTrade).
+func (ob *OrderBook) RestoreOrderQuantity(orderID string, qty decimal.Decimal) {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	order, ok := ob.orders[orderID]
+	if !ok {
+		return
+	}
+	priceStr := order.Price.String()
+	if order.Side == types.SideBuy {
+		if level, ok := ob.bids[priceStr]; ok {
+			level.TotalQty = level.TotalQty.Add(qty)
+		}
+	} else {
+		if level, ok := ob.asks[priceStr]; ok {
+			level.TotalQty = level.TotalQty.Add(qty)
+		}
+	}
+}
+
 // Count returns the number of resting orders.
 func (ob *OrderBook) Count() int {
 	ob.mu.RLock()
