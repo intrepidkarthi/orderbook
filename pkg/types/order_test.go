@@ -132,6 +132,26 @@ func TestOrder_Cancel(t *testing.T) {
 	}
 }
 
+func TestOrder_Fresh(t *testing.T) {
+	o := mustOrder(t, SideBuy, OrderTypeLimit, "100", "10", TIFGoodTillCancel)
+	_ = o.Fill(dec("4")) // mutate the original
+
+	f := o.Fresh()
+	// Identity and params preserved.
+	if f.ID != o.ID || f.Side != o.Side || !f.Price.Equal(dec("100")) || !f.Quantity.Equal(dec("10")) {
+		t.Error("Fresh must preserve id, side, price, quantity")
+	}
+	// State reset.
+	if !f.FilledQty.IsZero() || !f.RemainingQty.Equal(dec("10")) || f.Status != OrderStatusNew || f.SequenceNum != 0 {
+		t.Errorf("Fresh not reset: filled=%s remaining=%s status=%s seq=%d",
+			f.FilledQty, f.RemainingQty, f.Status, f.SequenceNum)
+	}
+	// Original untouched.
+	if !o.FilledQty.Equal(dec("4")) || o.Status != OrderStatusPartiallyFilled {
+		t.Error("Fresh must not mutate the original order")
+	}
+}
+
 func TestOrder_Notional(t *testing.T) {
 	o := mustOrder(t, SideBuy, OrderTypeLimit, "100", "10", TIFGoodTillCancel)
 	if !o.NotionalValue().Equal(dec("1000")) {

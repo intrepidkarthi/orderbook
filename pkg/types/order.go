@@ -176,3 +176,19 @@ func (o *Order) NotionalValue() decimal.Decimal { return o.Price.Mul(o.Quantity)
 
 // RemainingValue is Price × RemainingQty.
 func (o *Order) RemainingValue() decimal.Decimal { return o.Price.Mul(o.RemainingQty) }
+
+// Fresh returns a copy of the order reset to its initial, unfilled state
+// (FilledQty=0, RemainingQty=Quantity, Status=NEW, SequenceNum=0) while keeping
+// its identity and parameters (ID, user, symbol, side, type, price, quantity,
+// TIF). It exists for deterministic replay and simulation, where the same order
+// must be re-submitted to a fresh engine without carrying prior fill state. The
+// original order is not modified.
+func (o *Order) Fresh() *Order {
+	c := *o
+	c.FilledQty = decimal.Zero
+	c.RemainingQty = o.Quantity
+	c.Status = OrderStatusNew
+	c.SequenceNum = 0
+	c.UpdatedAt = o.CreatedAt
+	return &c
+}
