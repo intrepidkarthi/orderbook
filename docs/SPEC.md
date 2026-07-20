@@ -287,7 +287,7 @@ out-of-sample data and trading costs?):
 | # | Milestone |
 |---|---|
 | **M0** | **Spec** (this doc) + research roadmap + demo spec. |
-| M1 | Core: `types` + `orderbook` + lean `matching` (market/limit, GTC/IOC/FOK, STP) + tests + `cmd/obdemo`. |
+| M1 | Core: `types` + `orderbook` + lean `matching` (market/limit, GTC/IOC/FOK, STP) + tests + `cmd/obdemo` + CI (build/vet/test-race). |
 | M2 | `signals`: book imbalance + OFI, with tests. |
 | M3 | `sim` + `marketdata` replay: synthetic order flow to trade against. |
 | M4 | `strategy` Avellaneda–Stoikov + `backtest` harness + metrics. |
@@ -296,7 +296,7 @@ out-of-sample data and trading costs?):
 | M7 | `surveillance`: STP modes, spoofing/layering, stop-cascade, rate/ratio limits. |
 | M8 | Auctions + circuit breakers (LULD); pro-rata matching mode. |
 | M9 | `cmd/obwasm` WASM bindings + `web/` scaffolding + demo scenes 1–4 (mechanics). |
-| M10 | Demo scenes 5–8 (signals, market making, surveillance) + GitHub Pages deploy + CI. |
+| M10 | Demo scenes 5–8 (signals, market making, surveillance) + GitHub Pages deploy. (CI landed early in M1.) |
 | M11 | Perf pass (int-tick fast path, allocation audit); L3/MBO feed; benchmark dashboard. |
 
 ---

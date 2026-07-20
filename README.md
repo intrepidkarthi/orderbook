@@ -13,6 +13,7 @@
   <img src="https://img.shields.io/badge/WebAssembly-ready-654FF0?style=flat-square&logo=webassembly&logoColor=white" alt="WebAssembly" />
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square" alt="License MIT" />
   <img src="https://img.shields.io/badge/status-building_in_public-F59E0B?style=flat-square" alt="Status" />
+  <a href="https://github.com/intrepidkarthi/orderbook/actions/workflows/ci.yml"><img src="https://github.com/intrepidkarthi/orderbook/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
   <a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook"><img src="https://pkg.go.dev/badge/github.com/intrepidkarthi/orderbook.svg" alt="Go Reference" /></a>
   <a href="https://goreportcard.com/report/github.com/intrepidkarthi/orderbook"><img src="https://goreportcard.com/badge/github.com/intrepidkarthi/orderbook?style=flat-square" alt="Go Report Card" /></a>
 </p>
