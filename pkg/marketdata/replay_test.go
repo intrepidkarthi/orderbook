@@ -90,3 +90,21 @@ func TestDigest_Distinguishes(t *testing.T) {
 		t.Error("empty digests should match")
 	}
 }
+
+func TestValueDigest(t *testing.T) {
+	stream := NewStream(scriptOrders(t)...)
+	// Stable across replays (matching outcome is deterministic).
+	if v1, v2 := ValueDigest(Replay(engine(), stream)), ValueDigest(Replay(engine(), stream)); v1 != v2 {
+		t.Errorf("ValueDigest not stable across replay: %s vs %s", v1, v2)
+	}
+	// Distinguishes a different flow.
+	extra := append(scriptOrders(t), lim(t, "b4", types.SideBuy, "102", "2"))
+	if ValueDigest(Replay(engine(), stream)) == ValueDigest(Replay(engine(), NewStream(extra...))) {
+		t.Error("ValueDigest should differ for different flow")
+	}
+	// Value fingerprint (no ids) differs from the id-inclusive Digest.
+	trades := Replay(engine(), stream)
+	if ValueDigest(trades) == Digest(trades) {
+		t.Error("ValueDigest and Digest hash different content; should not collide here")
+	}
+}

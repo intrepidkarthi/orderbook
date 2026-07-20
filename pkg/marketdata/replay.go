@@ -89,11 +89,21 @@ func (r *Recorder) Stream() *Stream { return r.stream }
 // Trades returns the recorded trade tape.
 func (r *Recorder) Trades() []*types.Trade { return r.trades }
 
-// Digest returns a stable hex fingerprint of a trade sequence, using only the
-// deterministic, semantically meaningful fields (sequence, price, quantity,
-// taker side, maker/taker order ids) — not the per-run UUID trade id or wall
-// clock. Two runs of the same input stream yield the same digest.
-func Digest(trades []*types.Trade) string {
+// Digest returns a stable hex fingerprint of a trade sequence including the
+// maker/taker order ids. Use it when the order ids are preserved across the runs
+// being compared — e.g. record→Replay of the same Stream — where identical ids
+// strengthen the check. It is NOT suitable for comparing two independent runs
+// that mint fresh orders (their UUID ids differ); use ValueDigest for that.
+func Digest(trades []*types.Trade) string { return hashTrades(trades, true) }
+
+// ValueDigest returns a stable hex fingerprint over only the matching *outcome*
+// (sequence, price, quantity, taker side) — independent of the per-run UUID
+// order/trade ids and wall clock. Two runs that make the same matching decisions
+// (e.g. the same seeded simulation) yield the same ValueDigest even though their
+// order ids differ.
+func ValueDigest(trades []*types.Trade) string { return hashTrades(trades, false) }
+
+func hashTrades(trades []*types.Trade, includeIDs bool) string {
 	var b strings.Builder
 	for _, t := range trades {
 		b.WriteString(strconv.FormatUint(t.SequenceNum, 10))
@@ -103,10 +113,12 @@ func Digest(trades []*types.Trade) string {
 		b.WriteString(t.Quantity.String())
 		b.WriteByte('|')
 		b.WriteString(string(t.TakerSide))
-		b.WriteByte('|')
-		b.WriteString(t.MakerOrderID)
-		b.WriteByte('|')
-		b.WriteString(t.TakerOrderID)
+		if includeIDs {
+			b.WriteByte('|')
+			b.WriteString(t.MakerOrderID)
+			b.WriteByte('|')
+			b.WriteString(t.TakerOrderID)
+		}
 		b.WriteByte('\n')
 	}
 	sum := sha256.Sum256([]byte(b.String()))
