@@ -102,14 +102,21 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: v
 .scorecard b { font-size: 18px; font-variant-numeric: tabular-nums; }
 #mmChart { width: 100%; height: auto; background: var(--line); border-radius: 8px; margin-top: 8px; }
 
-/* learn scene */
-.learn-panel { max-width: 760px; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 14px; }
-.learn-card { background: var(--line); border-radius: 10px; padding: 14px; }
-.learn-card h3 { margin: 0 0 6px; font-size: 15px; }
-.learn-card p { margin: 0; font-size: 13px; color: var(--fg); }
-.learn-card strong { color: var(--gold); font-weight: 600; }
+/* learn scene — animated tutorial */
+.learn-panel { max-width: 780px; }
 .learn-panel a { color: var(--gold); }
+.tut-head { margin-bottom: 10px; }
+.tut-kicker { font-size: 11px; letter-spacing: .08em; color: var(--muted); }
+.tut-head h2 { margin: 2px 0 0; font-size: 18px; }
+#tutTitle { color: var(--gold); }
+.tut-stage { width: 100%; height: auto; display: block; border-radius: 10px; background: #0d1117; }
+.tut-text { min-height: 66px; font-size: 14px; line-height: 1.55; color: var(--fg); margin: 12px 2px; }
+.tut-nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.tut-dots { display: flex; gap: 7px; flex: 1; justify-content: center; flex-wrap: wrap; }
+.tut-dot { width: 10px; height: 10px; padding: 0; border-radius: 50%; border: 1px solid var(--line); background: transparent; cursor: pointer; }
+.tut-dot.on { background: var(--gold); border-color: var(--gold); }
+.tut-nav button:not(.tut-dot) { min-width: 96px; }
+button:disabled { opacity: .4; cursor: default; }
 
 .note { color: var(--muted); font-size: 12.5px; margin-top: 16px; }
 .loading { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg); color: var(--muted); z-index: 10; }

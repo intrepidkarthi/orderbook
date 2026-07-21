@@ -28,6 +28,7 @@ function init() {
   document.querySelector(".controls").addEventListener("click", onControl);
   wireScenes();
   wireMM();
+  if (window.Tutorial) window.Tutorial.init();
   document.getElementById("loading").classList.add("done");
 }
 
@@ -42,6 +43,7 @@ function wireScenes() {
     }
     if (scene !== "book" && auto) toggleAuto(); // pause live flow when leaving
     if (scene === "mm" && !mmRan) runMM();
+    if (window.Tutorial) window.Tutorial.setActive(scene === "learn");
   });
 }
 

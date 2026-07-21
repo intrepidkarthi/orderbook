@@ -90,47 +90,18 @@
   </section>
 
   <section id="scene-learn" class="panel learn-panel" hidden>
-    <h2>Order books &amp; market making in 2 minutes</h2>
-    <div class="cards">
-      <div class="learn-card">
-        <h3>📖 The book</h3>
-        <p><strong>Bids</strong> (buyers) stack below, <strong>asks</strong> (sellers) above.
-          The gap is the <strong>spread</strong>; the size at each price is <strong>depth</strong>.
-          Deep book = hard to move; thin book = swings easily.</p>
-      </div>
-      <div class="learn-card">
-        <h3>🤝 Maker vs taker</h3>
-        <p>A <strong>limit</strong> order rests and <em>makes</em> liquidity. A
-          <strong>market</strong> order crosses the spread and <em>takes</em> it —
-          getting immediacy but paying the spread (and slippage on big size).</p>
-      </div>
-      <div class="learn-card">
-        <h3>⚙️ Matching</h3>
-        <p><strong>Price–time priority:</strong> best price first, then first-come-first-served.
-          Trades print at the resting (maker) price. Watch a market order walk the book in the
-          <em>Live book</em> scene.</p>
-      </div>
-      <div class="learn-card">
-        <h3>💹 Market making</h3>
-        <p>Quote <em>both</em> sides, earn the spread — but manage
-          <strong>inventory risk</strong> (fills push you off flat) and
-          <strong>adverse selection</strong> (informed traders pick off stale quotes).
-          That's the whole job.</p>
-      </div>
-      <div class="learn-card">
-        <h3>🧠 Avellaneda–Stoikov</h3>
-        <p>Skew quotes around an <strong>inventory-adjusted reservation price</strong>
-          and widen the spread with volatility. Try the <em>Market maker</em> scene and move
-          the γ / k / σ sliders.</p>
-      </div>
-      <div class="learn-card">
-        <h3>🔎 The honest caveat</h3>
-        <p>"The order book predicts the next move" is mostly false: order-flow imbalance is
-          <strong>contemporaneous</strong> (R²≈0.33), not predictive (≈0.00). It describes the
-          move as it happens; it doesn't forecast it.</p>
-      </div>
+    <div class="tut-head">
+      <span class="tut-kicker">FROM SCRATCH · no finance background needed</span>
+      <h2 id="tutTitle">Order books &amp; market making</h2>
     </div>
-    <p class="note">Full write-up: <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">docs/LEARN.md</a>.</p>
+    <canvas id="tutStage" width="720" height="300" class="tut-stage" aria-label="tutorial animation"></canvas>
+    <p id="tutText" class="tut-text"></p>
+    <div class="tut-nav">
+      <button id="tutPrev" class="ghost">← Back</button>
+      <div id="tutDots" class="tut-dots" role="tablist"></div>
+      <button id="tutNext" class="buy solid">Next →</button>
+    </div>
+    <p class="note">Prefer reading? <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">docs/LEARN.md</a>.</p>
   </section>
 
   <div id="loading" class="loading">compiling WebAssembly…</div>
@@ -141,6 +112,7 @@
   </footer>
 
   <script src="wasm_exec.js"></script>
+  <script src="tutorial.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
