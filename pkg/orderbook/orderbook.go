@@ -422,6 +422,52 @@ type Snapshot struct {
 	Timestamp      time.Time       `json:"timestamp"`
 }
 
+// L3Order is a single resting order in an L3 (market-by-order) snapshot.
+type L3Order struct {
+	OrderID     string          `json:"order_id"`
+	UserID      string          `json:"user_id"`
+	Price       decimal.Decimal `json:"price"`
+	Quantity    decimal.Decimal `json:"quantity"` // remaining
+	SequenceNum uint64          `json:"sequence_num"`
+}
+
+// SnapshotL3 is a market-by-order (L3) view: every resting order individually,
+// preserving price then time order — the fullest market-data granularity.
+type SnapshotL3 struct {
+	Symbol      string    `json:"symbol"`
+	Bids        []L3Order `json:"bids"`
+	Asks        []L3Order `json:"asks"`
+	SequenceNum uint64    `json:"sequence_num"`
+	Timestamp   time.Time `json:"timestamp"`
+}
+
+// SnapshotL3 returns an order-by-order view of the top depth price levels of each
+// side (best price first, FIFO within a level).
+func (ob *OrderBook) SnapshotL3(depth int) *SnapshotL3 {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
+
+	s := &SnapshotL3{Symbol: ob.symbol, SequenceNum: ob.sequenceNum, Timestamp: time.Now().UTC()}
+	appendSide := func(prices []decimal.Decimal, levels map[string]*PriceLevel) []L3Order {
+		out := make([]L3Order, 0, depth)
+		for i := 0; i < len(prices) && i < depth; i++ {
+			for _, o := range levels[prices[i].String()].Orders {
+				out = append(out, L3Order{
+					OrderID:     o.ID,
+					UserID:      o.UserID,
+					Price:       o.Price,
+					Quantity:    o.RemainingQty,
+					SequenceNum: o.SequenceNum,
+				})
+			}
+		}
+		return out
+	}
+	s.Bids = appendSide(ob.bidPrices, ob.bids)
+	s.Asks = appendSide(ob.askPrices, ob.asks)
+	return s
+}
+
 // Snapshot returns the top depth levels of each side.
 func (ob *OrderBook) Snapshot(depth int) *Snapshot {
 	ob.mu.RLock()
