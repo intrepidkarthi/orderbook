@@ -23,4 +23,5 @@ var (
 	ErrNilOrder               = errors.New("order must not be nil")
 	ErrInvalidStopPrice       = errors.New("invalid stop price: must be positive")
 	ErrPostOnlyWouldCross     = errors.New("post-only order would cross the spread")
+	ErrInvalidDisplayQuantity = errors.New("display quantity must be positive and <= total quantity")
 )
