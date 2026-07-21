@@ -46,3 +46,27 @@ func BenchmarkEngine_Match(b *testing.B) {
 		e.Process(takers[i])
 	}
 }
+
+// BenchmarkEngine_CancelReplace measures market-maker churn through the full
+// engine: a book of ~K resting orders, cancel one and re-post another each step.
+func BenchmarkEngine_CancelReplace(b *testing.B) {
+	const K = 5000
+	e := NewEngine(Config{Symbol: "X", MaxOrders: K + 10})
+	live := make([]*types.Order, K)
+	for i := range live {
+		live[i] = mkOrder("mm", types.SideBuy, int64(1000+i%2000), 1)
+		e.Process(live[i])
+	}
+	repl := make([]*types.Order, b.N)
+	for i := range repl {
+		repl[i] = mkOrder("mm", types.SideBuy, int64(1000+i%2000), 1)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		j := i % K
+		_, _ = e.Cancel(live[j].ID, "mm")
+		e.Process(repl[i])
+		live[j] = repl[i]
+	}
+}
