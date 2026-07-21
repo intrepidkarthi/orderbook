@@ -11,6 +11,7 @@
 package matching
 
 import (
+	"sort"
 	"sync"
 
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
@@ -66,6 +67,7 @@ type Engine struct {
 	stopBook      *orderbook.StopBook
 	icebergOrders map[string]*types.IcebergOrder
 	ocoByOrderID  map[string]*types.OCOOrder // both legs' ids map to the pair
+	trailingStops map[string]*types.TrailingStop
 	orderSeq      uint64
 	tradeSeq      uint64
 }
@@ -88,6 +90,7 @@ func NewEngine(config Config) *Engine {
 		stopBook:      orderbook.NewStopBook(config.Symbol),
 		icebergOrders: make(map[string]*types.IcebergOrder),
 		ocoByOrderID:  make(map[string]*types.OCOOrder),
+		trailingStops: make(map[string]*types.TrailingStop),
 	}
 }
 
@@ -186,13 +189,18 @@ func (e *Engine) cascadeStops(res *MatchResult) {
 			return
 		}
 		fired := e.stopBook.CheckTriggers(mp)
-		if len(fired) == 0 {
+		trailing := e.checkTrailingStops(mp)
+		if len(fired) == 0 && len(trailing) == 0 {
 			return
 		}
 		for _, s := range fired {
 			// If this stop is an OCO leg, cancel its primary before it executes.
 			e.cancelOCOCounterpart(s.Order.ID)
 			r := e.settle(s.Order)
+			res.Trades = append(res.Trades, r.Trades...)
+		}
+		for _, ts := range trailing {
+			r := e.settle(ts.Order)
 			res.Trades = append(res.Trades, r.Trades...)
 		}
 	}
@@ -268,6 +276,51 @@ func (e *Engine) pegReference(ref types.PegReference) (decimal.Decimal, bool) {
 		}
 	}
 	return decimal.Zero, false
+}
+
+// ProcessTrailingStop submits a trailing stop. It seeds its trail from the
+// current market and either fires immediately or rests, ratcheting as trades
+// move the market (handled in cascadeStops).
+func (e *Engine) ProcessTrailingStop(ts *types.TrailingStop) *MatchResult {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.orderSeq++
+	ts.Order.SequenceNum = e.orderSeq
+
+	mp := e.book.LastTradePrice()
+	if mp.IsPositive() {
+		ts.Observe(mp)
+		if ts.ShouldTrigger(mp) {
+			ts.Trigger()
+			res := e.settle(ts.Order)
+			e.cascadeStops(res)
+			return res
+		}
+	}
+	ts.Order.Status = types.OrderStatusPendingTrigger
+	e.trailingStops[ts.Order.ID] = ts
+	return &MatchResult{Order: ts.Order, Status: types.OrderStatusPendingTrigger}
+}
+
+// checkTrailingStops ratchets every live trailing stop against marketPrice and
+// returns (in deterministic sequence order) those that now fire, removing them.
+func (e *Engine) checkTrailingStops(marketPrice decimal.Decimal) []*types.TrailingStop {
+	var fired []*types.TrailingStop
+	for _, ts := range e.trailingStops {
+		ts.Observe(marketPrice)
+		if ts.ShouldTrigger(marketPrice) {
+			fired = append(fired, ts)
+		}
+	}
+	sort.Slice(fired, func(i, j int) bool {
+		return fired[i].Order.SequenceNum < fired[j].Order.SequenceNum
+	})
+	for _, ts := range fired {
+		ts.Trigger()
+		delete(e.trailingStops, ts.Order.ID)
+	}
+	return fired
 }
 
 // ProcessOCO submits a one-cancels-other pair: the primary limit is posted, and
@@ -545,6 +598,15 @@ func (e *Engine) Cancel(orderID, userID string) (*types.Order, error) {
 		return s.Order, nil
 	}
 
+	if ts, exists := e.trailingStops[orderID]; exists {
+		if ts.Order.UserID != userID {
+			return nil, types.ErrOrderNotFound
+		}
+		delete(e.trailingStops, orderID)
+		_ = ts.Order.Cancel()
+		return ts.Order, nil
+	}
+
 	return nil, types.ErrOrderNotFound
 }
 
@@ -558,6 +620,13 @@ func (e *Engine) StopBook() *orderbook.StopBook { return e.stopBook }
 
 // PendingStopCount returns the number of resting stop orders.
 func (e *Engine) PendingStopCount() int { return e.stopBook.Count() }
+
+// TrailingStopCount returns the number of resting trailing stops.
+func (e *Engine) TrailingStopCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.trailingStops)
+}
 
 // BestBid returns the best bid price and aggregate quantity.
 func (e *Engine) BestBid() (price, qty decimal.Decimal, ok bool) { return e.book.BestBid() }
