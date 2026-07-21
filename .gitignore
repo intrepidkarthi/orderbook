@@ -21,6 +21,9 @@ go.work.sum
 web/node_modules/
 web/dist/
 web/.vite/
+# Generated at deploy time (Go toolchain + WASM build)
+web/wasm_exec.js
+web/obook.wasm
 
 # Editor / OS
 .DS_Store

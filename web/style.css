@@ -1,0 +1,90 @@
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --line: #21262d;
+  --fg: #e6edf3;
+  --muted: #8b949e;
+  --bid: #22c55e;
+  --ask: #f85149;
+  --gold: #d4a547;
+  --bid-dim: rgba(34, 197, 94, 0.16);
+  --ask-dim: rgba(248, 81, 73, 0.16);
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f8fa; --panel: #fff; --line: #d0d7de; --fg: #1f2328; --muted: #656d76;
+    --bid-dim: rgba(34,197,94,.12); --ask-dim: rgba(248,81,73,.12);
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  padding: 24px; max-width: 900px; margin: 0 auto;
+}
+header h1 { margin: 0 0 4px; font-size: 26px; }
+.tag { color: var(--muted); margin: 0 0 20px; max-width: 60ch; }
+code { background: var(--line); padding: 1px 5px; border-radius: 4px; font-size: .9em; }
+
+main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 680px) { main { grid-template-columns: 1fr; } }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+
+.book-head, .spread-row { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; letter-spacing: .04em; }
+.book-head { padding: 0 6px 6px; border-bottom: 1px solid var(--line); }
+.spread-row { padding: 8px 6px; margin: 4px 0; border-top: 1px dashed var(--line); border-bottom: 1px dashed var(--line); font-variant-numeric: tabular-nums; }
+
+.side { display: flex; flex-direction: column; }
+.side.asks { justify-content: flex-end; }
+.row {
+  position: relative; display: flex; justify-content: space-between;
+  padding: 3px 6px; font-variant-numeric: tabular-nums; font-size: 14px;
+  overflow: hidden; border-radius: 4px;
+}
+.row .px { z-index: 1; font-weight: 600; }
+.row .sz { z-index: 1; color: var(--muted); }
+.row .bar { position: absolute; top: 0; right: 0; height: 100%; width: 0;
+  transition: width .35s cubic-bezier(.22,.61,.36,1); }
+.asks .row .px { color: var(--ask); }
+.asks .row .bar { background: var(--ask-dim); }
+.bids .row .px { color: var(--bid); }
+.bids .row .bar { background: var(--bid-dim); }
+.row.flash { animation: flash .5s ease; }
+@keyframes flash { from { background: var(--gold); } to { background: transparent; } }
+
+.imbalance { margin-top: 16px; }
+.imbalance-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.imbalance-label .hint { display: block; font-size: 11px; opacity: .7; }
+.meter { position: relative; height: 12px; background: var(--line); border-radius: 6px; overflow: hidden; }
+.meter-mid { position: absolute; left: 50%; top: 0; width: 1px; height: 100%; background: var(--muted); z-index: 2; }
+.meter-bar { position: absolute; top: 0; height: 100%; width: 0; left: 50%;
+  transition: width .35s ease, left .35s ease, background .35s ease; }
+.imbalance-val { text-align: center; font-variant-numeric: tabular-nums; margin-top: 4px; font-size: 13px; }
+
+.controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+button {
+  font: inherit; font-size: 13px; font-weight: 600; padding: 9px 10px; cursor: pointer;
+  border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--fg);
+  transition: transform .08s ease, filter .15s ease;
+}
+button:active { transform: translateY(1px); }
+button:hover { filter: brightness(1.15); }
+button.buy { border-color: var(--bid); color: var(--bid); }
+button.sell { border-color: var(--ask); color: var(--ask); }
+button.buy.solid { background: var(--bid); color: #06210f; }
+button.sell.solid { background: var(--ask); color: #2a0a08; }
+button.ghost { color: var(--muted); }
+
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; }
+.tape { height: 180px; overflow-y: auto; font-variant-numeric: tabular-nums; font-size: 13px; }
+.tape .t { display: flex; justify-content: space-between; padding: 2px 4px; border-radius: 4px; animation: tapein .4s ease; }
+.tape .t.buy { color: var(--bid); } .tape .t.sell { color: var(--ask); }
+@keyframes tapein { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; } }
+
+.note { color: var(--muted); font-size: 12.5px; margin-top: 16px; }
+.loading { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg); color: var(--muted); z-index: 10; }
+.loading.done { display: none; }
+footer { color: var(--muted); font-size: 12px; margin-top: 24px; text-align: center; }
+footer a { color: var(--gold); }

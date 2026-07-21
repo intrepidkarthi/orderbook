@@ -41,6 +41,12 @@ Three audiences:
 
 ---
 
+> **Implementation note (v1 shipped).** The first cut in [`../web`](../web) is a
+> **zero-build static site** (vanilla HTML/CSS/JS + Go→WASM) rather than
+> React/Vite — it deploys to Pages with no toolchain and was verified end-to-end
+> (the WASM engine runs headlessly in Node). The React/Vite multi-scene build
+> below remains the target for the richer scenes; it reuses the same WASM bridge.
+
 ## 3. Technical architecture
 
 ```

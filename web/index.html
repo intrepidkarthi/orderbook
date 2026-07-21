@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>orderbook — live matching engine (WASM)</title>
+  <meta name="description" content="A limit order book & matching engine written in Go, compiled to WebAssembly and running live in your browser." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>📈 orderbook</h1>
+    <p class="tag">A Go matching engine compiled to <strong>WebAssembly</strong>, running live in your browser.
+      The same code you can <code>go get</code> is matching these orders.</p>
+  </header>
+
+  <main>
+    <section class="panel book-panel">
+      <div class="book-head">
+        <span>PRICE</span><span>SIZE</span>
+      </div>
+      <div id="asks" class="side asks" aria-label="ask levels"></div>
+      <div class="spread-row">
+        <span id="spread">spread —</span>
+        <span id="mid">mid —</span>
+        <span id="last">last —</span>
+      </div>
+      <div id="bids" class="side bids" aria-label="bid levels"></div>
+
+      <div class="imbalance">
+        <div class="imbalance-label">book imbalance
+          <span class="hint">(bid − ask) ⁄ (bid + ask) — buy vs sell pressure</span>
+        </div>
+        <div class="meter"><div class="meter-mid"></div><div id="imbBar" class="meter-bar"></div></div>
+        <div id="imbVal" class="imbalance-val">0.00</div>
+      </div>
+    </section>
+
+    <section class="panel side-panel">
+      <div class="controls">
+        <button data-act="buyLimit" class="buy">Buy&nbsp;limit</button>
+        <button data-act="sellLimit" class="sell">Sell&nbsp;limit</button>
+        <button data-act="buyMarket" class="buy solid">Buy&nbsp;market</button>
+        <button data-act="sellMarket" class="sell solid">Sell&nbsp;market</button>
+        <button data-act="auto" id="autoBtn" class="ghost">▶ Auto flow</button>
+        <button data-act="reset" class="ghost">Reset</button>
+      </div>
+
+      <h2>Trade tape</h2>
+      <div id="tape" class="tape" aria-live="polite"></div>
+
+      <p class="note">
+        Market orders <em>take</em> liquidity (cross the spread); limit orders <em>rest</em> and
+        <em>make</em> it. Watch the imbalance lean before the price ticks — but remember it's a
+        <em>contemporaneous</em> read, not a forecast.
+      </p>
+    </section>
+  </main>
+
+  <div id="loading" class="loading">compiling WebAssembly…</div>
+
+  <footer>
+    <a href="https://github.com/intrepidkarthi/orderbook">source</a> ·
+    built in Go · MIT
+  </footer>
+
+  <script src="wasm_exec.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
