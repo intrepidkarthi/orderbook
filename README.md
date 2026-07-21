@@ -38,8 +38,12 @@
   <img src="https://img.shields.io/badge/Tailwind_CSS-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white" alt="Tailwind" />
 </p>
 
-> 🚧 **Building in public.** Spec first (this is it), core engine next. Follow the
-> commit stream — the [milestones](docs/SPEC.md#10-milestones-each--one-or-more-small-commits) are shipping incrementally.
+> 🟢 **Live.** The engine, the research experiments, and an **animated
+> [in-browser demo](https://intrepidkarthi.github.io/orderbook/)** (Go compiled to
+> WASM) are all shipping. Done so far: core engine (M1) → OFI/imbalance signals
+> (M2) → deterministic simulator (M3) → Avellaneda–Stoikov + backtest (M4) → the
+> OFI study (M5) → advanced order types (M6) → surveillance (M7) → WASM demo (M9).
+> See the [milestones](docs/SPEC.md#10-milestones-each--one-or-more-small-commits).
 
 ---
 
@@ -90,7 +94,8 @@ nothing above it. Full diagram in the [spec](docs/SPEC.md#3-architecture).
 
 ## Quickstart
 
-> **Target API (lands in milestone M1).** Shown here so the spec is concrete.
+> Live API (`pkg/matching`, `pkg/types`). Also see `cmd/obdemo`, `cmd/obmm`
+> (Avellaneda–Stoikov backtest), `cmd/ofistudy`, and `cmd/surveil`.
 
 ```go
 import (
@@ -124,10 +129,10 @@ Research + demo entrypoints (`cmd/obdemo`, `cmd/obwasm`, `web/`) arrive on the
 
 ## Roadmap
 
-`M0` spec ✅ · `M1` core engine · `M2` OFI signals · `M3` simulator + replay ·
-`M4` Avellaneda–Stoikov + backtest · `M5` live L2 + OFI study · `M6` advanced
-order types · `M7` surveillance · `M8` auctions + circuit breakers · `M9–M10`
-WASM demo + Pages · `M11` perf + L3. Details in the
+`M0` spec ✅ · `M1` core engine ✅ · `M2` OFI signals ✅ · `M3` simulator + replay ✅ ·
+`M4` Avellaneda–Stoikov + backtest ✅ · `M5` OFI study ✅ · `M6` advanced order
+types ✅ · `M7` surveillance ✅ · `M8` auctions + circuit breakers · `M9` WASM
+demo + Pages ✅ · `M10` demo scenes 5–8 · `M11` perf + L3. Details in the
 [spec](docs/SPEC.md#10-milestones-each--one-or-more-small-commits).
 
 ---
