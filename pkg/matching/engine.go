@@ -109,6 +109,14 @@ func (e *Engine) Process(order *types.Order) *MatchResult {
 func (e *Engine) settle(order *types.Order) *MatchResult {
 	res := &MatchResult{Order: order}
 
+	// Post-only orders must rest as makers; reject if they would take.
+	if order.PostOnly && e.wouldCross(order) {
+		order.Status = types.OrderStatusRejected
+		res.Status = types.OrderStatusRejected
+		res.RejectionReason = types.ErrPostOnlyWouldCross
+		return res
+	}
+
 	trades, makerOrders := e.match(order)
 	res.Trades = trades
 
@@ -314,6 +322,24 @@ func (e *Engine) match(taker *types.Order) ([]*types.Trade, map[string]*types.Or
 	}
 
 	return e.finish(trades), makerOrders
+}
+
+// wouldCross reports whether a limit order would immediately take liquidity
+// (used to reject post-only orders). Non-limit orders always "cross".
+func (e *Engine) wouldCross(order *types.Order) bool {
+	if order.Type != types.OrderTypeLimit {
+		return true
+	}
+	if order.Side == types.SideBuy {
+		if ask, _, ok := e.book.BestAsk(); ok && order.Price.GreaterThanOrEqual(ask) {
+			return true
+		}
+		return false
+	}
+	if bid, _, ok := e.book.BestBid(); ok && order.Price.LessThanOrEqual(bid) {
+		return true
+	}
+	return false
 }
 
 // finish records the last trade price if any trades occurred and returns the

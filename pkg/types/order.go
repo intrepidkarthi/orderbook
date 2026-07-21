@@ -70,10 +70,18 @@ type Order struct {
 	FilledQty    decimal.Decimal `json:"filled_qty"`
 	RemainingQty decimal.Decimal `json:"remaining_qty"`
 	TimeInForce  TimeInForce     `json:"time_in_force"`
+	PostOnly     bool            `json:"post_only,omitempty"` // maker-only: reject if it would cross
 	Status       OrderStatus     `json:"status"`
 	CreatedAt    time.Time       `json:"created_at"`
 	UpdatedAt    time.Time       `json:"updated_at"`
 	SequenceNum  uint64          `json:"sequence_num"`
+}
+
+// AsPostOnly marks the order maker-only and returns it (for fluent construction).
+// A post-only order is rejected if it would cross the spread instead of resting.
+func (o *Order) AsPostOnly() *Order {
+	o.PostOnly = true
+	return o
 }
 
 // NewOrder constructs a validated order with a time-ordered UUIDv7 id.
