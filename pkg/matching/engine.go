@@ -63,9 +63,14 @@ type Engine struct {
 	mu       sync.Mutex
 	config   Config
 	book     *orderbook.OrderBook
+	stopBook *orderbook.StopBook
 	orderSeq uint64
 	tradeSeq uint64
 }
+
+// maxStopCascade bounds how many rounds of stop triggering a single order may
+// set off, a safety net against a pathological trigger loop.
+const maxStopCascade = 1000
 
 // NewEngine constructs an engine and its underlying book.
 func NewEngine(config Config) *Engine {
@@ -78,19 +83,29 @@ func NewEngine(config Config) *Engine {
 			Symbol:    config.Symbol,
 			MaxOrders: config.MaxOrders,
 		}),
+		stopBook: orderbook.NewStopBook(config.Symbol),
 	}
 }
 
-// Process runs one order through the engine: it crosses against the book, then
-// rests, cancels, or rejects the remainder per the order's type and TIF.
+// Process runs one order through the engine: it crosses against the book, rests
+// or rejects the remainder per type/TIF, then fires any stop orders whose
+// trigger price the resulting trades reached.
 func (e *Engine) Process(order *types.Order) *MatchResult {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	res := &MatchResult{Order: order}
-
 	e.orderSeq++
 	order.SequenceNum = e.orderSeq
+
+	res := e.settle(order)
+	e.cascadeStops(res)
+	return res
+}
+
+// settle matches order and applies market/TIF resting rules. It assumes the
+// engine lock is held and the order's sequence number is already assigned.
+func (e *Engine) settle(order *types.Order) *MatchResult {
+	res := &MatchResult{Order: order}
 
 	trades, makerOrders := e.match(order)
 	res.Trades = trades
@@ -146,6 +161,49 @@ func (e *Engine) Process(order *types.Order) *MatchResult {
 	}
 
 	return res
+}
+
+// cascadeStops fires any stop orders whose trigger price the latest trade
+// reached, settling each and appending its trades to res. It repeats until no
+// new stops fire — a triggered stop's own trades may trigger further stops —
+// bounded by maxStopCascade.
+func (e *Engine) cascadeStops(res *MatchResult) {
+	for range maxStopCascade {
+		mp := e.book.LastTradePrice()
+		if !mp.IsPositive() {
+			return
+		}
+		fired := e.stopBook.CheckTriggers(mp)
+		if len(fired) == 0 {
+			return
+		}
+		for _, s := range fired {
+			r := e.settle(s.Order)
+			res.Trades = append(res.Trades, r.Trades...)
+		}
+	}
+}
+
+// ProcessStop submits a stop (or stop-limit) order. If the market has already
+// reached the stop it fires immediately; otherwise it rests off-book until a
+// trade reaches the trigger price.
+func (e *Engine) ProcessStop(stop *types.StopOrder) *MatchResult {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.orderSeq++
+	stop.Order.SequenceNum = e.orderSeq
+
+	if mp := e.book.LastTradePrice(); mp.IsPositive() && stop.ShouldTrigger(mp) {
+		stop.Trigger()
+		res := e.settle(stop.Order)
+		e.cascadeStops(res)
+		return res
+	}
+
+	stop.Order.Status = types.OrderStatusPendingTrigger
+	e.stopBook.Add(stop)
+	return &MatchResult{Order: stop.Order, Status: types.OrderStatusPendingTrigger}
 }
 
 // match crosses taker against the resting book by price–time priority. It
@@ -278,32 +336,48 @@ func (e *Engine) reverseTrade(tr *types.Trade, makerOrders map[string]*types.Ord
 	}
 }
 
-// Cancel removes a resting order if it belongs to userID and is still active.
+// Cancel removes a resting order (or a pending stop) if it belongs to userID and
+// is still active.
 func (e *Engine) Cancel(orderID, userID string) (*types.Order, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	order, exists := e.book.Get(orderID)
-	if !exists {
-		return nil, types.ErrOrderNotFound
+	if order, exists := e.book.Get(orderID); exists {
+		if order.UserID != userID {
+			return nil, types.ErrOrderNotFound
+		}
+		if !order.IsActive() {
+			return nil, types.ErrOrderNotActive
+		}
+		if err := order.Cancel(); err != nil {
+			return nil, err
+		}
+		_, _ = e.book.Remove(orderID)
+		return order, nil
 	}
-	if order.UserID != userID {
-		return nil, types.ErrOrderNotFound
+
+	if s, exists := e.stopBook.Get(orderID); exists {
+		if s.Order.UserID != userID {
+			return nil, types.ErrOrderNotFound
+		}
+		e.stopBook.Remove(orderID)
+		_ = s.Order.Cancel()
+		return s.Order, nil
 	}
-	if !order.IsActive() {
-		return nil, types.ErrOrderNotActive
-	}
-	if err := order.Cancel(); err != nil {
-		return nil, err
-	}
-	_, _ = e.book.Remove(orderID)
-	return order, nil
+
+	return nil, types.ErrOrderNotFound
 }
 
 // --- read-only accessors (delegate to the book) ---
 
 // Book returns the underlying order book (read model for signals/UI).
 func (e *Engine) Book() *orderbook.OrderBook { return e.book }
+
+// StopBook returns the underlying stop book.
+func (e *Engine) StopBook() *orderbook.StopBook { return e.stopBook }
+
+// PendingStopCount returns the number of resting stop orders.
+func (e *Engine) PendingStopCount() int { return e.stopBook.Count() }
 
 // BestBid returns the best bid price and aggregate quantity.
 func (e *Engine) BestBid() (price, qty decimal.Decimal, ok bool) { return e.book.BestBid() }
