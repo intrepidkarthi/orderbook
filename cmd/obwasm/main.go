@@ -14,9 +14,7 @@ import (
 	"encoding/json"
 	"syscall/js"
 
-	"github.com/intrepidkarthi/orderbook/pkg/backtest"
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
-	"github.com/intrepidkarthi/orderbook/pkg/strategy"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 	"github.com/shopspring/decimal"
 )
@@ -28,50 +26,7 @@ func main() {
 	js.Global().Set("obReset", js.FuncOf(reset))
 	js.Global().Set("obSubmit", js.FuncOf(submit))
 	js.Global().Set("obSnapshot", js.FuncOf(snapshot))
-	js.Global().Set("obBacktest", js.FuncOf(runBacktest))
 	select {} // keep the Go runtime alive for callbacks
-}
-
-// runBacktest(gamma, kappa, sigma, steps) runs an Avellaneda–Stoikov
-// market-making backtest and returns its scorecard plus downsampled PnL and
-// inventory paths as JSON.
-func runBacktest(_ js.Value, args []js.Value) any {
-	if len(args) < 3 {
-		return errJSON("runBacktest needs (gamma, kappa, sigma[, steps])")
-	}
-	as, err := strategy.NewAvellanedaStoikov(strategy.ASParams{
-		Gamma: args[0].Float(), Kappa: args[1].Float(), Sigma: args[2].Float(),
-	})
-	if err != nil {
-		return errJSON(err.Error())
-	}
-	steps := 3000
-	if len(args) > 3 && args[3].Type() == js.TypeNumber {
-		steps = args[3].Int()
-	}
-	r := backtest.Run(backtest.Config{
-		Symbol: "MM", Steps: steps, Seed: 1, InitialPrice: decimal.NewFromInt(100), Quoter: as,
-	})
-	return toJSON(map[string]any{
-		"fills":    r.Fills,
-		"finalPnL": r.FinalPnL,
-		"sharpe":   r.Sharpe,
-		"finalInv": r.FinalInventory.InexactFloat64(),
-		"maxInv":   r.MaxAbsInventory.InexactFloat64(),
-		"pnl":      downsample(r.PnL, 160),
-		"inv":      downsample(r.InventoryPath, 160),
-	})
-}
-
-func downsample(xs []float64, n int) []float64 {
-	if len(xs) <= n {
-		return xs
-	}
-	out := make([]float64, n)
-	for i := range out {
-		out[i] = xs[i*len(xs)/n]
-	}
-	return out
 }
 
 func reset(_ js.Value, args []js.Value) any {

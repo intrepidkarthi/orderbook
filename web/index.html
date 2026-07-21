@@ -3,120 +3,263 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>orderbook — live matching engine (WASM)</title>
-  <meta name="description" content="A limit order book & matching engine written in Go, compiled to WebAssembly and running live in your browser." />
+  <title>orderbook — a fast, embeddable limit order book &amp; matching engine in Go</title>
+  <meta name="description" content="A production-grade central limit order book and matching engine written in Go. Exact-decimal, deterministic, every real-world order type — and it runs live in your browser via WebAssembly." />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header>
-    <h1>📈 orderbook</h1>
-    <p class="tag">A Go matching engine compiled to <strong>WebAssembly</strong>, running live in your browser.
-      The same code you can <code>go get</code> is matching these orders.</p>
-  </header>
-
-  <nav class="scenes">
-    <button data-scene="book" class="scene-btn active">Live book</button>
-    <button data-scene="mm" class="scene-btn">Market maker</button>
-    <button data-scene="learn" class="scene-btn">Learn</button>
+  <nav class="nav">
+    <a class="brand" href="#top">📈 orderbook</a>
+    <div class="nav-links">
+      <a href="#what">What is it</a>
+      <a href="#basics">Order books</a>
+      <a href="#matching">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#production">Production</a>
+      <a href="#start">Get started</a>
+      <a class="nav-gh" href="https://github.com/intrepidkarthi/orderbook">GitHub ★</a>
+    </div>
   </nav>
 
-  <main id="scene-book">
-    <section class="panel book-panel">
-      <div class="book-head">
-        <span>PRICE</span><span>SIZE</span>
-      </div>
-      <div id="asks" class="side asks" aria-label="ask levels"></div>
-      <div class="spread-row">
-        <span id="spread">spread —</span>
-        <span id="mid">mid —</span>
-        <span id="last">last —</span>
-      </div>
-      <div id="bids" class="side bids" aria-label="bid levels"></div>
+  <header id="top" class="hero">
+    <span class="eyebrow">OPEN SOURCE · GO · MIT</span>
+    <h1>A limit order book &amp; matching engine,<br />built for production — in Go.</h1>
+    <p class="lede">
+      The piece of software at the heart of every exchange: it holds every buy and sell
+      order and matches them, fairly and fast. This one is <strong>embeddable</strong>,
+      uses <strong>exact decimals</strong> (never floats) for money, is fully
+      <strong>deterministic</strong>, and ships <strong>every order type real venues use</strong>.
+      The engine below is the real thing — compiled to WebAssembly, running in your browser.
+    </p>
+    <div class="hero-cta">
+      <a class="btn primary" href="#start">Get started</a>
+      <a class="btn" href="#features">See the features</a>
+      <a class="btn ghost" href="https://github.com/intrepidkarthi/orderbook">View source</a>
+    </div>
+    <div class="stat-row">
+      <div><b>&lt;1&nbsp;µs</b><span>best bid/ask read</span></div>
+      <div><b>~1.8M/s</b><span>order inserts / core</span></div>
+      <div><b>121</b><span>tests, race-checked</span></div>
+      <div><b>exact</b><span>decimal money</span></div>
+    </div>
+  </header>
 
-      <div class="imbalance">
-        <div class="imbalance-label">book imbalance
-          <span class="hint">(bid − ask) ⁄ (bid + ask) — buy vs sell pressure</span>
+  <main>
+    <!-- WHAT -->
+    <section id="what" class="sec">
+      <h2>What is this?</h2>
+      <p class="sec-lede">
+        <code>orderbook</code> is a Go library you drop into your own project to run a
+        <strong>central limit order book (CLOB)</strong> and <strong>matching engine</strong> —
+        the core of an exchange, a trading simulator, a game economy, or any system where
+        buyers and sellers meet at a price. It is a focused, dependency-light core you can
+        <code>go get</code> today, with a small, stable API.
+      </p>
+      <p class="sec-lede">
+        It’s not a hosted service or a full exchange (no accounts, custody, or settlement) —
+        it’s the <em>engine</em>. Everything you see on this page is powered by that exact engine.
+      </p>
+    </section>
+
+    <!-- BASICS -->
+    <section id="basics" class="sec">
+      <h2>First, what is an order book?</h2>
+      <p class="sec-lede">If you’ve never seen one, here it is from the ground up.</p>
+      <div class="two-col">
+        <div>
+          <ol class="explain">
+            <li><b>People post offers.</b> A <span class="g">bid</span> is a buy order (“I’ll buy 5 at 100”). An <span class="r">ask</span> is a sell order (“I’ll sell 3 at 101”).</li>
+            <li><b>They’re sorted by price.</b> Best <span class="g">bid</span> (highest a buyer will pay) and best <span class="r">ask</span> (lowest a seller will accept) sit in the middle. The gap between them is the <b>spread</b>.</li>
+            <li><b>Size at each price is depth.</b> Lots of size = a deep, liquid market that’s hard to move. Little size = thin, and prices swing.</li>
+            <li><b>That whole ladder is the order book</b> — a live list of everyone’s intentions, updating constantly. →</li>
+          </ol>
+          <p class="hint">The ladder on the right is a <strong>real</strong> book from this engine. Best bid/ask are highlighted; the spread is the gap in the middle.</p>
         </div>
-        <div class="meter"><div class="meter-mid"></div><div id="imbBar" class="meter-bar"></div></div>
-        <div id="imbVal" class="imbalance-val">0.00</div>
+        <div class="ob-panel">
+          <div class="ob-head"><span>PRICE</span><span>SIZE</span></div>
+          <div id="ladderAsks" class="ob-side"></div>
+          <div class="ob-mid"><span id="obSpread">spread —</span><span id="obMid">mid —</span></div>
+          <div id="ladderBids" class="ob-side"></div>
+        </div>
       </div>
     </section>
 
-    <section class="panel side-panel">
-      <div class="controls">
-        <button data-act="buyLimit" class="buy">Buy&nbsp;limit</button>
-        <button data-act="sellLimit" class="sell">Sell&nbsp;limit</button>
-        <button data-act="buyMarket" class="buy solid">Buy&nbsp;market</button>
-        <button data-act="sellMarket" class="sell solid">Sell&nbsp;market</button>
-        <button data-act="auto" id="autoBtn" class="ghost">▶ Auto flow</button>
-        <button data-act="reset" class="ghost">Reset</button>
-      </div>
-
-      <h2>Trade tape</h2>
-      <div id="tape" class="tape" aria-live="polite"></div>
-
-      <p class="note">
-        Market orders <em>take</em> liquidity (cross the spread); limit orders <em>rest</em> and
-        <em>make</em> it. Watch the imbalance lean before the price ticks — but remember it's a
-        <em>contemporaneous</em> read, not a forecast.
+    <!-- MATCHING -->
+    <section id="matching" class="sec">
+      <h2>How matching works</h2>
+      <p class="sec-lede">
+        When a new order can trade, the engine matches it by <b>price–time priority</b>:
+        best price first, and among equal prices, first-come-first-served. Walk through it —
+        each step runs on the real engine.
       </p>
+      <div class="two-col">
+        <div class="ob-panel">
+          <div class="ob-head"><span>PRICE</span><span>SIZE</span></div>
+          <div id="mAsks" class="ob-side"></div>
+          <div class="ob-mid"><span id="mSpread">spread —</span><span id="mLast">last —</span></div>
+          <div id="mBids" class="ob-side"></div>
+          <div id="mTape" class="tape"></div>
+        </div>
+        <div>
+          <div class="steps">
+            <button id="stepBtn" class="btn primary">▶ Start</button>
+            <button id="stepReset" class="btn ghost">Reset</button>
+          </div>
+          <p id="stepText" class="step-text">Press <b>Start</b> to build a book, rest an order, and send a market order that matches.</p>
+          <ul class="mini">
+            <li><b>Maker</b> — a limit order that rests and provides liquidity.</li>
+            <li><b>Taker</b> — a market/crossing order that removes it, paying the spread.</li>
+            <li>Trades print at the <b>maker’s</b> price. Big orders “walk the book” and pay more (slippage).</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- FEATURES -->
+    <section id="features" class="sec">
+      <h2>Everything it does</h2>
+      <p class="sec-lede">The order-type and market-integrity surface real venues ship — all in the core.</p>
+      <div class="feat-grid">
+        <div class="feat">
+          <h3>Order types</h3>
+          <ul>
+            <li>Market &amp; Limit</li>
+            <li>Stop &amp; Stop-limit</li>
+            <li>Iceberg (hidden reserve, auto-refill)</li>
+            <li>Post-only (maker-guaranteed)</li>
+            <li>Pegged (to bid / ask / mid + offset)</li>
+            <li>OCO / bracket (one-cancels-other)</li>
+            <li>Trailing stop</li>
+          </ul>
+        </div>
+        <div class="feat">
+          <h3>Matching &amp; priority</h3>
+          <ul>
+            <li>Price–time priority (FIFO)</li>
+            <li>Pro-rata allocation mode</li>
+            <li>Trades at the maker price</li>
+            <li>Self-trade prevention (4 modes)</li>
+            <li>Time-in-force: GTC · IOC · FOK</li>
+            <li>Call-auction uncross (open/close)</li>
+          </ul>
+        </div>
+        <div class="feat">
+          <h3>Market integrity</h3>
+          <ul>
+            <li>Circuit breakers (price-band collar)</li>
+            <li>Trading halt / resume</li>
+            <li>Stop-cascade protection</li>
+            <li>Spoofing / layering detection</li>
+            <li>Order-rate (quote-stuffing) limits</li>
+          </ul>
+        </div>
+        <div class="feat">
+          <h3>Market data</h3>
+          <ul>
+            <li>L1 top-of-book</li>
+            <li>L2 aggregated depth</li>
+            <li>L3 / MBO (order-by-order)</li>
+            <li>Snapshots + sequence numbers</li>
+            <li>Trade tape (time &amp; sales)</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- PRODUCTION -->
+    <section id="production" class="sec">
+      <h2>Why it’s production-grade</h2>
+      <div class="prod-grid">
+        <div class="prod">
+          <h3>💰 Money is never a float</h3>
+          <p>Prices and quantities are exact decimals (<code>shopspring/decimal</code>). No binary
+          rounding error creeping into balances — the single most important correctness decision.</p>
+        </div>
+        <div class="prod">
+          <h3>🎯 Deterministic &amp; replayable</h3>
+          <p>The same ordered input always produces byte-identical trades and state. No wall-clock
+          or RNG in the matching path — so you can record a session and replay it exactly (verified
+          by a record→replay→identical-digest test).</p>
+        </div>
+        <div class="prod">
+          <h3>⚡ Fast, with real numbers</h3>
+          <p>O(1) best bid/ask, O(log n) inserts via a map + binary-search price ladder.
+          Measured: <b>70&nbsp;ns</b> top-of-book reads, <b>~1.8M</b> inserts/s, <b>~646k</b>
+          match round-trips/s per core. Benchmarks run in CI.</p>
+        </div>
+        <div class="prod">
+          <h3>🧪 Tested hard</h3>
+          <p>121 tests under the race detector, plus invariant checks (the book never crosses,
+          quantity is conserved, FIFO holds). Green on every push.</p>
+        </div>
+        <div class="prod">
+          <h3>🧱 Embeddable &amp; layered</h3>
+          <p>The core (<code>types</code> · <code>orderbook</code> · <code>matching</code>) is
+          dependency-light and imports nothing above it. Drop it into your service; add only what
+          you need on top.</p>
+        </div>
+        <div class="prod">
+          <h3>⚙️ How it handles things</h3>
+          <p>Each side is a <code>map[price]→level</code> plus a sorted price ladder; each level is
+          a FIFO queue (that’s time priority). One writer per book keeps it correct; you scale
+          out across symbols. IDs and timestamps are injected where determinism requires it.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- START -->
+    <section id="start" class="sec">
+      <h2>Use it in your project</h2>
+      <div class="two-col start-col">
+        <div>
+          <p class="sec-lede">Install:</p>
+          <pre class="code"><code>go get github.com/intrepidkarthi/orderbook/pkg/matching</code></pre>
+          <p class="sec-lede">Create an engine, submit orders, read the book:</p>
+          <pre class="code"><code>eng := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
+
+// A resting sell (maker)
+ask, _ := types.NewOrder("alice", "BTC-USD", types.SideSell,
+    types.OrderTypeLimit, dec("30000"), dec("0.5"),
+    types.TIFGoodTillCancel)
+eng.Process(ask)
+
+// A crossing buy (taker) — trades against it
+bid, _ := types.NewOrder("bob", "BTC-USD", types.SideBuy,
+    types.OrderTypeLimit, dec("30000"), dec("0.3"),
+    types.TIFGoodTillCancel)
+res := eng.Process(bid)
+
+for _, t := range res.Trades {
+    fmt.Printf("%s @ %s\n", t.Quantity, t.Price) // 0.3 @ 30000
+}
+best, qty, _ := eng.BestAsk()                     // 30000 x 0.2 left</code></pre>
+        </div>
+        <div>
+          <p class="sec-lede">Runnable examples:</p>
+          <pre class="code"><code>go run ./examples/basic     # place &amp; match
+go run ./examples/signals   # book imbalance + OFI
+go run ./cmd/obdemo         # end-to-end demo</code></pre>
+          <p class="sec-lede">Docs:</p>
+          <ul class="doclist">
+            <li><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">Order books from scratch</a></li>
+            <li><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/SPEC.md">Design &amp; architecture</a></li>
+            <li><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCHMARKS.md">Benchmarks</a></li>
+            <li><a href="https://github.com/intrepidkarthi/orderbook">Source &amp; issues</a></li>
+          </ul>
+          <a class="btn primary wide" href="https://github.com/intrepidkarthi/orderbook">⭐ Star it on GitHub</a>
+        </div>
+      </div>
     </section>
   </main>
 
-  <section id="scene-mm" class="panel mm-panel" hidden>
-    <h2>Avellaneda–Stoikov market maker</h2>
-    <p class="note">A market-making backtest running the real Go strategy in WASM.
-      Tune the parameters and re-run. On benign uninformed flow the maker captures
-      spread while steering inventory back to flat — the honest baseline.</p>
+  <div id="loading" class="loading">loading the engine…</div>
 
-    <div class="sliders">
-      <label>γ <span class="lbl">risk aversion</span>
-        <input id="gamma" type="range" min="0.02" max="0.6" step="0.02" value="0.1">
-        <span id="gammaV" class="val">0.10</span></label>
-      <label>k <span class="lbl">arrival</span>
-        <input id="kappa" type="range" min="0.5" max="3" step="0.1" value="1.5">
-        <span id="kappaV" class="val">1.5</span></label>
-      <label>σ <span class="lbl">volatility</span>
-        <input id="sigma" type="range" min="0.1" max="0.6" step="0.05" value="0.3">
-        <span id="sigmaV" class="val">0.30</span></label>
-    </div>
-
-    <button id="runMM" class="buy solid">Run backtest</button>
-    <div id="scorecard" class="scorecard"></div>
-    <canvas id="mmChart" width="560" height="220"></canvas>
-    <p class="note"><strong>Top:</strong> mark-to-market PnL (gold, rising = spread
-      captured). <strong>Bottom:</strong> inventory (blue) oscillating around the
-      flat/zero line. Higher γ tightens inventory at the cost of fills.</p>
-  </section>
-
-  <section id="scene-learn" class="panel learn-panel" hidden>
-    <div class="learn-top">
-      <span class="learn-kicker">A VISUAL, INTERACTIVE GUIDE — powered by the real engine</span>
-      <div class="learn-tabs" id="learnTabs"></div>
-    </div>
-    <div class="learn-grid">
-      <div class="learn-viz">
-        <canvas id="learnCanvas" width="640" height="380" aria-label="visualization"></canvas>
-        <div id="learnControls" class="learn-controls"></div>
-      </div>
-      <aside class="learn-side">
-        <h3 id="learnTitle"></h3>
-        <p id="learnText" class="learn-text"></p>
-        <div id="learnInsight" class="learn-insight"></div>
-        <p class="note">Deep dive: <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">docs/LEARN.md</a></p>
-      </aside>
-    </div>
-  </section>
-
-  <div id="loading" class="loading">compiling WebAssembly…</div>
-
-  <footer>
-    <a href="https://github.com/intrepidkarthi/orderbook">source</a> ·
-    built in Go · MIT
+  <footer class="foot">
+    <span>Built in Go · MIT · the engine on this page is the same code you <code>go get</code></span>
+    <a href="https://github.com/intrepidkarthi/orderbook">github.com/intrepidkarthi/orderbook</a>
   </footer>
 
   <script src="wasm_exec.js"></script>
-  <script src="learn.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
