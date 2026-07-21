@@ -114,26 +114,37 @@ nothing above it. Full diagram in the [spec](docs/SPEC.md#3-architecture).
 
 ## Quickstart
 
-> Live API (`pkg/matching`, `pkg/types`). Also see `cmd/obdemo`, `cmd/obmm`
-> (Avellaneda–Stoikov backtest), `cmd/ofistudy`, and `cmd/surveil`.
+```sh
+go get github.com/intrepidkarthi/orderbook/pkg/matching
+```
 
 ```go
-import (
-    "github.com/intrepidkarthi/orderbook/pkg/matching"
-    "github.com/intrepidkarthi/orderbook/pkg/types"
-)
-
-eng := matching.NewEngine(matching.Config{Symbol: "BTC-USD"})
+eng := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
 
 order, _ := types.NewOrder("alice", "BTC-USD", types.SideBuy,
     types.OrderTypeLimit, dec("30000"), dec("0.5"), types.TIFGoodTillCancel)
 
-res := eng.Process(order)     // -> trades, status, remaining
-bid, qty, _ := eng.BestBid()
+res := eng.Process(order)          // -> trades, status, remaining
+bid, qty, ok := eng.BestBid()
 ```
 
-Research + demo entrypoints (`cmd/obdemo`, `cmd/obwasm`, `web/`) arrive on the
-[milestone schedule](docs/SPEC.md#10-milestones-each--one-or-more-small-commits).
+### Runnable examples & tools
+
+```sh
+go run ./examples/basic         # place two orders, watch them match
+go run ./examples/marketmaker   # backtest an Avellaneda–Stoikov maker
+go run ./examples/signals       # compute book imbalance + OFI
+
+go run ./cmd/obdemo             # end-to-end matching demo
+go run ./cmd/obmm               # AS market-making backtest + scorecard
+go run ./cmd/ofistudy           # the OFI contemporaneous-vs-predictive study
+go run ./cmd/l2capture          # LIVE OFI on real Coinbase data
+go run ./cmd/surveil            # spoofing / rate-limit surveillance
+```
+
+Advanced order types (stop, iceberg, post-only, OCO, pegged, trailing),
+self-trade prevention, circuit breakers, and pro-rata matching all live in
+`pkg/matching` — see [docs/SPEC.md §5](docs/SPEC.md#5-the-order-model-real-world-surface).
 
 ---
 
