@@ -72,7 +72,7 @@ library never depends on the research, simulation, or presentation layers.
 - 🧰 **Real-world order surface** — market, limit, stop/stop-limit, **iceberg/hidden**, **post-only**, **pegged**, **OCO/bracket**, trailing, auctions.
 - 🛡️ **Market integrity built in** — self-trade prevention, **spoofing/layering** detection, **stop-cascade** protection, rate/velocity limits.
 - 📊 **L1 / L2 / L3 (MBO)** market data — snapshots + incremental diffs with sequence numbers.
-- 🤖 **Market making** — an Avellaneda–Stoikov quoter with production adaptations (rolling σ/k, inventory bounds, adverse-selection add-on).
+- 💹 **Market making** — an Avellaneda–Stoikov quoter with production adaptations (rolling σ/k, inventory bounds, adverse-selection add-on).
 
 See the full design in **[docs/SPEC.md](docs/SPEC.md)**.
 
