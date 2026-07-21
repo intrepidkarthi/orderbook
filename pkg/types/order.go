@@ -52,6 +52,7 @@ const (
 	OrderStatusFilled          OrderStatus = "FILLED"
 	OrderStatusCancelled       OrderStatus = "CANCELLED"
 	OrderStatusRejected        OrderStatus = "REJECTED"
+	OrderStatusPendingTrigger  OrderStatus = "PENDING_TRIGGER" // resting stop, not yet fired
 )
 
 // Order is a single instruction to buy or sell a quantity of a symbol.
