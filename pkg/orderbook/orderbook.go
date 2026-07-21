@@ -2,10 +2,10 @@
 // price–time priority.
 //
 // Design (see docs/SPEC.md §6.2): each side keeps a map from price → *PriceLevel
-// for O(1) level lookup, plus a price-sorted slice of prices maintained with
-// binary-search insertion. Best bid/ask is therefore O(1); inserting a brand new
-// price level is O(log n) to find the slot plus O(n) to shift. Within a level,
-// orders form a FIFO queue, which is what gives time priority.
+// for O(1) level lookup, plus a price-sorted slice of prices. Each level holds
+// its resting orders in an intrusive doubly-linked FIFO list, and an
+// orderID → *node index gives O(1) cancellation of any order without scanning.
+// Best bid/ask is O(1).
 //
 // The book is safe for concurrent use, but it is intended to be driven by a
 // single writer (the matching engine); readers should prefer Snapshot.
@@ -19,41 +19,56 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// node is an order's entry in a price level's intrusive FIFO list. It also holds
+// a back-pointer to its level so cancellation is O(1) end to end.
+type node struct {
+	order *types.Order
+	prev  *node
+	next  *node
+	level *PriceLevel
+}
+
 // PriceLevel is the FIFO queue of resting orders at one price.
 type PriceLevel struct {
 	Price    decimal.Decimal
-	Orders   []*types.Order
 	TotalQty decimal.Decimal
+	head     *node // oldest order (front of the FIFO)
+	tail     *node // newest order
+	count    int
 }
 
-// Add appends an order to the back of the level (time priority) and grows the
-// aggregate quantity.
-func (pl *PriceLevel) Add(order *types.Order) {
-	pl.Orders = append(pl.Orders, order)
-	pl.TotalQty = pl.TotalQty.Add(order.RemainingQty)
-}
-
-// Remove drops an order by id, decrementing the aggregate quantity. Returns
-// whether the order was present.
-func (pl *PriceLevel) Remove(orderID string) bool {
-	for i, o := range pl.Orders {
-		if o.ID == orderID {
-			pl.TotalQty = pl.TotalQty.Sub(o.RemainingQty)
-			pl.Orders = append(pl.Orders[:i], pl.Orders[i+1:]...)
-			return true
-		}
+// push appends a node at the tail (time priority) and grows the aggregate.
+func (pl *PriceLevel) push(n *node) {
+	n.prev = pl.tail
+	n.next = nil
+	if pl.tail != nil {
+		pl.tail.next = n
+	} else {
+		pl.head = n
 	}
-	return false
+	pl.tail = n
+	pl.count++
+	pl.TotalQty = pl.TotalQty.Add(n.order.RemainingQty)
 }
 
-// reduceTotal decrements the aggregate quantity of the level by filledQty (used
-// when a resting order is partially filled in place).
-func (pl *PriceLevel) reduceTotal(filledQty decimal.Decimal) {
-	pl.TotalQty = pl.TotalQty.Sub(filledQty)
+// unlink removes a node in O(1) and decrements the aggregate.
+func (pl *PriceLevel) unlink(n *node) {
+	if n.prev != nil {
+		n.prev.next = n.next
+	} else {
+		pl.head = n.next
+	}
+	if n.next != nil {
+		n.next.prev = n.prev
+	} else {
+		pl.tail = n.prev
+	}
+	pl.count--
+	pl.TotalQty = pl.TotalQty.Sub(n.order.RemainingQty)
+	n.prev, n.next = nil, nil
 }
 
-// IsEmpty reports whether the level holds no orders.
-func (pl *PriceLevel) IsEmpty() bool { return len(pl.Orders) == 0 }
+func (pl *PriceLevel) isEmpty() bool { return pl.count == 0 }
 
 // OrderBook is a single-symbol CLOB.
 type OrderBook struct {
@@ -61,9 +76,9 @@ type OrderBook struct {
 	symbol         string
 	bids           map[string]*PriceLevel // price string -> level
 	asks           map[string]*PriceLevel
-	orders         map[string]*types.Order // orderID -> order
-	bidPrices      []decimal.Decimal       // sorted descending (best first)
-	askPrices      []decimal.Decimal       // sorted ascending (best first)
+	nodes          map[string]*node  // orderID -> node, for O(1) cancel
+	bidPrices      []decimal.Decimal // sorted descending (best first)
+	askPrices      []decimal.Decimal // sorted ascending (best first)
 	lastTradePrice decimal.Decimal
 	lastTradeTime  time.Time
 	sequenceNum    uint64
@@ -85,7 +100,7 @@ func New(config Config) *OrderBook {
 		symbol:    config.Symbol,
 		bids:      make(map[string]*PriceLevel),
 		asks:      make(map[string]*PriceLevel),
-		orders:    make(map[string]*types.Order),
+		nodes:     make(map[string]*node),
 		bidPrices: make([]decimal.Decimal, 0),
 		askPrices: make([]decimal.Decimal, 0),
 		maxOrders: config.MaxOrders,
@@ -101,77 +116,78 @@ func (ob *OrderBook) Add(order *types.Order) error {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 
-	if len(ob.orders) >= ob.maxOrders {
+	if len(ob.nodes) >= ob.maxOrders {
 		return types.ErrOrderBookFull
 	}
-	if _, exists := ob.orders[order.ID]; exists {
+	if _, exists := ob.nodes[order.ID]; exists {
 		return nil
 	}
 
 	ob.sequenceNum++
 	order.SequenceNum = ob.sequenceNum
-	ob.orders[order.ID] = order
 
 	priceStr := order.Price.String()
+	var level *PriceLevel
 	if order.Side == types.SideBuy {
-		level, ok := ob.bids[priceStr]
+		l, ok := ob.bids[priceStr]
 		if !ok {
-			level = &PriceLevel{Price: order.Price}
-			ob.bids[priceStr] = level
+			l = &PriceLevel{Price: order.Price}
+			ob.bids[priceStr] = l
 			ob.insertBidPrice(order.Price)
 		}
-		level.Add(order)
+		level = l
 	} else {
-		level, ok := ob.asks[priceStr]
+		l, ok := ob.asks[priceStr]
 		if !ok {
-			level = &PriceLevel{Price: order.Price}
-			ob.asks[priceStr] = level
+			l = &PriceLevel{Price: order.Price}
+			ob.asks[priceStr] = l
 			ob.insertAskPrice(order.Price)
 		}
-		level.Add(order)
+		level = l
 	}
+
+	n := &node{order: order, level: level}
+	level.push(n)
+	ob.nodes[order.ID] = n
 	return nil
 }
 
-// Remove deletes an order by id, cleaning up an emptied price level.
+// Remove deletes an order by id in O(1) (plus O(P) only when it empties its
+// level, which cleans up the price slice), and returns the order.
 func (ob *OrderBook) Remove(orderID string) (*types.Order, error) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 
-	order, exists := ob.orders[orderID]
+	n, exists := ob.nodes[orderID]
 	if !exists {
 		return nil, types.ErrOrderNotFound
 	}
+	level := n.level
+	level.unlink(n)
+	delete(ob.nodes, orderID)
 
-	priceStr := order.Price.String()
-	if order.Side == types.SideBuy {
-		if level, ok := ob.bids[priceStr]; ok {
-			level.Remove(orderID)
-			if level.IsEmpty() {
-				delete(ob.bids, priceStr)
-				ob.removeBidPrice(order.Price)
-			}
-		}
-	} else {
-		if level, ok := ob.asks[priceStr]; ok {
-			level.Remove(orderID)
-			if level.IsEmpty() {
-				delete(ob.asks, priceStr)
-				ob.removeAskPrice(order.Price)
-			}
+	if level.isEmpty() {
+		priceStr := n.order.Price.String()
+		if n.order.Side == types.SideBuy {
+			delete(ob.bids, priceStr)
+			ob.removeBidPrice(n.order.Price)
+		} else {
+			delete(ob.asks, priceStr)
+			ob.removeAskPrice(n.order.Price)
 		}
 	}
-
-	delete(ob.orders, orderID)
-	return order, nil
+	return n.order, nil
 }
 
 // Get returns a resting order by id.
 func (ob *OrderBook) Get(orderID string) (*types.Order, bool) {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
-	order, ok := ob.orders[orderID]
-	return order, ok
+	n, ok := ob.nodes[orderID]
+	if !ok {
+		return nil, false
+	}
+	return n.order, true
 }
 
 // BestBid returns the highest bid price and its aggregate quantity.
@@ -197,8 +213,7 @@ func (ob *OrderBook) BestAsk() (price, qty decimal.Decimal, ok bool) {
 }
 
 // PeekBestBidOrder returns the front (oldest) order at the best bid without
-// removing it, or nil. Optimized for the matching hot path — callers inside the
-// engine already hold the appropriate lock context.
+// removing it, or nil.
 func (ob *OrderBook) PeekBestBidOrder() *types.Order {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
@@ -206,10 +221,10 @@ func (ob *OrderBook) PeekBestBidOrder() *types.Order {
 		return nil
 	}
 	level := ob.bids[ob.bidPrices[0].String()]
-	if level == nil || len(level.Orders) == 0 {
+	if level == nil || level.head == nil {
 		return nil
 	}
-	return level.Orders[0]
+	return level.head.order
 }
 
 // PeekBestAskOrder returns the front (oldest) order at the best ask without
@@ -221,10 +236,10 @@ func (ob *OrderBook) PeekBestAskOrder() *types.Order {
 		return nil
 	}
 	level := ob.asks[ob.askPrices[0].String()]
-	if level == nil || len(level.Orders) == 0 {
+	if level == nil || level.head == nil {
 		return nil
 	}
-	return level.Orders[0]
+	return level.head.order
 }
 
 // Spread returns best ask − best bid, or ok=false if either side is empty.
@@ -299,52 +314,30 @@ func (ob *OrderBook) GetOrdersAtPrice(side types.Side, price decimal.Decimal) []
 	if level == nil {
 		return nil
 	}
-	out := make([]*types.Order, len(level.Orders))
-	copy(out, level.Orders)
+	out := make([]*types.Order, 0, level.count)
+	for n := level.head; n != nil; n = n.next {
+		out = append(out, n.order)
+	}
 	return out
 }
 
 // UpdateOrderQuantity decrements the aggregate quantity at a resting order's
-// level after that order is partially filled in place.
+// level after that order is partially filled in place. O(1).
 func (ob *OrderBook) UpdateOrderQuantity(orderID string, filledQty decimal.Decimal) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
-	order, ok := ob.orders[orderID]
-	if !ok {
-		return
-	}
-	priceStr := order.Price.String()
-	if order.Side == types.SideBuy {
-		if level, ok := ob.bids[priceStr]; ok {
-			level.reduceTotal(filledQty)
-		}
-	} else {
-		if level, ok := ob.asks[priceStr]; ok {
-			level.reduceTotal(filledQty)
-		}
+	if n, ok := ob.nodes[orderID]; ok {
+		n.level.TotalQty = n.level.TotalQty.Sub(filledQty)
 	}
 }
 
 // RestoreOrderQuantity adds qty back to the aggregate total at a resting order's
-// level, undoing a prior UpdateOrderQuantity. Used by the matching engine to
-// unwind partial fills against a still-resting maker when a Fill-or-Kill order
-// cannot be completed (see matching.Engine.reverseTrade).
+// level, undoing a prior UpdateOrderQuantity (used by FOK reversal). O(1).
 func (ob *OrderBook) RestoreOrderQuantity(orderID string, qty decimal.Decimal) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
-	order, ok := ob.orders[orderID]
-	if !ok {
-		return
-	}
-	priceStr := order.Price.String()
-	if order.Side == types.SideBuy {
-		if level, ok := ob.bids[priceStr]; ok {
-			level.TotalQty = level.TotalQty.Add(qty)
-		}
-	} else {
-		if level, ok := ob.asks[priceStr]; ok {
-			level.TotalQty = level.TotalQty.Add(qty)
-		}
+	if n, ok := ob.nodes[orderID]; ok {
+		n.level.TotalQty = n.level.TotalQty.Add(qty)
 	}
 }
 
@@ -352,7 +345,7 @@ func (ob *OrderBook) RestoreOrderQuantity(orderID string, qty decimal.Decimal) {
 func (ob *OrderBook) Count() int {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
-	return len(ob.orders)
+	return len(ob.nodes)
 }
 
 // insertBidPrice inserts price into the descending-sorted bid price slice.
@@ -451,13 +444,13 @@ func (ob *OrderBook) SnapshotL3(depth int) *SnapshotL3 {
 	appendSide := func(prices []decimal.Decimal, levels map[string]*PriceLevel) []L3Order {
 		out := make([]L3Order, 0, depth)
 		for i := 0; i < len(prices) && i < depth; i++ {
-			for _, o := range levels[prices[i].String()].Orders {
+			for n := levels[prices[i].String()].head; n != nil; n = n.next {
 				out = append(out, L3Order{
-					OrderID:     o.ID,
-					UserID:      o.UserID,
-					Price:       o.Price,
-					Quantity:    o.RemainingQty,
-					SequenceNum: o.SequenceNum,
+					OrderID:     n.order.ID,
+					UserID:      n.order.UserID,
+					Price:       n.order.Price,
+					Quantity:    n.order.RemainingQty,
+					SequenceNum: n.order.SequenceNum,
 				})
 			}
 		}
