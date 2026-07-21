@@ -1,0 +1,79 @@
+package orderbook
+
+import (
+	"sort"
+	"sync"
+
+	"github.com/intrepidkarthi/orderbook/pkg/types"
+	"github.com/shopspring/decimal"
+)
+
+// StopBook holds resting stop orders off the main book until their trigger price
+// is reached. It is driven by the matching engine, which feeds it the latest
+// trade price after every match.
+type StopBook struct {
+	mu     sync.RWMutex
+	symbol string
+	orders map[string]*types.StopOrder // keyed by underlying order id
+}
+
+// NewStopBook returns an empty stop book.
+func NewStopBook(symbol string) *StopBook {
+	return &StopBook{symbol: symbol, orders: make(map[string]*types.StopOrder)}
+}
+
+// Add stores a pending stop order.
+func (sb *StopBook) Add(s *types.StopOrder) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	sb.orders[s.Order.ID] = s
+}
+
+// Remove deletes a pending stop by underlying order id.
+func (sb *StopBook) Remove(id string) bool {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	if _, ok := sb.orders[id]; ok {
+		delete(sb.orders, id)
+		return true
+	}
+	return false
+}
+
+// Get returns a pending stop by underlying order id.
+func (sb *StopBook) Get(id string) (*types.StopOrder, bool) {
+	sb.mu.RLock()
+	defer sb.mu.RUnlock()
+	s, ok := sb.orders[id]
+	return s, ok
+}
+
+// Count returns the number of pending stops.
+func (sb *StopBook) Count() int {
+	sb.mu.RLock()
+	defer sb.mu.RUnlock()
+	return len(sb.orders)
+}
+
+// CheckTriggers returns the stops that fire at marketPrice, in deterministic
+// order (by underlying sequence number), marking them triggered and removing
+// them from the book. Map iteration order is not relied upon.
+func (sb *StopBook) CheckTriggers(marketPrice decimal.Decimal) []*types.StopOrder {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
+	var fired []*types.StopOrder
+	for _, s := range sb.orders {
+		if s.ShouldTrigger(marketPrice) {
+			fired = append(fired, s)
+		}
+	}
+	sort.Slice(fired, func(i, j int) bool {
+		return fired[i].Order.SequenceNum < fired[j].Order.SequenceNum
+	})
+	for _, s := range fired {
+		s.Trigger()
+		delete(sb.orders, s.Order.ID)
+	}
+	return fired
+}
