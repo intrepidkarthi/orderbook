@@ -40,9 +40,11 @@
 
 > 🟢 **Live.** The engine, the research experiments, and an **animated
 > [in-browser demo](https://intrepidkarthi.github.io/orderbook/)** (Go compiled to
-> WASM) are all shipping. Done so far: core engine (M1) → OFI/imbalance signals
-> (M2) → deterministic simulator (M3) → Avellaneda–Stoikov + backtest (M4) → the
-> OFI study (M5) → advanced order types (M6) → surveillance (M7) → WASM demo (M9).
+> WASM) are all shipping. The whole roadmap is done: core engine (M1) →
+> OFI/imbalance signals (M2) → deterministic simulator (M3) → Avellaneda–Stoikov +
+> backtest (M4) → the OFI study (M5) → advanced order types (M6) → surveillance
+> (M7) → auctions + circuit breakers + pro-rata (M8) → WASM demo + market-maker
+> scene (M9/M10) → benchmarks + L3 (M11).
 > See the [milestones](docs/SPEC.md#10-milestones-each--one-or-more-small-commits).
 
 ---
@@ -131,9 +133,10 @@ Research + demo entrypoints (`cmd/obdemo`, `cmd/obwasm`, `web/`) arrive on the
 
 `M0` spec ✅ · `M1` core engine ✅ · `M2` OFI signals ✅ · `M3` simulator + replay ✅ ·
 `M4` Avellaneda–Stoikov + backtest ✅ · `M5` OFI study ✅ · `M6` advanced order
-types ✅ · `M7` surveillance ✅ · `M8` auctions + circuit breakers · `M9` WASM
-demo + Pages ✅ · `M10` demo scenes 5–8 · `M11` perf + L3. Details in the
-[spec](docs/SPEC.md#10-milestones-each--one-or-more-small-commits).
+types ✅ · `M7` surveillance ✅ · `M8` auctions + circuit breakers + pro-rata ✅ ·
+`M9` WASM demo + Pages ✅ · `M10` market-maker demo scene ✅ · `M11` benchmarks +
+L3 ✅. The full roadmap is shipped (int-tick fast path noted as future). Details
+in the [spec](docs/SPEC.md#10-milestones-each--one-or-more-small-commits).
 
 ---
 
