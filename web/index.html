@@ -16,6 +16,7 @@
       <a href="#matching">How it works</a>
       <a href="#features">Features</a>
       <a href="#production">Production</a>
+      <a href="docs.html">Docs</a>
       <a href="#start">Get started</a>
       <a class="nav-gh" href="https://github.com/intrepidkarthi/orderbook">GitHub ★</a>
     </div>
@@ -171,35 +172,35 @@
       <h2>Why it’s production-grade</h2>
       <div class="prod-grid">
         <div class="prod">
-          <h3>💰 Money is never a float</h3>
+          <h3>Money is never a float</h3>
           <p>Prices and quantities are exact decimals (<code>shopspring/decimal</code>). No binary
           rounding error creeping into balances — the single most important correctness decision.</p>
         </div>
         <div class="prod">
-          <h3>🎯 Deterministic &amp; replayable</h3>
+          <h3>Deterministic &amp; replayable</h3>
           <p>The same ordered input always produces byte-identical trades and state. No wall-clock
           or RNG in the matching path — so you can record a session and replay it exactly (verified
           by a record→replay→identical-digest test).</p>
         </div>
         <div class="prod">
-          <h3>⚡ Fast, with real numbers</h3>
+          <h3>Fast, with real numbers</h3>
           <p>O(1) best bid/ask, O(log n) inserts via a map + binary-search price ladder.
           Measured: <b>70&nbsp;ns</b> top-of-book reads, <b>~1.8M</b> inserts/s, <b>~646k</b>
           match round-trips/s per core. Benchmarks run in CI.</p>
         </div>
         <div class="prod">
-          <h3>🧪 Tested hard</h3>
+          <h3>Tested hard</h3>
           <p>121 tests under the race detector, plus invariant checks (the book never crosses,
           quantity is conserved, FIFO holds). Green on every push.</p>
         </div>
         <div class="prod">
-          <h3>🧱 Embeddable &amp; layered</h3>
+          <h3>Embeddable &amp; layered</h3>
           <p>The core (<code>types</code> · <code>orderbook</code> · <code>matching</code>) is
           dependency-light and imports nothing above it. Drop it into your service; add only what
           you need on top.</p>
         </div>
         <div class="prod">
-          <h3>⚙️ How it handles things</h3>
+          <h3>How it handles things</h3>
           <p>Each side is a <code>map[price]→level</code> plus a sorted price ladder; each level is
           a FIFO queue (that’s time priority). One writer per book keeps it correct; you scale
           out across symbols. IDs and timestamps are injected where determinism requires it.</p>
@@ -241,9 +242,9 @@ go run ./examples/signals   # book imbalance + OFI
 go run ./cmd/obdemo         # end-to-end demo</code></pre>
           <p class="sec-lede">Docs:</p>
           <ul class="doclist">
+            <li><a href="docs.html">Documentation</a> — design, internals, features, benchmarks</li>
+            <li><a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">API reference</a> — pkg.go.dev</li>
             <li><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">Order books from scratch</a></li>
-            <li><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/SPEC.md">Design &amp; architecture</a></li>
-            <li><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCHMARKS.md">Benchmarks</a></li>
             <li><a href="https://github.com/intrepidkarthi/orderbook">Source &amp; issues</a></li>
           </ul>
           <a class="btn primary wide" href="https://github.com/intrepidkarthi/orderbook">⭐ Star it on GitHub</a>

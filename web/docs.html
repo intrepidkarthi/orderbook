@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Documentation — orderbook</title>
+  <meta name="description" content="Design, architecture, internals, order types, matching, market data, integrity, and performance of the orderbook engine." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="docs-body">
+  <header class="docs-top">
+    <a class="brand" href="./">orderbook</a>
+    <nav class="docs-toplinks">
+      <a href="./">Home</a>
+      <a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">API reference ↗</a>
+      <a href="https://github.com/intrepidkarthi/orderbook">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="docs">
+    <aside class="docs-nav">
+      <nav>
+        <span class="docs-nav-title">Documentation</span>
+        <a href="#overview">Overview</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#internals">Order book internals</a>
+        <a href="#order-types">Order types</a>
+        <a href="#matching">Matching</a>
+        <a href="#market-data">Market data</a>
+        <a href="#integrity">Market integrity</a>
+        <a href="#performance">Performance</a>
+        <a href="#start">Getting started</a>
+      </nav>
+    </aside>
+
+    <main class="docs-main">
+      <section id="overview">
+        <h1>Documentation</h1>
+        <p><code>orderbook</code> is a Go library for running a central limit order book
+        (CLOB) and matching engine — the core of an exchange, a trading simulator, or any
+        system where buyers and sellers meet at a price. It is embeddable, uses exact
+        decimals for money (never floats), is deterministic, and ships the order types real
+        venues use.</p>
+        <pre class="code"><code>go get github.com/intrepidkarthi/orderbook/pkg/matching@v0.1.0</code></pre>
+        <p>New to order books? Start with the <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">from-scratch guide</a>.
+        For the full API, see <a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">pkg.go.dev</a>.</p>
+      </section>
+
+      <section id="architecture">
+        <h2>Architecture</h2>
+        <p>The project follows one rule: <b>strict downward layering</b>. The core library
+        depends on nothing above it; research, simulation, strategy, surveillance, and the
+        web demo build on top of it. This keeps the core lean and importable on its own.</p>
+        <pre class="diagram"><code>apps / web / examples         (consume everything below)
+backtest · strategy · sim
+signals · marketdata
+surveillance · auction
+─────────── CORE ───────────
+matching   (engine)
+orderbook  (book + market data)
+types      (Order, Trade, errors)</code></pre>
+        <p>Dependencies flow one direction only — downward. You import just the layers you
+        need; most consumers use only <code>pkg/types</code>, <code>pkg/orderbook</code>, and
+        <code>pkg/matching</code>.</p>
+      </section>
+
+      <section id="internals">
+        <h2>Order book internals</h2>
+        <h3>Data structure</h3>
+        <p>Each side of the book is a <code>map[price]→level</code> for O(1) level lookup,
+        plus a price-sorted slice maintained by binary-search insertion. Reading the best
+        price is O(1); inserting a brand-new price level is O(log n) to find its slot. Each
+        level is a FIFO queue of orders — which is what gives time priority.</p>
+
+        <h3>Price–time priority</h3>
+        <p>An incoming order matches against the best price first; among orders at the same
+        price, first-come-first-served (the FIFO queue). Trades always print at the resting
+        (maker) order's price.</p>
+
+        <h3>Exact-decimal money</h3>
+        <p>Prices and quantities are <code>shopspring/decimal</code>, never floats. Binary
+        floating point silently accumulates rounding error on money; this engine does not.
+        It is the single most important correctness decision, and the main allocation cost on
+        the hot path — an <code>int64</code> fixed-point fast path behind the same interface
+        is a documented future optimization.</p>
+
+        <h3>Determinism</h3>
+        <p>Given the same ordered input stream, the engine produces byte-identical trades and
+        book state. There is no wall-clock or RNG in the matching path; anything that must be
+        reproducible (timestamps, ids) is injected. This is what makes record→replay and
+        golden-file tests possible — a recorded session replays to an identical trade digest.</p>
+
+        <h3>Concurrency</h3>
+        <p>One writer per book, guarded by a mutex; readers take snapshots. A single book is
+        inherently sequential at the match point, so you scale out <em>across symbols</em>
+        (one book/goroutine per symbol), not by parallelizing one book.</p>
+      </section>
+
+      <section id="order-types">
+        <h2>Order types</h2>
+        <table class="tbl">
+          <thead><tr><th>Type</th><th>Behavior</th></tr></thead>
+          <tbody>
+            <tr><td>Market</td><td>Takes liquidity immediately; may sweep several levels.</td></tr>
+            <tr><td>Limit</td><td>Rests at a price or better; can be a maker.</td></tr>
+            <tr><td>Stop / Stop-limit</td><td>Dormant until the market reaches a trigger price, then fires as a market/limit order.</td></tr>
+            <tr><td>Iceberg</td><td>Shows only a display slice; the hidden reserve auto-refills as it fills.</td></tr>
+            <tr><td>Post-only</td><td>Maker-only — rejected if it would cross the spread and take.</td></tr>
+            <tr><td>Pegged</td><td>Price derived from a reference (bid / ask / mid) plus a signed offset.</td></tr>
+            <tr><td>OCO / bracket</td><td>Two linked orders; one completing cancels the other.</td></tr>
+            <tr><td>Trailing stop</td><td>A stop that ratchets with the market by a fixed trail and never retreats.</td></tr>
+          </tbody>
+        </table>
+        <p><b>Time-in-force:</b> GTC (rest until cancelled), IOC (fill now, cancel the rest),
+        FOK (fill entirely now or cancel all).</p>
+      </section>
+
+      <section id="matching">
+        <h2>Matching</h2>
+        <p>An incoming order crosses the resting book by price–time priority until it is
+        filled or the book stops crossing. The resting side is the <b>maker</b>; the crossing
+        order is the <b>taker</b>. Trades print at the maker's price, so a large taker "walks
+        the book" and pays a worse average price (slippage).</p>
+
+        <h3>Self-trade prevention</h3>
+        <p>When an order would match the same user's resting order, one of four modes applies:
+        cancel-newest (default), cancel-oldest, cancel-both, or allow.</p>
+
+        <h3>Pro-rata</h3>
+        <p>An optional per-engine mode. At each price level, an incoming order's quantity is
+        allocated in proportion to resting size instead of strictly FIFO, with the rounding
+        remainder distributed so allocations sum exactly.</p>
+
+        <h3>Auctions</h3>
+        <p>A call-auction uncross computes the single clearing price that maximizes matched
+        volume across resting bids and asks — the mechanism behind opening and closing
+        auctions, where orders accumulate and cross once at a common price.</p>
+      </section>
+
+      <section id="market-data">
+        <h2>Market data</h2>
+        <p>Three granularities of book view:</p>
+        <ul>
+          <li><b>L1</b> — top of book (best bid/ask and sizes).</li>
+          <li><b>L2</b> — aggregated size per price level.</li>
+          <li><b>L3 / MBO</b> — every resting order individually, price-then-time ordered.</li>
+        </ul>
+        <p>Snapshots carry a monotonic sequence number for gap detection, and executions are
+        available as a trade tape (time &amp; sales).</p>
+      </section>
+
+      <section id="integrity">
+        <h2>Market integrity</h2>
+        <p>Controls that keep a venue orderly, in the core and in a surveillance layer above it:</p>
+        <ul>
+          <li><b>Circuit breakers</b> — a price-band collar rejects limit orders priced beyond ±band from the last trade; trading can be halted and resumed.</li>
+          <li><b>Stop-cascade protection</b> — triggered stops chain in a bounded cascade rather than an unbounded loop.</li>
+          <li><b>Surveillance</b> — spoofing/layering detection (large orders cancelled unfilled soon after placement) and order-rate limits (quote-stuffing).</li>
+        </ul>
+      </section>
+
+      <section id="performance">
+        <h2>Performance</h2>
+        <p>Core microbenchmarks (Apple M-series, Go 1.23, single-threaded). Reproduce with
+        <code>make bench</code>; CI runs them on every push.</p>
+        <table class="tbl">
+          <thead><tr><th>Operation</th><th>ns/op</th><th>~ops/sec</th></tr></thead>
+          <tbody>
+            <tr><td>Best bid/ask read</td><td>70</td><td>~14 M</td></tr>
+            <tr><td>Book insert</td><td>401</td><td>~2.5 M</td></tr>
+            <tr><td>Full-engine insert</td><td>561</td><td>~1.8 M</td></tr>
+            <tr><td>Match round-trip</td><td>1548</td><td>~646 K</td></tr>
+          </tbody>
+        </table>
+        <p>Full methodology in <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a>.</p>
+      </section>
+
+      <section id="start">
+        <h2>Getting started</h2>
+        <pre class="code"><code>go get github.com/intrepidkarthi/orderbook/pkg/matching@v0.1.0</code></pre>
+        <pre class="code"><code>eng := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
+
+// A resting sell (maker)
+ask, _ := types.NewOrder("alice", "BTC-USD", types.SideSell,
+    types.OrderTypeLimit, dec("30000"), dec("0.5"),
+    types.TIFGoodTillCancel)
+eng.Process(ask)
+
+// A crossing buy (taker) — trades against it
+bid, _ := types.NewOrder("bob", "BTC-USD", types.SideBuy,
+    types.OrderTypeLimit, dec("30000"), dec("0.3"),
+    types.TIFGoodTillCancel)
+res := eng.Process(bid)
+
+for _, t := range res.Trades {
+    fmt.Printf("%s @ %s\n", t.Quantity, t.Price)   // 0.3 @ 30000
+}</code></pre>
+        <p>Runnable examples: <code>go run ./examples/basic</code>,
+        <code>./examples/signals</code>, <code>./cmd/obdemo</code>.
+        Full API on <a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">pkg.go.dev</a>.</p>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    // Highlight the current section in the sidebar as you scroll.
+    const links = [...document.querySelectorAll(".docs-nav a")];
+    const map = new Map(links.map((a) => [a.getAttribute("href").slice(1), a]));
+    const obs = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            links.forEach((a) => a.classList.remove("on"));
+            const a = map.get(e.target.id);
+            if (a) a.classList.add("on");
+          }
+        });
+      },
+      { rootMargin: "-10% 0px -80% 0px" }
+    );
+    document.querySelectorAll(".docs-main section").forEach((s) => obs.observe(s));
+  </script>
+</body>
+</html>
