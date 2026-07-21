@@ -14,7 +14,12 @@
       The same code you can <code>go get</code> is matching these orders.</p>
   </header>
 
-  <main>
+  <nav class="scenes">
+    <button data-scene="book" class="scene-btn active">Live book</button>
+    <button data-scene="mm" class="scene-btn">Market maker</button>
+  </nav>
+
+  <main id="scene-book">
     <section class="panel book-panel">
       <div class="book-head">
         <span>PRICE</span><span>SIZE</span>
@@ -56,6 +61,32 @@
       </p>
     </section>
   </main>
+
+  <section id="scene-mm" class="panel mm-panel" hidden>
+    <h2>Avellaneda–Stoikov market maker</h2>
+    <p class="note">A market-making backtest running the real Go strategy in WASM.
+      Tune the parameters and re-run. On benign uninformed flow the maker captures
+      spread while steering inventory back to flat — the honest baseline.</p>
+
+    <div class="sliders">
+      <label>γ <span class="lbl">risk aversion</span>
+        <input id="gamma" type="range" min="0.02" max="0.6" step="0.02" value="0.1">
+        <span id="gammaV" class="val">0.10</span></label>
+      <label>k <span class="lbl">arrival</span>
+        <input id="kappa" type="range" min="0.5" max="3" step="0.1" value="1.5">
+        <span id="kappaV" class="val">1.5</span></label>
+      <label>σ <span class="lbl">volatility</span>
+        <input id="sigma" type="range" min="0.1" max="0.6" step="0.05" value="0.3">
+        <span id="sigmaV" class="val">0.30</span></label>
+    </div>
+
+    <button id="runMM" class="buy solid">Run backtest</button>
+    <div id="scorecard" class="scorecard"></div>
+    <canvas id="mmChart" width="560" height="220"></canvas>
+    <p class="note"><strong>Top:</strong> mark-to-market PnL (gold, rising = spread
+      captured). <strong>Bottom:</strong> inventory (blue) oscillating around the
+      flat/zero line. Higher γ tightens inventory at the cost of fills.</p>
+  </section>
 
   <div id="loading" class="loading">compiling WebAssembly…</div>
 

@@ -83,6 +83,24 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: v
 .tape .t.buy { color: var(--bid); } .tape .t.sell { color: var(--ask); }
 @keyframes tapein { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; } }
 
+/* scene nav */
+.scenes { display: flex; gap: 6px; margin-bottom: 14px; }
+.scene-btn { font-size: 13px; }
+.scene-btn.active { border-color: var(--gold); color: var(--gold); }
+
+/* market-maker scene */
+.mm-panel { max-width: 640px; }
+.sliders { display: grid; gap: 12px; margin: 16px 0; }
+.sliders label { display: grid; grid-template-columns: 24px 90px 1fr 48px; align-items: center; gap: 10px; font-variant-numeric: tabular-nums; }
+.sliders .lbl { color: var(--muted); font-size: 12px; }
+.sliders .val { text-align: right; color: var(--gold); }
+.sliders input[type=range] { width: 100%; accent-color: var(--gold); }
+.scorecard { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 14px 0; }
+.scorecard div { background: var(--line); border-radius: 8px; padding: 8px 10px; }
+.scorecard span { display: block; color: var(--muted); font-size: 11px; }
+.scorecard b { font-size: 18px; font-variant-numeric: tabular-nums; }
+#mmChart { width: 100%; height: auto; background: var(--line); border-radius: 8px; margin-top: 8px; }
+
 .note { color: var(--muted); font-size: 12.5px; margin-top: 16px; }
 .loading { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg); color: var(--muted); z-index: 10; }
 .loading.done { display: none; }
