@@ -165,7 +165,8 @@ Two things the internet usually skips:
 ## Where to go next
 
 - **Run it:** `go run ./cmd/obdemo` (matching), `./cmd/obmm` (market maker),
-  `./cmd/ofistudy` (the OFI experiment), `./cmd/surveil` (spoofing detection).
+  `./cmd/ofistudy` (the OFI experiment on simulated data), `./cmd/l2capture`
+  (**live** OFI on real Coinbase data), `./cmd/surveil` (spoofing detection).
 - **Read the design:** [SPEC.md](SPEC.md).
 - **The research agenda:** [research-roadmap.md](research-roadmap.md).
 - **Play:** the [live demo](https://intrepidkarthi.github.io/orderbook/).

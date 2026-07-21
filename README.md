@@ -141,8 +141,10 @@ Research + demo entrypoints (`cmd/obdemo`, `cmd/obwasm`, `web/`) arrive on the
 
 | Doc | What's inside |
 |-----|---------------|
+| 🎓 **[LEARN.md](docs/LEARN.md)** | Order books & market making from scratch — no finance background needed. |
 | 📐 **[SPEC.md](docs/SPEC.md)** | Architecture, the real-world order model, core design decisions, performance targets, milestones. |
 | 🔬 **[research-roadmap.md](docs/research-roadmap.md)** | OFI, Kyle's λ, Avellaneda–Stoikov, delta/CVD — each as implementation → experiment → honest write-up. |
+| ⚡ **[BENCHMARKS.md](docs/BENCHMARKS.md)** | Core-library performance, methodology, and how to reproduce. |
 | 🎬 **[DEMO-SPEC.md](docs/DEMO-SPEC.md)** | The animated, WASM-powered explainer: architecture, hosting, and the full scene storyboard. |
 
 ---
