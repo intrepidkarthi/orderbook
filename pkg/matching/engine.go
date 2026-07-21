@@ -65,6 +65,7 @@ type Engine struct {
 	book          *orderbook.OrderBook
 	stopBook      *orderbook.StopBook
 	icebergOrders map[string]*types.IcebergOrder
+	ocoByOrderID  map[string]*types.OCOOrder // both legs' ids map to the pair
 	orderSeq      uint64
 	tradeSeq      uint64
 }
@@ -86,6 +87,7 @@ func NewEngine(config Config) *Engine {
 		}),
 		stopBook:      orderbook.NewStopBook(config.Symbol),
 		icebergOrders: make(map[string]*types.IcebergOrder),
+		ocoByOrderID:  make(map[string]*types.OCOOrder),
 	}
 }
 
@@ -188,6 +190,8 @@ func (e *Engine) cascadeStops(res *MatchResult) {
 			return
 		}
 		for _, s := range fired {
+			// If this stop is an OCO leg, cancel its primary before it executes.
+			e.cancelOCOCounterpart(s.Order.ID)
 			r := e.settle(s.Order)
 			res.Trades = append(res.Trades, r.Trades...)
 		}
@@ -200,7 +204,12 @@ func (e *Engine) cascadeStops(res *MatchResult) {
 func (e *Engine) ProcessStop(stop *types.StopOrder) *MatchResult {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.submitStopLocked(stop)
+}
 
+// submitStopLocked is the body of ProcessStop; it assumes the engine lock is
+// held so it can be reused by ProcessOCO.
+func (e *Engine) submitStopLocked(stop *types.StopOrder) *MatchResult {
 	e.orderSeq++
 	stop.Order.SequenceNum = e.orderSeq
 
@@ -214,6 +223,63 @@ func (e *Engine) ProcessStop(stop *types.StopOrder) *MatchResult {
 	stop.Order.Status = types.OrderStatusPendingTrigger
 	e.stopBook.Add(stop)
 	return &MatchResult{Order: stop.Order, Status: types.OrderStatusPendingTrigger}
+}
+
+// ProcessOCO submits a one-cancels-other pair: the primary limit is posted, and
+// if it does not complete immediately the stop is posted too. Whichever leg
+// completes first cancels the other (handled in match/cascadeStops via the OCO
+// registry).
+func (e *Engine) ProcessOCO(oco *types.OCOOrder) *MatchResult {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.ocoByOrderID[oco.Primary.ID] = oco
+	e.ocoByOrderID[oco.Stop.Order.ID] = oco
+
+	e.orderSeq++
+	oco.Primary.SequenceNum = e.orderSeq
+	res := e.settle(oco.Primary)
+	e.cascadeStops(res)
+
+	// Primary already done ⇒ the stop is never posted.
+	if oco.Primary.IsFilled() {
+		e.dropOCO(oco)
+		return res
+	}
+
+	// Otherwise post the stop; if it fires on entry, cancel the resting primary.
+	e.submitStopLocked(oco.Stop)
+	if oco.Stop.IsTriggered() {
+		e.cancelOCOCounterpart(oco.Stop.Order.ID)
+	}
+	return res
+}
+
+// cancelOCOCounterpart cancels the other leg of the OCO that legID belongs to
+// (removing it from the book or stop book) and drops the pairing. No-op if legID
+// is not part of a live OCO.
+func (e *Engine) cancelOCOCounterpart(legID string) {
+	oco, ok := e.ocoByOrderID[legID]
+	if !ok {
+		return
+	}
+	otherID := oco.Primary.ID
+	if legID == oco.Primary.ID {
+		otherID = oco.Stop.Order.ID
+	}
+	if o, exists := e.book.Get(otherID); exists {
+		_ = o.Cancel()
+		_, _ = e.book.Remove(otherID)
+	} else if s, exists := e.stopBook.Get(otherID); exists {
+		_ = s.Order.Cancel()
+		e.stopBook.Remove(otherID)
+	}
+	e.dropOCO(oco)
+}
+
+func (e *Engine) dropOCO(oco *types.OCOOrder) {
+	delete(e.ocoByOrderID, oco.Primary.ID)
+	delete(e.ocoByOrderID, oco.Stop.Order.ID)
 }
 
 // ProcessIceberg submits an iceberg order. Only its display slice is ever
@@ -316,6 +382,8 @@ func (e *Engine) match(taker *types.Order) ([]*types.Trade, map[string]*types.Or
 					delete(e.icebergOrders, maker.ID)
 				}
 			}
+			// If the filled maker was an OCO primary, cancel its stop leg.
+			e.cancelOCOCounterpart(maker.ID)
 		} else {
 			e.book.UpdateOrderQuantity(maker.ID, qty)
 		}
