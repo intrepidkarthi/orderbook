@@ -44,6 +44,10 @@ type Config struct {
 	// Zero disables the band. It has no effect until the first trade sets a
 	// reference price.
 	PriceBand decimal.Decimal
+	// ProRata selects size-proportional allocation at each price level instead
+	// of the default price–time (FIFO) priority. In this mode, self orders are
+	// skipped rather than STP-cancelled.
+	ProRata bool
 }
 
 // DefaultConfig returns a sensible configuration for a symbol.
@@ -424,6 +428,9 @@ func (e *Engine) ProcessIceberg(ib *types.IcebergOrder) *MatchResult {
 // returns the trades produced and, only for FOK takers, the maker orders touched
 // (so a failed FOK can be reversed). Trades print at the maker's resting price.
 func (e *Engine) match(taker *types.Order) ([]*types.Trade, map[string]*types.Order) {
+	if e.config.ProRata {
+		return e.matchProRata(taker)
+	}
 	var trades []*types.Trade
 	var makerOrders map[string]*types.Order
 	trackMakers := taker.TimeInForce == types.TIFFillOrKill
@@ -561,6 +568,113 @@ func (e *Engine) wouldCross(order *types.Order) bool {
 		return true
 	}
 	return false
+}
+
+// matchProRata crosses taker against the book allocating each price level's
+// fills in proportion to resting size, rather than by time priority. Self orders
+// are skipped. Trades print at the maker's price.
+func (e *Engine) matchProRata(taker *types.Order) ([]*types.Trade, map[string]*types.Order) {
+	var trades []*types.Trade
+	var makerOrders map[string]*types.Order
+	trackMakers := taker.TimeInForce == types.TIFFillOrKill
+
+	for !taker.RemainingQty.IsZero() {
+		var price decimal.Decimal
+		var oppSide types.Side
+		if taker.Side == types.SideBuy {
+			p, _, ok := e.book.BestAsk()
+			if !ok || (taker.Type == types.OrderTypeLimit && taker.Price.LessThan(p)) {
+				break
+			}
+			price, oppSide = p, types.SideSell
+		} else {
+			p, _, ok := e.book.BestBid()
+			if !ok || (taker.Type == types.OrderTypeLimit && taker.Price.GreaterThan(p)) {
+				break
+			}
+			price, oppSide = p, types.SideBuy
+		}
+
+		// Eligible resting orders at this level (excluding the taker's own).
+		eligible := make([]*types.Order, 0)
+		total := decimal.Zero
+		for _, o := range e.book.GetOrdersAtPrice(oppSide, price) {
+			if o.UserID == taker.UserID {
+				continue
+			}
+			eligible = append(eligible, o)
+			total = total.Add(o.RemainingQty)
+		}
+		if total.IsZero() {
+			break // only self liquidity here; stop
+		}
+
+		q := decimal.Min(taker.RemainingQty, total)
+		allocs := proRataAllocate(eligible, q)
+		for i, maker := range eligible {
+			a := allocs[i]
+			if a.LessThanOrEqual(decimal.Zero) {
+				continue
+			}
+			tr := e.executeTrade(taker, maker, price, a)
+			trades = append(trades, tr)
+			if trackMakers {
+				if makerOrders == nil {
+					makerOrders = make(map[string]*types.Order)
+				}
+				makerOrders[maker.ID] = maker
+			}
+			if maker.IsFilled() {
+				_, _ = e.book.Remove(maker.ID)
+				if ib, ok := e.icebergOrders[maker.ID]; ok {
+					if ib.Refill() {
+						_ = e.book.Add(ib.Order)
+					} else {
+						delete(e.icebergOrders, maker.ID)
+					}
+				}
+				e.cancelOCOCounterpart(maker.ID)
+			} else {
+				e.book.UpdateOrderQuantity(maker.ID, a)
+			}
+		}
+		// If the level wasn't fully consumed, the taker is filled ⇒ loop ends.
+	}
+
+	return e.finish(trades), makerOrders
+}
+
+// proRataAllocate splits q across orders in proportion to their remaining size,
+// capping each at its size and distributing any rounding remainder greedily so
+// the allocations sum to exactly q.
+func proRataAllocate(orders []*types.Order, q decimal.Decimal) []decimal.Decimal {
+	total := decimal.Zero
+	for _, o := range orders {
+		total = total.Add(o.RemainingQty)
+	}
+	allocs := make([]decimal.Decimal, len(orders))
+	allocated := decimal.Zero
+	for i, o := range orders {
+		a := q.Mul(o.RemainingQty).Div(total).Truncate(8)
+		if a.GreaterThan(o.RemainingQty) {
+			a = o.RemainingQty
+		}
+		allocs[i] = a
+		allocated = allocated.Add(a)
+	}
+	leftover := q.Sub(allocated)
+	for i, o := range orders {
+		if leftover.LessThanOrEqual(decimal.Zero) {
+			break
+		}
+		spare := o.RemainingQty.Sub(allocs[i])
+		add := decimal.Min(spare, leftover)
+		if add.IsPositive() {
+			allocs[i] = allocs[i].Add(add)
+			leftover = leftover.Sub(add)
+		}
+	}
+	return allocs
 }
 
 // finish records the last trade price if any trades occurred and returns the
