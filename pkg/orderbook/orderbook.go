@@ -380,21 +380,38 @@ func (ob *OrderBook) insertAskPrice(price decimal.Decimal) {
 	ob.askPrices[low] = price
 }
 
+// removeBidPrice deletes price from the descending-sorted bid price slice using
+// binary search (O(log P) to locate) — not a linear scan, which on decimals
+// would call the allocating Equal for every level.
 func (ob *OrderBook) removeBidPrice(price decimal.Decimal) {
-	for i, p := range ob.bidPrices {
-		if price.Equal(p) {
-			ob.bidPrices = append(ob.bidPrices[:i], ob.bidPrices[i+1:]...)
-			return
+	low, high := 0, len(ob.bidPrices)
+	for low < high {
+		mid := (low + high) / 2
+		if ob.bidPrices[mid].GreaterThan(price) {
+			low = mid + 1
+		} else {
+			high = mid
 		}
+	}
+	if low < len(ob.bidPrices) && ob.bidPrices[low].Equal(price) {
+		ob.bidPrices = append(ob.bidPrices[:low], ob.bidPrices[low+1:]...)
 	}
 }
 
+// removeAskPrice deletes price from the ascending-sorted ask price slice using
+// binary search.
 func (ob *OrderBook) removeAskPrice(price decimal.Decimal) {
-	for i, p := range ob.askPrices {
-		if price.Equal(p) {
-			ob.askPrices = append(ob.askPrices[:i], ob.askPrices[i+1:]...)
-			return
+	low, high := 0, len(ob.askPrices)
+	for low < high {
+		mid := (low + high) / 2
+		if ob.askPrices[mid].LessThan(price) {
+			low = mid + 1
+		} else {
+			high = mid
 		}
+	}
+	if low < len(ob.askPrices) && ob.askPrices[low].Equal(price) {
+		ob.askPrices = append(ob.askPrices[:low], ob.askPrices[low+1:]...)
 	}
 }
 
