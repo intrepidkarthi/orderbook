@@ -60,12 +60,13 @@ type MatchResult struct {
 // Engine matches orders for a single symbol. It is safe for concurrent use; all
 // state mutation is serialized behind a mutex, preserving determinism.
 type Engine struct {
-	mu       sync.Mutex
-	config   Config
-	book     *orderbook.OrderBook
-	stopBook *orderbook.StopBook
-	orderSeq uint64
-	tradeSeq uint64
+	mu            sync.Mutex
+	config        Config
+	book          *orderbook.OrderBook
+	stopBook      *orderbook.StopBook
+	icebergOrders map[string]*types.IcebergOrder
+	orderSeq      uint64
+	tradeSeq      uint64
 }
 
 // maxStopCascade bounds how many rounds of stop triggering a single order may
@@ -83,7 +84,8 @@ func NewEngine(config Config) *Engine {
 			Symbol:    config.Symbol,
 			MaxOrders: config.MaxOrders,
 		}),
-		stopBook: orderbook.NewStopBook(config.Symbol),
+		stopBook:      orderbook.NewStopBook(config.Symbol),
+		icebergOrders: make(map[string]*types.IcebergOrder),
 	}
 }
 
@@ -206,6 +208,35 @@ func (e *Engine) ProcessStop(stop *types.StopOrder) *MatchResult {
 	return &MatchResult{Order: stop.Order, Status: types.OrderStatusPendingTrigger}
 }
 
+// ProcessIceberg submits an iceberg order. Only its display slice is ever
+// visible in the book; as slices are consumed they refill from the hidden
+// reserve until the total is worked off.
+func (e *Engine) ProcessIceberg(ib *types.IcebergOrder) *MatchResult {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.orderSeq++
+	ib.Order.SequenceNum = e.orderSeq
+	e.icebergOrders[ib.Order.ID] = ib
+
+	res := e.settle(ib.Order)
+	// If the slice fully crossed on entry, keep refilling and re-settling until
+	// it rests or the total is exhausted.
+	for ib.Order.IsFilled() && !ib.IsFullyFilled() {
+		if !ib.Refill() {
+			break
+		}
+		r := e.settle(ib.Order)
+		res.Trades = append(res.Trades, r.Trades...)
+	}
+	if ib.IsFullyFilled() {
+		delete(e.icebergOrders, ib.Order.ID)
+		res.Status = types.OrderStatusFilled
+	}
+	e.cascadeStops(res)
+	return res
+}
+
 // match crosses taker against the resting book by price–time priority. It
 // returns the trades produced and, only for FOK takers, the maker orders touched
 // (so a failed FOK can be reversed). Trades print at the maker's resting price.
@@ -268,6 +299,15 @@ func (e *Engine) match(taker *types.Order) ([]*types.Trade, map[string]*types.Or
 
 		if maker.IsFilled() {
 			_, _ = e.book.Remove(maker.ID)
+			// If the consumed maker was an iceberg's visible slice, refill it
+			// (the refilled slice re-enters at the back of its price level).
+			if ib, ok := e.icebergOrders[maker.ID]; ok {
+				if ib.Refill() {
+					_ = e.book.Add(ib.Order)
+				} else {
+					delete(e.icebergOrders, maker.ID)
+				}
+			}
 		} else {
 			e.book.UpdateOrderQuantity(maker.ID, qty)
 		}
@@ -353,6 +393,7 @@ func (e *Engine) Cancel(orderID, userID string) (*types.Order, error) {
 			return nil, err
 		}
 		_, _ = e.book.Remove(orderID)
+		delete(e.icebergOrders, orderID) // no-op for non-iceberg orders
 		return order, nil
 	}
 
