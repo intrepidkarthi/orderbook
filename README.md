@@ -78,6 +78,24 @@ See the full design in **[docs/SPEC.md](docs/SPEC.md)**.
 
 ---
 
+## Performance
+
+Core-library microbenchmarks (Apple M-series, Go 1.23, single-threaded) — all
+meeting the [spec targets](docs/SPEC.md#7-performance-targets):
+
+| Benchmark | ns/op | ~ops/sec |
+|-----------|------:|---------:|
+| top-of-book read (`BestBid`) | **70** | ~14 M |
+| book insert (`Add`) | **401** | ~2.5 M |
+| full-engine insert | **561** | ~1.8 M |
+| match round-trip (maker+taker+trade) | **1548** | ~646 K |
+
+Reproduce with `make bench`. CI runs them on every push and publishes the numbers
+to the [Benchmarks workflow](https://github.com/intrepidkarthi/orderbook/actions/workflows/bench.yml)
+run summary. Full methodology and notes: **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**.
+
+---
+
 ## Architecture
 
 ```

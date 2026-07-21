@@ -1,0 +1,34 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pkg/**"
+      - ".github/workflows/bench.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Run benchmarks (published to the run summary)
+        run: |
+          {
+            echo '## Benchmark results'
+            echo ''
+            echo 'GitHub-hosted runner · `go test -bench -benchmem`'
+            echo ''
+            echo '```'
+            go test -run '^$' -bench=. -benchmem ./pkg/orderbook/ ./pkg/matching/
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
