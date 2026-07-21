@@ -39,6 +39,11 @@ type Config struct {
 	Symbol              string
 	SelfTradePrevention SelfTradePrevention
 	MaxOrders           int
+	// PriceBand is a circuit-breaker collar: a limit order priced more than this
+	// fraction away from the last trade price is rejected (e.g. 0.10 = ±10%).
+	// Zero disables the band. It has no effect until the first trade sets a
+	// reference price.
+	PriceBand decimal.Decimal
 }
 
 // DefaultConfig returns a sensible configuration for a symbol.
@@ -68,6 +73,7 @@ type Engine struct {
 	icebergOrders map[string]*types.IcebergOrder
 	ocoByOrderID  map[string]*types.OCOOrder // both legs' ids map to the pair
 	trailingStops map[string]*types.TrailingStop
+	halted        bool
 	orderSeq      uint64
 	tradeSeq      uint64
 }
@@ -114,12 +120,17 @@ func (e *Engine) Process(order *types.Order) *MatchResult {
 func (e *Engine) settle(order *types.Order) *MatchResult {
 	res := &MatchResult{Order: order}
 
+	// Circuit breakers: halted market, or a limit price outside the collar.
+	if e.halted {
+		return reject(res, order, types.ErrTradingHalted)
+	}
+	if order.Type == types.OrderTypeLimit && e.outsideBand(order.Price) {
+		return reject(res, order, types.ErrPriceOutsideBand)
+	}
+
 	// Post-only orders must rest as makers; reject if they would take.
 	if order.PostOnly && e.wouldCross(order) {
-		order.Status = types.OrderStatusRejected
-		res.Status = types.OrderStatusRejected
-		res.RejectionReason = types.ErrPostOnlyWouldCross
-		return res
+		return reject(res, order, types.ErrPostOnlyWouldCross)
 	}
 
 	trades, makerOrders := e.match(order)
@@ -488,6 +499,50 @@ func (e *Engine) match(taker *types.Order) ([]*types.Trade, map[string]*types.Or
 	}
 
 	return e.finish(trades), makerOrders
+}
+
+// reject marks the order and result rejected with reason and returns the result.
+func reject(res *MatchResult, order *types.Order, reason error) *MatchResult {
+	order.Status = types.OrderStatusRejected
+	res.Status = types.OrderStatusRejected
+	res.RejectionReason = reason
+	return res
+}
+
+// outsideBand reports whether price is beyond the circuit-breaker collar around
+// the last trade price. Disabled when the band is zero or no trade has printed.
+func (e *Engine) outsideBand(price decimal.Decimal) bool {
+	if e.config.PriceBand.LessThanOrEqual(decimal.Zero) {
+		return false
+	}
+	ref := e.book.LastTradePrice()
+	if !ref.IsPositive() {
+		return false
+	}
+	lo := ref.Mul(decimal.NewFromInt(1).Sub(e.config.PriceBand))
+	hi := ref.Mul(decimal.NewFromInt(1).Add(e.config.PriceBand))
+	return price.LessThan(lo) || price.GreaterThan(hi)
+}
+
+// Halt suspends trading; every subsequent order is rejected until Resume.
+func (e *Engine) Halt() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.halted = true
+}
+
+// Resume lifts a trading halt.
+func (e *Engine) Resume() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.halted = false
+}
+
+// IsHalted reports whether trading is currently halted.
+func (e *Engine) IsHalted() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.halted
 }
 
 // wouldCross reports whether a limit order would immediately take liquidity
