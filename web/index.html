@@ -90,18 +90,22 @@
   </section>
 
   <section id="scene-learn" class="panel learn-panel" hidden>
-    <div class="tut-head">
-      <span class="tut-kicker">FROM SCRATCH · no finance background needed</span>
-      <h2 id="tutTitle">Order books &amp; market making</h2>
+    <div class="learn-top">
+      <span class="learn-kicker">A VISUAL, INTERACTIVE GUIDE — powered by the real engine</span>
+      <div class="learn-tabs" id="learnTabs"></div>
     </div>
-    <canvas id="tutStage" width="720" height="300" class="tut-stage" aria-label="tutorial animation"></canvas>
-    <p id="tutText" class="tut-text"></p>
-    <div class="tut-nav">
-      <button id="tutPrev" class="ghost">← Back</button>
-      <div id="tutDots" class="tut-dots" role="tablist"></div>
-      <button id="tutNext" class="buy solid">Next →</button>
+    <div class="learn-grid">
+      <div class="learn-viz">
+        <canvas id="learnCanvas" width="640" height="380" aria-label="visualization"></canvas>
+        <div id="learnControls" class="learn-controls"></div>
+      </div>
+      <aside class="learn-side">
+        <h3 id="learnTitle"></h3>
+        <p id="learnText" class="learn-text"></p>
+        <div id="learnInsight" class="learn-insight"></div>
+        <p class="note">Deep dive: <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">docs/LEARN.md</a></p>
+      </aside>
     </div>
-    <p class="note">Prefer reading? <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">docs/LEARN.md</a>.</p>
   </section>
 
   <div id="loading" class="loading">compiling WebAssembly…</div>
@@ -112,7 +116,7 @@
   </footer>
 
   <script src="wasm_exec.js"></script>
-  <script src="tutorial.js"></script>
+  <script src="learn.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
