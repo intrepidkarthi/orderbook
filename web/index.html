@@ -17,6 +17,7 @@
   <nav class="scenes">
     <button data-scene="book" class="scene-btn active">Live book</button>
     <button data-scene="mm" class="scene-btn">Market maker</button>
+    <button data-scene="learn" class="scene-btn">Learn</button>
   </nav>
 
   <main id="scene-book">
@@ -86,6 +87,50 @@
     <p class="note"><strong>Top:</strong> mark-to-market PnL (gold, rising = spread
       captured). <strong>Bottom:</strong> inventory (blue) oscillating around the
       flat/zero line. Higher γ tightens inventory at the cost of fills.</p>
+  </section>
+
+  <section id="scene-learn" class="panel learn-panel" hidden>
+    <h2>Order books &amp; market making in 2 minutes</h2>
+    <div class="cards">
+      <div class="learn-card">
+        <h3>📖 The book</h3>
+        <p><strong>Bids</strong> (buyers) stack below, <strong>asks</strong> (sellers) above.
+          The gap is the <strong>spread</strong>; the size at each price is <strong>depth</strong>.
+          Deep book = hard to move; thin book = swings easily.</p>
+      </div>
+      <div class="learn-card">
+        <h3>🤝 Maker vs taker</h3>
+        <p>A <strong>limit</strong> order rests and <em>makes</em> liquidity. A
+          <strong>market</strong> order crosses the spread and <em>takes</em> it —
+          getting immediacy but paying the spread (and slippage on big size).</p>
+      </div>
+      <div class="learn-card">
+        <h3>⚙️ Matching</h3>
+        <p><strong>Price–time priority:</strong> best price first, then first-come-first-served.
+          Trades print at the resting (maker) price. Watch a market order walk the book in the
+          <em>Live book</em> scene.</p>
+      </div>
+      <div class="learn-card">
+        <h3>💹 Market making</h3>
+        <p>Quote <em>both</em> sides, earn the spread — but manage
+          <strong>inventory risk</strong> (fills push you off flat) and
+          <strong>adverse selection</strong> (informed traders pick off stale quotes).
+          That's the whole job.</p>
+      </div>
+      <div class="learn-card">
+        <h3>🧠 Avellaneda–Stoikov</h3>
+        <p>Skew quotes around an <strong>inventory-adjusted reservation price</strong>
+          and widen the spread with volatility. Try the <em>Market maker</em> scene and move
+          the γ / k / σ sliders.</p>
+      </div>
+      <div class="learn-card">
+        <h3>🔎 The honest caveat</h3>
+        <p>"The order book predicts the next move" is mostly false: order-flow imbalance is
+          <strong>contemporaneous</strong> (R²≈0.33), not predictive (≈0.00). It describes the
+          move as it happens; it doesn't forecast it.</p>
+      </div>
+    </div>
+    <p class="note">Full write-up: <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">docs/LEARN.md</a>.</p>
   </section>
 
   <div id="loading" class="loading">compiling WebAssembly…</div>

@@ -37,8 +37,9 @@ function wireScenes() {
     const scene = e.target.dataset.scene;
     if (!scene) return;
     document.querySelectorAll(".scene-btn").forEach((b) => b.classList.toggle("active", b.dataset.scene === scene));
-    document.getElementById("scene-book").hidden = scene !== "book";
-    document.getElementById("scene-mm").hidden = scene !== "mm";
+    for (const s of ["book", "mm", "learn"]) {
+      document.getElementById("scene-" + s).hidden = s !== scene;
+    }
     if (scene !== "book" && auto) toggleAuto(); // pause live flow when leaving
     if (scene === "mm" && !mmRan) runMM();
   });
