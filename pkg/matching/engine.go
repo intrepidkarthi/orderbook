@@ -225,6 +225,51 @@ func (e *Engine) submitStopLocked(stop *types.StopOrder) *MatchResult {
 	return &MatchResult{Order: stop.Order, Status: types.OrderStatusPendingTrigger}
 }
 
+// ProcessPegged resolves a pegged order's price from the current book reference
+// (plus its offset) and submits it as a limit. It is rejected if the reference
+// price is unavailable or the resolved price is non-positive.
+func (e *Engine) ProcessPegged(p *types.PeggedOrder) *MatchResult {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	ref, ok := e.pegReference(p.Ref)
+	if !ok {
+		p.Order.Status = types.OrderStatusRejected
+		return &MatchResult{Order: p.Order, Status: types.OrderStatusRejected, RejectionReason: types.ErrPegReferenceUnavailable}
+	}
+	price := ref.Add(p.Offset)
+	if price.LessThanOrEqual(decimal.Zero) {
+		p.Order.Status = types.OrderStatusRejected
+		return &MatchResult{Order: p.Order, Status: types.OrderStatusRejected, RejectionReason: types.ErrInvalidPrice}
+	}
+	p.Order.Price = price
+	p.Order.Type = types.OrderTypeLimit
+
+	e.orderSeq++
+	p.Order.SequenceNum = e.orderSeq
+	res := e.settle(p.Order)
+	e.cascadeStops(res)
+	return res
+}
+
+func (e *Engine) pegReference(ref types.PegReference) (decimal.Decimal, bool) {
+	switch ref {
+	case types.PegToBid:
+		if p, _, ok := e.book.BestBid(); ok {
+			return p, true
+		}
+	case types.PegToAsk:
+		if p, _, ok := e.book.BestAsk(); ok {
+			return p, true
+		}
+	case types.PegToMid:
+		if m, ok := e.book.MidPrice(); ok {
+			return m, true
+		}
+	}
+	return decimal.Zero, false
+}
+
 // ProcessOCO submits a one-cancels-other pair: the primary limit is posted, and
 // if it does not complete immediately the stop is posted too. Whichever leg
 // completes first cancels the other (handled in match/cascadeStops via the OCO
