@@ -126,15 +126,36 @@ nothing above it. Full diagram in the [spec](docs/SPEC.md#3-architecture).
 go get github.com/intrepidkarthi/orderbook/pkg/matching
 ```
 
+The engine works in **integer ticks and lots**; an `Instrument` converts human
+decimals at the edge (or pass ticks/lots directly).
+
 ```go
 eng := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
 
-order, _ := types.NewOrder("alice", "BTC-USD", types.SideBuy,
-    types.OrderTypeLimit, dec("30000"), dec("0.5"), types.TIFGoodTillCancel)
+// Prices are int64 ticks, sizes int64 lots. A resting sell, then a crossing buy.
+sell, _ := types.NewOrder("mm", "BTC-USD", types.SideSell, types.OrderTypeLimit, 100, 5, types.TIFGoodTillCancel)
+eng.Process(sell)
 
-res := eng.Process(order)          // -> trades, status, remaining
+buy, _ := types.NewOrder("taker", "BTC-USD", types.SideBuy, types.OrderTypeLimit, 101, 3, types.TIFGoodTillCancel)
+res := eng.Process(buy)            // res.Trades, res.Status, res.RejectionReason
 bid, qty, ok := eng.BestBid()
 ```
+
+Decimals at the boundary, concurrency, and the zero-alloc path:
+
+```go
+inst := types.NewInstrument("BTC-USD", dec("0.01"), dec("0.001"))          // decimals → ticks
+o, _  := inst.NewOrder("alice", types.SideBuy, types.OrderTypeLimit, dec("30000.50"), dec("0.25"), tif)
+
+r := matching.NewRunner(matching.RunnerConfig{Engine: matching.DefaultConfig("BTC-USD")}) // many producers, one writer
+defer r.Close()
+r.SubmitAsync(o)                    // enqueue without blocking
+
+buf := make([]types.Trade, 0, 8)   // zero-alloc hot path: reuse the buffer
+buf, status, _ := eng.Match(o, buf[:0])
+```
+
+Runnable, testable examples render on **[pkg.go.dev](https://pkg.go.dev/github.com/intrepidkarthi/orderbook/pkg/matching#pkg-examples)**.
 
 ### Runnable examples & tools
 
@@ -160,6 +181,8 @@ self-trade prevention, circuit breakers, and pro-rata matching all live in
 
 | Doc | What's inside |
 |-----|---------------|
+| 🔌 **[INTEGRATION.md](docs/INTEGRATION.md)** | Embed the engine in a service: reference architecture, sync vs concurrent, WAL/recovery, market data, observability, scaling, production checklist. |
+| ⚙️ **[CONFIG.md](docs/CONFIG.md)** | Every config knob — `Instrument`, engine policy, TIF, order types — with defaults, validation, and what the core deliberately leaves to the layers above. |
 | 🎓 **[LEARN.md](docs/LEARN.md)** | Order books & market making from scratch — no finance background needed. |
 | 📐 **[SPEC.md](docs/SPEC.md)** | Architecture, the real-world order model, core design decisions, performance targets, milestones. |
 | 🔬 **[research-roadmap.md](docs/research-roadmap.md)** | OFI, Kyle's λ, Avellaneda–Stoikov, delta/CVD — each as implementation → experiment → honest write-up. |
