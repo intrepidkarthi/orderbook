@@ -1,9 +1,18 @@
 package matching
 
 import (
+	"errors"
+
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
+
+// ErrQueueFull is returned by the non-blocking submit paths (TrySubmit,
+// TrySubmitAsync) when the command queue has no free capacity — the caller should
+// shed or reject the new order. The blocking paths (Process, Cancel, ...) wait for
+// space instead, so cancels always get through: use TrySubmit for sheddable new
+// liquidity and Cancel for the reliable cancel path under overload.
+var ErrQueueFull = errors.New("matching: runner command queue is full")
 
 // Runner drives an Engine from a single matching goroutine, fed by an MPSC
 // command queue. It is the concurrency front for the engine: many producers may
@@ -154,6 +163,42 @@ func (r *Runner) SubmitAsync(order *types.Order) <-chan *MatchResult {
 	go func() { out <- (<-reply).match }()
 	return out
 }
+
+// TrySubmit submits an order without waiting for queue space: if the command
+// queue is full it returns ErrQueueFull immediately (shed the order) rather than
+// blocking. On success it waits for and returns the result. This is the
+// bounded-backpressure path for new liquidity under overload; Cancel keeps its
+// blocking path so cancels are never shed.
+func (r *Runner) TrySubmit(order *types.Order) (*MatchResult, error) {
+	reply := make(chan cmdReply, 1)
+	select {
+	case r.queue <- command{kind: cmdSubmit, order: order, reply: reply}:
+		return (<-reply).match, nil
+	default:
+		return nil, ErrQueueFull
+	}
+}
+
+// TrySubmitAsync is the non-blocking async submit: it enqueues without waiting and
+// returns a channel for the result, or ErrQueueFull if the queue is full.
+func (r *Runner) TrySubmitAsync(order *types.Order) (<-chan *MatchResult, error) {
+	reply := make(chan cmdReply, 1)
+	select {
+	case r.queue <- command{kind: cmdSubmit, order: order, reply: reply}:
+		out := make(chan *MatchResult, 1)
+		go func() { out <- (<-reply).match }()
+		return out, nil
+	default:
+		return nil, ErrQueueFull
+	}
+}
+
+// QueueLen reports the number of commands currently buffered in the queue — a
+// backpressure gauge to export as a metric.
+func (r *Runner) QueueLen() int { return len(r.queue) }
+
+// QueueCap reports the queue's capacity.
+func (r *Runner) QueueCap() int { return cap(r.queue) }
 
 // --- read accessors (delegate to the engine's independently-locked books) ---
 
