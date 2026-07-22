@@ -17,7 +17,6 @@ package matching
 
 import (
 	"sort"
-	"sync"
 
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -73,10 +72,14 @@ type MatchResult struct {
 	RejectionReason error
 }
 
-// Engine matches orders for a single symbol. It is safe for concurrent use; all
-// state mutation is serialized behind a mutex, preserving determinism.
+// Engine matches orders for a single symbol. It is a single writer: its mutating
+// methods (Match, Process, Cancel, Process*) own the book with no internal lock,
+// so they must not be called concurrently — drive the engine from one goroutine,
+// or wrap it in a Runner (engine_loop.go) that serialises concurrent producers
+// through a command queue. Read accessors that delegate to the order book or stop
+// book (BestBid, Snapshot, LastTradePrice, PendingStopCount, ...) are guarded by
+// those structures' own locks and are safe to call concurrently.
 type Engine struct {
-	mu            sync.Mutex
 	config        Config
 	book          *orderbook.OrderBook
 	stopBook      *orderbook.StopBook
@@ -133,8 +136,6 @@ func (e *Engine) nextID(order *types.Order) int64 {
 // stop orders the fill triggers are appended too. This is the low-latency path;
 // Process wraps it for callers that prefer a *MatchResult.
 func (e *Engine) Match(order *types.Order, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	e.nextID(order)
 	dst, status, reason := e.settleInto(order, dst)
@@ -262,8 +263,6 @@ func (e *Engine) cascadeStops(dst []types.Trade) []types.Trade {
 // reached the stop it fires immediately; otherwise it rests off-book until a
 // trade reaches the trigger price.
 func (e *Engine) ProcessStop(stop *types.StopOrder) *MatchResult {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	dst, status, reason := e.submitStopInto(stop, nil)
 	return toMatchResult(stop.Order, dst, status, reason)
 }
@@ -291,8 +290,6 @@ func (e *Engine) submitStopInto(stop *types.StopOrder, dst []types.Trade) ([]typ
 // (plus its offset) and submits it as a limit. It is rejected if the reference
 // price is unavailable or the resolved price is non-positive.
 func (e *Engine) ProcessPegged(p *types.PeggedOrder) *MatchResult {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	ref, ok := e.pegReference(p.Ref)
 	if !ok {
@@ -335,8 +332,6 @@ func (e *Engine) pegReference(ref types.PegReference) (int64, bool) {
 // current market and either fires immediately or rests, ratcheting as trades
 // move the market (handled in cascadeStops).
 func (e *Engine) ProcessTrailingStop(ts *types.TrailingStop) *MatchResult {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	e.nextID(ts.Order)
 
@@ -380,8 +375,6 @@ func (e *Engine) checkTrailingStops(marketPrice int64) []*types.TrailingStop {
 // completes first cancels the other (handled in match/cascadeStops via the OCO
 // registry).
 func (e *Engine) ProcessOCO(oco *types.OCOOrder) *MatchResult {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	// Ids must be assigned before registering the legs, since the registry is
 	// keyed by id (orders no longer arrive with a pre-set id).
@@ -440,8 +433,6 @@ func (e *Engine) dropOCO(oco *types.OCOOrder) {
 // visible in the book; as slices are consumed they refill from the hidden
 // reserve until the total is worked off.
 func (e *Engine) ProcessIceberg(ib *types.IcebergOrder) *MatchResult {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	e.nextID(ib.Order)
 	e.icebergOrders[ib.Order.ID] = ib
@@ -567,22 +558,16 @@ func (e *Engine) outsideBand(price int64) bool {
 
 // Halt suspends trading; every subsequent order is rejected until Resume.
 func (e *Engine) Halt() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.halted = true
 }
 
 // Resume lifts a trading halt.
 func (e *Engine) Resume() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.halted = false
 }
 
 // IsHalted reports whether trading is currently halted.
 func (e *Engine) IsHalted() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	return e.halted
 }
 
@@ -771,8 +756,6 @@ func (e *Engine) reverseTrade(tr types.Trade, makerOrders map[int64]*types.Order
 // Cancel removes a resting order (or a pending stop) if it belongs to userID and
 // is still active.
 func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	if order, exists := e.book.Get(orderID); exists {
 		if order.UserID != userID {
@@ -823,8 +806,6 @@ func (e *Engine) PendingStopCount() int { return e.stopBook.Count() }
 
 // TrailingStopCount returns the number of resting trailing stops.
 func (e *Engine) TrailingStopCount() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	return len(e.trailingStops)
 }
 
