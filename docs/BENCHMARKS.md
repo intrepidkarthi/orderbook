@@ -20,28 +20,36 @@ run summary (neutral GitHub-hosted hardware).
 
 Apple M-series laptop, Go 1.23, single-threaded (`-benchmem`):
 
+int64 ticks/lots, pooled book nodes/levels, single-writer engine:
+
 | Benchmark | ns/op | ~ops/sec | B/op | allocs/op |
 |-----------|------:|---------:|-----:|----------:|
-| `OrderBook_Add` (insert into sorted ladder) | 401 | ~2.5 M | 241 | 6 |
-| `OrderBook_BestBid` (top-of-book read) | 70 | ~14 M | 48 | 4 |
-| `Engine_RestingInsert` (full engine, order rests) | 561 | ~1.8 M | 397 | 10 |
-| `Engine_Match` (maker + taker + trade round-trip) | 1548 | ~646 K | 1200 | 47 |
+| `OrderBook_BestBid` (top-of-book read) | 6.3 | ~160 M | 0 | 0 |
+| `OrderBook_Cancel` (drain) | 253 | ~4 M | 0 | 0 |
+| `OrderBook_CancelReplace` (MM churn) | 180 | ~5.5 M | 0 | 0 |
+| `OrderBook_LevelChurn` (new price level) | 292 | ~3.4 M | 0 | 0 |
+| `Engine_MatchInto` (`Match`, maker+taker+trade) | 352 | ~2.8 M | **0** | **0** |
+| `Engine_Match` (`Process` convenience wrapper) | 491 | ~2 M | 296 | 4 |
+
+**Tail latency** — `BenchmarkLatency_CancelHeavy`, a ~90%-cancel / 10%-new mix
+against a warm book: **p50 83 ns · p99 167 ns · p999 292 ns**, 0 allocs/op.
 
 ### Against the spec targets (§7)
 
 | Metric | Target | Measured | |
 |--------|-------:|---------:|:--|
-| Order insert (resting) | ≥ 500 K/s | ~1.8 M/s | ✅ |
-| Order match | ≥ 200 K/s | ~646 K/s round-trip | ✅ |
-| Best bid/ask read | < 1 µs | 70 ns | ✅ |
-| Hot-path allocations | bounded | measured above | ✅ |
+| Order match (`Match`) | ≥ 200 K/s | ~2.8 M/s round-trip | ✅ |
+| Cancel (dominant real op) | — | ~4 M/s, 0 allocs | ✅ |
+| Best bid/ask read | < 1 µs | 6.3 ns | ✅ |
+| Hot-path allocations | 0 on submit/cancel/match | 0 (via `Match`) | ✅ |
 
 ## Notes on the numbers
 
-- **Allocations come mostly from `shopspring/decimal`.** Exact-decimal money is
-  a deliberate correctness choice (docs/SPEC.md §6.1); it is the dominant cost on
-  the hot path. The documented future optimization is an `int64` fixed-point
-  "ticks" fast path behind the same interface for latency-critical deployments.
+- **The hot path is allocation-free.** `Match(order, buf)` appends value trades
+  into a caller-reused buffer and the book pools nodes/levels, so steady-state
+  submit/cancel/match allocate nothing (docs/SPEC.md §6.1). `Process` is the
+  ergonomic wrapper that builds a `*MatchResult` (4 allocs); use `Match` when
+  latency matters. Decimals were removed from the hot path in v0.2.0.
 - **Numbers vary by hardware.** GitHub-hosted runners are typically slower than
   an M-series laptop; use the CI run summary for a neutral baseline and your own
   machine for local comparison.

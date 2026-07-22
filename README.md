@@ -55,7 +55,7 @@
 
 | | | |
 |:--|:--|:--|
-| 🧱 **A library** | An efficient, embeddable **CLOB + matching engine** in Go. Decimal-exact, deterministic, price–time priority. `go get` and drop it into an exchange, a simulator, or a tool. | *suitable for many* |
+| 🧱 **A library** | An efficient, embeddable **CLOB + matching engine** in Go. Integer-exact (int64 ticks/lots), zero-alloc hot path, single-writer, deterministic, price–time priority. `go get` and drop it into an exchange, a simulator, or a tool. | *suitable for many* |
 | 🔬 **A research harness** | Build and **honestly backtest** microstructure ideas — order-flow imbalance, Kyle's λ, Avellaneda–Stoikov market making, delta/CVD — with reproducible experiments, not screenshots. | *contemporaneous ≠ predictive* |
 | 🎬 **An animated explainer** | The **same engine compiled to WebAssembly**, running live in the browser, teaching how order books and market making work — one animated scene at a time. | *show, then explain* |
 
@@ -66,9 +66,10 @@ library never depends on the research, simulation, or presentation layers.
 
 ## Highlights
 
-- 💰 **Money is never a float** — exact decimals throughout (fixing the classic bug in the frozen `legacy/` prototype).
-- ⚡ **Fast** — targets ≥ 500k inserts/s and ≥ 200k matches/s per core, benchmarked in-repo.
-- 🎯 **Deterministic** — same input stream → byte-identical trades & state; enables replay and honest backtests.
+- 💰 **Money is never a float** — the engine works in exact **int64 ticks and lots**; decimals live only at the API boundary (a per-symbol `Instrument`). No float rounding on the money path (fixing the classic bug in the frozen `legacy/` prototype).
+- ⚡ **Low-µs & zero-alloc** — O(1) cancel, pooled book nodes/levels, and a caller-buffer match path with **0 allocations/op**; cancel-heavy flow runs **p50 ~83 ns, p99 ~166 ns, p999 ~209 ns** per op.
+- 🧵 **Single-writer** — one matching goroutine owns the book lock-free (LMAX-style); many producers submit concurrently through an MPSC command queue (`matching.Runner`).
+- 🎯 **Deterministic** — same input stream → byte-identical trades & state; enables replay, WAL recovery, and honest backtests.
 - 🧰 **Real-world order surface** — market, limit, stop/stop-limit, **iceberg/hidden**, **post-only**, **pegged**, **OCO/bracket**, trailing, auctions.
 - 🛡️ **Market integrity built in** — self-trade prevention, **spoofing/layering** detection, **stop-cascade** protection, rate/velocity limits.
 - 📊 **L1 / L2 / L3 (MBO)** market data — snapshots + incremental diffs with sequence numbers.
@@ -80,15 +81,22 @@ See the full design in **[docs/SPEC.md](docs/SPEC.md)**.
 
 ## Performance
 
-Core-library microbenchmarks (Apple M-series, Go 1.23, single-threaded) — all
-meeting the [spec targets](docs/SPEC.md#7-performance-targets):
+Core-library microbenchmarks (Apple M-series, Go 1.23, single-threaded) — int64
+ticks, pooled book nodes/levels, and the caller-buffer match path (`Match`):
 
-| Benchmark | ns/op | ~ops/sec |
-|-----------|------:|---------:|
-| top-of-book read (`BestBid`) | **70** | ~14 M |
-| book insert (`Add`) | **401** | ~2.5 M |
-| full-engine insert | **561** | ~1.8 M |
-| match round-trip (maker+taker+trade) | **1548** | ~646 K |
+| Benchmark | ns/op | allocs/op | ~ops/sec |
+|-----------|------:|----------:|---------:|
+| top-of-book read (`BestBid`) | **6.3** | 0 | ~160 M |
+| cancel (drain) | **253** | 0 | ~4 M |
+| MM cancel/replace (book) | **180** | 0 | ~5.5 M |
+| new price level (churn) | **292** | 0 | ~3.4 M |
+| match round-trip (`Match`, maker+taker+trade) | **352** | **0** | ~2.8 M |
+| match round-trip (`Process` convenience) | **491** | 4 | ~2 M |
+
+**Tail latency** on a realistic ~90%-cancel / 10%-new flow (`Match`/`Cancel`):
+**p50 83 ns · p99 167 ns · p999 292 ns**, 0 allocs/op — the p999 stays within
+~3.5× of the median. (The absolute numbers include `time.Now` overhead; the
+median-to-tail *shape* is the signal.)
 
 Reproduce with `make bench`. CI runs them on every push and publishes the numbers
 to the [Benchmarks workflow](https://github.com/intrepidkarthi/orderbook/actions/workflows/bench.yml)

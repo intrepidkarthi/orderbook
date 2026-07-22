@@ -100,7 +100,7 @@ sibling that consumes the core through the WASM boundary.
 │    surveillance  spoofing/layering, cascade, rate/velocity limits      │
 │    matching      price-time (+ pro-rata), TIF, STP, auctions           │
 │    orderbook     CLOB structure, L2/L3, depth, snapshots               │
-│    types         Order, Trade, Side, errors (decimal)                  │
+│    types         Order, Trade, Side, errors, Instrument (int64 ticks)  │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -202,12 +202,18 @@ what this project teaches.
 
 Each records the choice, the rationale, and the alternative we deferred.
 
-### 6.1 Price & quantity — **decimal first**
-- **Choice:** `shopspring/decimal` for all prices and quantities.
-- **Why:** money must not accumulate binary floating-point error. The `legacy/`
-  prototype used `float64` — precisely the bug this project fixes.
-- **Deferred:** an `int64` fixed-point "ticks" fast path behind the same
-  interface once benchmarks justify it. Correctness before speed.
+### 6.1 Price & quantity — **int64 ticks & lots** (decimal at the edge)
+- **Choice:** the engine works in **integer ticks and lots (`int64`)**. A per-
+  symbol `types.Instrument{TickSize, LotSize}` converts human decimals to/from
+  ticks at the API boundary; the hot path never touches decimal or floats.
+- **Why:** integers are both **exact** (no binary FP error — the bug the
+  `legacy/` `float64` prototype had) **and fast** (no allocation, no `big.Int`).
+  Decimals are correct but allocate; keeping them only at the edge gave a
+  zero-alloc, integer-exact match path.
+- **History:** the engine shipped decimal-first (v0.1.0) for correctness, then
+  moved to int64 ticks in **v0.2.0** once the benchmarks showed decimal
+  allocation dominating the hot path. `shopspring/decimal` remains only for the
+  `Instrument` boundary and display formatting.
 
 ### 6.2 Book structure — **map + sorted ladder**
 - **Choice:** `map[price]→*PriceLevel` (O(1) lookup) + a price-sorted slice with
@@ -218,10 +224,17 @@ Each records the choice, the rationale, and the alternative we deferred.
 - **Deferred:** heap / balanced BST / skip-list / radix-bucketed ladders — noted
   as benchmark alternatives.
 
-### 6.3 Concurrency — **single writer per book**
-- One mutex-guarded writer per symbol; readers use snapshots. Scale-out is
-  *across symbols* (one book/goroutine each), not by parallelizing one book.
-- **Deferred:** sharding, lock-free structures, single-writer ring buffers.
+### 6.3 Concurrency — **single writer per book** (lock-free hot path)
+- One matching goroutine owns each book with **no lock on the hot path** (the
+  LMAX single-writer principle). Concurrent producers submit through an MPSC
+  command queue (`matching.Runner`); the writer applies commands in FIFO order,
+  preserving determinism. Readers use the book's own RW-lock for snapshots.
+- The bare `Engine` is the single-writer core (drive it from one goroutine);
+  `Runner` is the concurrency front. Landed in **v0.3.0** (removed the engine
+  mutex). Scale-out is *across symbols* (one book/goroutine each), not by
+  parallelizing one book.
+- **Deferred:** sharding across symbols on a thread pool; swapping the channel
+  queue for a lock-free ring buffer (the `command`/dispatch split leaves room).
 
 ### 6.4 Determinism — **a hard requirement**
 Given the same ordered input stream, the engine produces byte-identical trades
