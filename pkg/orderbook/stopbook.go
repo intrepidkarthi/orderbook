@@ -54,6 +54,19 @@ func (sb *StopBook) Count() int {
 	return len(sb.orders)
 }
 
+// All returns every pending stop in deterministic (underlying id) order — for
+// snapshotting the off-book stop state.
+func (sb *StopBook) All() []*types.StopOrder {
+	sb.mu.RLock()
+	defer sb.mu.RUnlock()
+	out := make([]*types.StopOrder, 0, len(sb.orders))
+	for _, s := range sb.orders {
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Order.ID < out[j].Order.ID })
+	return out
+}
+
 // CheckTriggers returns the stops that fire at marketPrice (ticks), in
 // deterministic order (by underlying order id, which is the entry sequence),
 // marking them triggered and removing them from the book. Map iteration order is

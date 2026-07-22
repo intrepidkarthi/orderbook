@@ -410,6 +410,25 @@ func (ob *OrderBook) Count() int {
 	return len(ob.nodes)
 }
 
+// Orders returns every resting order in price-then-time order (bids best-first,
+// then asks best-first, FIFO within each level). Re-adding them to a fresh book
+// in this order reproduces the exact structure — the basis for a book snapshot.
+func (ob *OrderBook) Orders() []*types.Order {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
+	out := make([]*types.Order, 0, len(ob.nodes))
+	appendSide := func(prices []int64, levels map[int64]*PriceLevel) {
+		for _, p := range prices {
+			for n := levels[p].head; n != nil; n = n.next {
+				out = append(out, n.order)
+			}
+		}
+	}
+	appendSide(ob.bidPrices, ob.bids)
+	appendSide(ob.askPrices, ob.asks)
+	return out
+}
+
 // insertBidPrice inserts price into the descending-sorted bid price slice.
 func (ob *OrderBook) insertBidPrice(price int64) {
 	low, high := 0, len(ob.bidPrices)
