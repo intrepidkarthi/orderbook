@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"strconv"
 	"testing"
+	"time"
 
+	"github.com/intrepidkarthi/orderbook/pkg/matching"
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
@@ -63,6 +65,45 @@ func TestRecovery_ReplayRebuildsBook(t *testing.T) {
 	}
 	if recovered.OrderCount() != live.OrderCount() {
 		t.Errorf("resting count differs: live %d vs recovered %d", live.OrderCount(), recovered.OrderCount())
+	}
+}
+
+// TestReplay_ByteIdenticalUnderInjectedClock is the determinism gate: with a
+// deterministic clock injected, two independent engines replaying the same
+// command log must produce byte-identical trades (timestamps and all) and
+// identical resting book state. This is the property that makes replay a
+// deployment gate (would have caught Knight's fleet inconsistency) and a recovery
+// contract — not just an id/value-level equivalence.
+func TestReplay_ByteIdenticalUnderInjectedClock(t *testing.T) {
+	fixed := time.Date(2021, 6, 1, 12, 0, 0, 0, time.UTC)
+	mk := func() *matching.Engine {
+		return matching.NewEngine(matching.Config{Symbol: "BTC-USD", Clock: func() time.Time { return fixed }})
+	}
+	log := NewStream(
+		lim(t, "mm1", types.SideSell, 105, 10),
+		lim(t, "mm2", types.SideBuy, 100, 12),
+		lim(t, "t1", types.SideBuy, 105, 4),  // partial fill
+		lim(t, "t2", types.SideSell, 100, 5), // partial fill
+		lim(t, "mm3", types.SideSell, 104, 8),
+	)
+
+	e1, e2 := mk(), mk()
+	a := Replay(e1, log)
+	b := Replay(e2, log)
+
+	if len(a) != len(b) {
+		t.Fatalf("trade counts differ: %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if *a[i] != *b[i] {
+			t.Fatalf("trade %d not byte-identical:\n a=%+v\n b=%+v", i, *a[i], *b[i])
+		}
+		if !a[i].CreatedAt.Equal(fixed) {
+			t.Errorf("trade %d timestamp %v not from injected clock", i, a[i].CreatedAt)
+		}
+	}
+	if bookDigest(e1.Book()) != bookDigest(e2.Book()) {
+		t.Error("resting book state diverged across identical replays")
 	}
 }
 
