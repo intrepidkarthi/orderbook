@@ -22,11 +22,12 @@ type Trade struct {
 	SequenceNum  int64     `json:"sequence_num"`
 }
 
-// NewTrade builds a trade from the matched buy/sell orders. takerSide identifies
-// which side crossed the spread, from which maker/taker order ids are derived.
-// ID/SequenceNum are left zero and assigned by the engine.
-func NewTrade(symbol string, price, quantity int64, buyOrder, sellOrder *Order, takerSide Side) *Trade {
-	t := &Trade{
+// NewTradeValue builds a trade value (no heap allocation) from the matched
+// buy/sell orders. takerSide identifies which side crossed the spread, from which
+// maker/taker order ids are derived. ID/SequenceNum are left zero and assigned by
+// the engine. This is the form the zero-alloc match path appends into a buffer.
+func NewTradeValue(symbol string, price, quantity int64, buyOrder, sellOrder *Order, takerSide Side) Trade {
+	t := Trade{
 		Symbol:       symbol,
 		Price:        price,
 		Quantity:     quantity,
@@ -46,6 +47,13 @@ func NewTrade(symbol string, price, quantity int64, buyOrder, sellOrder *Order, 
 		t.MakerOrderID = buyOrder.ID
 	}
 	return t
+}
+
+// NewTrade is the pointer form of NewTradeValue (one heap allocation), kept for
+// callers that want a *Trade.
+func NewTrade(symbol string, price, quantity int64, buyOrder, sellOrder *Order, takerSide Side) *Trade {
+	t := NewTradeValue(symbol, price, quantity, buyOrder, sellOrder, takerSide)
+	return &t
 }
 
 // NotionalValue is Price × Quantity of the trade in tick·lot units.

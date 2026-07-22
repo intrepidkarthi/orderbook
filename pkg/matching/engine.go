@@ -10,7 +10,9 @@
 // or reject the remainder according to order type and time-in-force.
 //
 // Prices are integer ticks and quantities integer lots (int64). Orders and
-// trades carry engine-assigned monotonic int64 ids.
+// trades carry engine-assigned monotonic int64 ids. The core matches into a
+// caller-supplied trade buffer (see Match) with no per-order/per-trade heap
+// allocation; Process wraps it as the ergonomic *MatchResult API.
 package matching
 
 import (
@@ -82,6 +84,7 @@ type Engine struct {
 	ocoByOrderID  map[int64]*types.OCOOrder // both legs' ids map to the pair
 	trailingStops map[int64]*types.TrailingStop
 	halted        bool
+	bandEnabled   bool // config.PriceBand > 0, precomputed to keep decimal off the hot path
 	orderSeq      int64
 	tradeSeq      int64
 }
@@ -105,6 +108,9 @@ func NewEngine(config Config) *Engine {
 		icebergOrders: make(map[int64]*types.IcebergOrder),
 		ocoByOrderID:  make(map[int64]*types.OCOOrder),
 		trailingStops: make(map[int64]*types.TrailingStop),
+		// Resolve the band-enabled flag once (a decimal compare) so the per-order
+		// hot path never touches decimal for the common band-disabled case.
+		bandEnabled: config.PriceBand.GreaterThan(decimal.Zero),
 	}
 }
 
@@ -119,53 +125,78 @@ func (e *Engine) nextID(order *types.Order) int64 {
 	return order.ID
 }
 
-// Process runs one order through the engine: it crosses against the book, rests
-// or rejects the remainder per type/TIF, then fires any stop orders whose
-// trigger price the resulting trades reached.
-func (e *Engine) Process(order *types.Order) *MatchResult {
+// Match is the zero-allocation entry point: it settles order against the book
+// and appends the resulting trades — as values — to dst, returning the extended
+// slice, the order's final status, and any rejection reason. Pass a reusable
+// slice (e.g. buf[:0]) and no heap allocation occurs on the hot path: book nodes
+// and levels are pooled and trades land in the caller's buffer. Trades from any
+// stop orders the fill triggers are appended too. This is the low-latency path;
+// Process wraps it for callers that prefer a *MatchResult.
+func (e *Engine) Match(order *types.Order, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	e.nextID(order)
+	dst, status, reason := e.settleInto(order, dst)
+	dst = e.cascadeStops(dst)
+	return dst, status, reason
+}
 
-	res := e.settle(order)
-	e.cascadeStops(res)
+// Process runs one order through the engine and returns a *MatchResult. It is the
+// convenience wrapper over Match; latency-sensitive callers should use Match with
+// a reused buffer to avoid the result allocation.
+func (e *Engine) Process(order *types.Order) *MatchResult {
+	trades, status, reason := e.Match(order, nil)
+	return toMatchResult(order, trades, status, reason)
+}
+
+// toMatchResult wraps a value-trade slice as a *MatchResult, pointing the result
+// slice into the (call-owned, stable) trade buffer — one slice allocation, not
+// one per trade.
+func toMatchResult(order *types.Order, dst []types.Trade, status types.OrderStatus, reason error) *MatchResult {
+	res := &MatchResult{Order: order, Status: status, RejectionReason: reason}
+	if len(dst) > 0 {
+		res.Trades = make([]*types.Trade, len(dst))
+		for i := range dst {
+			res.Trades[i] = &dst[i]
+		}
+	}
 	return res
 }
 
-// settle matches order and applies market/TIF resting rules. It assumes the
-// engine lock is held and the order's id is already assigned.
-func (e *Engine) settle(order *types.Order) *MatchResult {
-	res := &MatchResult{Order: order}
-
+// settleInto matches order and applies market/TIF resting rules, appending trades
+// to dst. It assumes the engine lock is held and the order's id is assigned, and
+// returns the extended buffer, the order's final status, and any rejection reason.
+func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
 	// Circuit breakers: halted market, or a limit price outside the collar.
 	if e.halted {
-		return reject(res, order, types.ErrTradingHalted)
+		order.Status = types.OrderStatusRejected
+		return dst, types.OrderStatusRejected, types.ErrTradingHalted
 	}
 	if order.Type == types.OrderTypeLimit && e.outsideBand(order.Price) {
-		return reject(res, order, types.ErrPriceOutsideBand)
+		order.Status = types.OrderStatusRejected
+		return dst, types.OrderStatusRejected, types.ErrPriceOutsideBand
 	}
-
 	// Post-only orders must rest as makers; reject if they would take.
 	if order.PostOnly && e.wouldCross(order) {
-		return reject(res, order, types.ErrPostOnlyWouldCross)
+		order.Status = types.OrderStatusRejected
+		return dst, types.OrderStatusRejected, types.ErrPostOnlyWouldCross
 	}
 
-	trades, makerOrders := e.match(order)
-	res.Trades = trades
+	start := len(dst)
+	dst, makerOrders := e.match(order, dst)
 
 	// Market orders never rest.
 	if order.Type == types.OrderTypeMarket {
 		if order.RemainingQty != 0 {
 			order.Status = types.OrderStatusCancelled
-			res.Status = types.OrderStatusCancelled
-			if len(trades) == 0 {
-				res.RejectionReason = types.ErrMarketOrderNoLiquidity
+			var reason error
+			if len(dst) == start { // this order printed nothing
+				reason = types.ErrMarketOrderNoLiquidity
 			}
-		} else {
-			res.Status = types.OrderStatusFilled
+			return dst, types.OrderStatusCancelled, reason
 		}
-		return res
+		return dst, types.OrderStatusFilled, nil
 	}
 
 	// Limit orders by time-in-force.
@@ -175,64 +206,56 @@ func (e *Engine) settle(order *types.Order) *MatchResult {
 		if order.RemainingQty != 0 && order.Status != types.OrderStatusCancelled {
 			order.Status = types.OrderStatusCancelled
 		}
-		res.Status = order.Status
+		return dst, order.Status, nil
 
 	case types.TIFFillOrKill:
 		// All-or-nothing: if it didn't fully fill, unwind every trade and reject.
 		if !order.IsFilled() {
-			for _, tr := range trades {
-				e.reverseTrade(tr, makerOrders)
+			for i := start; i < len(dst); i++ {
+				e.reverseTrade(dst[i], makerOrders)
 			}
 			order.Status = types.OrderStatusRejected
-			res.Status = types.OrderStatusRejected
-			res.RejectionReason = types.ErrFOKCannotFill
-			res.Trades = nil
-			return res
+			return dst[:start], types.OrderStatusRejected, types.ErrFOKCannotFill
 		}
-		res.Status = types.OrderStatusFilled
+		return dst, types.OrderStatusFilled, nil
 
 	default: // GTC
 		// Rest any active remainder on the book.
 		if order.IsActive() && !order.IsFilled() {
 			if err := e.book.Add(order); err != nil {
 				order.Status = types.OrderStatusRejected
-				res.Status = types.OrderStatusRejected
-				res.RejectionReason = err
-				return res
+				return dst, types.OrderStatusRejected, err
 			}
 		}
-		res.Status = order.Status
+		return dst, order.Status, nil
 	}
-
-	return res
 }
 
 // cascadeStops fires any stop orders whose trigger price the latest trade
-// reached, settling each and appending its trades to res. It repeats until no
+// reached, settling each and appending its trades to dst. It repeats until no
 // new stops fire — a triggered stop's own trades may trigger further stops —
 // bounded by maxStopCascade.
-func (e *Engine) cascadeStops(res *MatchResult) {
+func (e *Engine) cascadeStops(dst []types.Trade) []types.Trade {
 	for range maxStopCascade {
 		mp := e.book.LastTradePrice()
 		if mp <= 0 {
-			return
+			return dst
 		}
 		fired := e.stopBook.CheckTriggers(mp)
 		trailing := e.checkTrailingStops(mp)
 		if len(fired) == 0 && len(trailing) == 0 {
-			return
+			return dst
 		}
 		for _, s := range fired {
 			// If this stop is an OCO leg, cancel its primary before it executes.
 			e.cancelOCOCounterpart(s.Order.ID)
-			r := e.settle(s.Order)
-			res.Trades = append(res.Trades, r.Trades...)
+			dst, _, _ = e.settleInto(s.Order, dst)
 		}
 		for _, ts := range trailing {
-			r := e.settle(ts.Order)
-			res.Trades = append(res.Trades, r.Trades...)
+			dst, _, _ = e.settleInto(ts.Order, dst)
 		}
 	}
+	return dst
 }
 
 // ProcessStop submits a stop (or stop-limit) order. If the market has already
@@ -241,24 +264,27 @@ func (e *Engine) cascadeStops(res *MatchResult) {
 func (e *Engine) ProcessStop(stop *types.StopOrder) *MatchResult {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.submitStopLocked(stop)
+	dst, status, reason := e.submitStopInto(stop, nil)
+	return toMatchResult(stop.Order, dst, status, reason)
 }
 
-// submitStopLocked is the body of ProcessStop; it assumes the engine lock is
-// held so it can be reused by ProcessOCO.
-func (e *Engine) submitStopLocked(stop *types.StopOrder) *MatchResult {
+// submitStopInto is the body of ProcessStop; it assumes the engine lock is held
+// so it can be reused by ProcessOCO. Trades are appended to dst.
+func (e *Engine) submitStopInto(stop *types.StopOrder, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
 	e.nextID(stop.Order)
 
 	if mp := e.book.LastTradePrice(); mp > 0 && stop.ShouldTrigger(mp) {
 		stop.Trigger()
-		res := e.settle(stop.Order)
-		e.cascadeStops(res)
-		return res
+		var status types.OrderStatus
+		var reason error
+		dst, status, reason = e.settleInto(stop.Order, dst)
+		dst = e.cascadeStops(dst)
+		return dst, status, reason
 	}
 
 	stop.Order.Status = types.OrderStatusPendingTrigger
 	e.stopBook.Add(stop)
-	return &MatchResult{Order: stop.Order, Status: types.OrderStatusPendingTrigger}
+	return dst, types.OrderStatusPendingTrigger, nil
 }
 
 // ProcessPegged resolves a pegged order's price from the current book reference
@@ -282,9 +308,9 @@ func (e *Engine) ProcessPegged(p *types.PeggedOrder) *MatchResult {
 	p.Order.Type = types.OrderTypeLimit
 
 	e.nextID(p.Order)
-	res := e.settle(p.Order)
-	e.cascadeStops(res)
-	return res
+	dst, status, reason := e.settleInto(p.Order, nil)
+	dst = e.cascadeStops(dst)
+	return toMatchResult(p.Order, dst, status, reason)
 }
 
 func (e *Engine) pegReference(ref types.PegReference) (int64, bool) {
@@ -319,9 +345,9 @@ func (e *Engine) ProcessTrailingStop(ts *types.TrailingStop) *MatchResult {
 		ts.Observe(mp)
 		if ts.ShouldTrigger(mp) {
 			ts.Trigger()
-			res := e.settle(ts.Order)
-			e.cascadeStops(res)
-			return res
+			dst, status, reason := e.settleInto(ts.Order, nil)
+			dst = e.cascadeStops(dst)
+			return toMatchResult(ts.Order, dst, status, reason)
 		}
 	}
 	ts.Order.Status = types.OrderStatusPendingTrigger
@@ -364,21 +390,23 @@ func (e *Engine) ProcessOCO(oco *types.OCOOrder) *MatchResult {
 	e.ocoByOrderID[oco.Primary.ID] = oco
 	e.ocoByOrderID[oco.Stop.Order.ID] = oco
 
-	res := e.settle(oco.Primary)
-	e.cascadeStops(res)
+	dst, status, reason := e.settleInto(oco.Primary, nil)
+	dst = e.cascadeStops(dst)
 
 	// Primary already done ⇒ the stop is never posted.
 	if oco.Primary.IsFilled() {
 		e.dropOCO(oco)
-		return res
+		return toMatchResult(oco.Primary, dst, status, reason)
 	}
 
 	// Otherwise post the stop; if it fires on entry, cancel the resting primary.
-	e.submitStopLocked(oco.Stop)
+	// Any trades the stop prints on entry are reported when it is observed, not
+	// folded into the primary's result.
+	e.submitStopInto(oco.Stop, nil)
 	if oco.Stop.IsTriggered() {
 		e.cancelOCOCounterpart(oco.Stop.Order.ID)
 	}
-	return res
+	return toMatchResult(oco.Primary, dst, status, reason)
 }
 
 // cancelOCOCounterpart cancels the other leg of the OCO that legID belongs to
@@ -418,34 +446,34 @@ func (e *Engine) ProcessIceberg(ib *types.IcebergOrder) *MatchResult {
 	e.nextID(ib.Order)
 	e.icebergOrders[ib.Order.ID] = ib
 
-	res := e.settle(ib.Order)
+	dst, status, reason := e.settleInto(ib.Order, nil)
 	// If the slice fully crossed on entry, keep refilling and re-settling until
 	// it rests or the total is exhausted.
 	for ib.Order.IsFilled() && !ib.IsFullyFilled() {
 		if !ib.Refill() {
 			break
 		}
-		r := e.settle(ib.Order)
-		res.Trades = append(res.Trades, r.Trades...)
+		dst, _, _ = e.settleInto(ib.Order, dst)
 	}
 	if ib.IsFullyFilled() {
 		delete(e.icebergOrders, ib.Order.ID)
-		res.Status = types.OrderStatusFilled
+		status = types.OrderStatusFilled
 	}
-	e.cascadeStops(res)
-	return res
+	dst = e.cascadeStops(dst)
+	return toMatchResult(ib.Order, dst, status, reason)
 }
 
-// match crosses taker against the resting book by price–time priority. It
-// returns the trades produced and, only for FOK takers, the maker orders touched
-// (so a failed FOK can be reversed). Trades print at the maker's resting price.
-func (e *Engine) match(taker *types.Order) ([]*types.Trade, map[int64]*types.Order) {
+// match crosses taker against the resting book by price–time priority, appending
+// value trades to dst. It returns the extended buffer and, only for FOK takers,
+// the maker orders touched (so a failed FOK can be reversed). Trades print at the
+// maker's resting price.
+func (e *Engine) match(taker *types.Order, dst []types.Trade) ([]types.Trade, map[int64]*types.Order) {
 	if e.config.ProRata {
-		return e.matchProRata(taker)
+		return e.matchProRata(taker, dst)
 	}
-	var trades []*types.Trade
 	var makerOrders map[int64]*types.Order
 	trackMakers := taker.TimeInForce == types.TIFFillOrKill
+	start := len(dst)
 
 	for taker.RemainingQty != 0 {
 		var maker *types.Order
@@ -474,7 +502,7 @@ func (e *Engine) match(taker *types.Order) ([]*types.Trade, map[int64]*types.Ord
 			switch e.config.SelfTradePrevention {
 			case STPCancelNewest:
 				taker.Status = types.OrderStatusCancelled
-				return e.finish(trades), makerOrders
+				return e.recordLast(dst, start), makerOrders
 			case STPCancelOldest:
 				_ = maker.Cancel()
 				_, _ = e.book.Remove(maker.ID)
@@ -483,15 +511,14 @@ func (e *Engine) match(taker *types.Order) ([]*types.Trade, map[int64]*types.Ord
 				taker.Status = types.OrderStatusCancelled
 				_ = maker.Cancel()
 				_, _ = e.book.Remove(maker.ID)
-				return e.finish(trades), makerOrders
+				return e.recordLast(dst, start), makerOrders
 			case STPAllow:
 				// fall through and trade
 			}
 		}
 
 		qty := min(taker.RemainingQty, maker.RemainingQty)
-		tr := e.executeTrade(taker, maker, maker.Price, qty)
-		trades = append(trades, tr)
+		dst = e.executeTrade(taker, maker, maker.Price, qty, dst)
 		if trackMakers {
 			if makerOrders == nil {
 				makerOrders = make(map[int64]*types.Order)
@@ -517,22 +544,14 @@ func (e *Engine) match(taker *types.Order) ([]*types.Trade, map[int64]*types.Ord
 		}
 	}
 
-	return e.finish(trades), makerOrders
-}
-
-// reject marks the order and result rejected with reason and returns the result.
-func reject(res *MatchResult, order *types.Order, reason error) *MatchResult {
-	order.Status = types.OrderStatusRejected
-	res.Status = types.OrderStatusRejected
-	res.RejectionReason = reason
-	return res
+	return e.recordLast(dst, start), makerOrders
 }
 
 // outsideBand reports whether price is beyond the circuit-breaker collar around
 // the last trade price. Disabled when the band is zero or no trade has printed.
 // The band is a decimal fraction; this runs only on limit-order entry (cold).
 func (e *Engine) outsideBand(price int64) bool {
-	if e.config.PriceBand.LessThanOrEqual(decimal.Zero) {
+	if !e.bandEnabled {
 		return false
 	}
 	ref := e.book.LastTradePrice()
@@ -587,11 +606,11 @@ func (e *Engine) wouldCross(order *types.Order) bool {
 
 // matchProRata crosses taker against the book allocating each price level's
 // fills in proportion to resting size, rather than by time priority. Self orders
-// are skipped. Trades print at the maker's price.
-func (e *Engine) matchProRata(taker *types.Order) ([]*types.Trade, map[int64]*types.Order) {
-	var trades []*types.Trade
+// are skipped. Trades print at the maker's price and are appended to dst.
+func (e *Engine) matchProRata(taker *types.Order, dst []types.Trade) ([]types.Trade, map[int64]*types.Order) {
 	var makerOrders map[int64]*types.Order
 	trackMakers := taker.TimeInForce == types.TIFFillOrKill
+	start := len(dst)
 
 	for taker.RemainingQty != 0 {
 		var price int64
@@ -631,8 +650,7 @@ func (e *Engine) matchProRata(taker *types.Order) ([]*types.Trade, map[int64]*ty
 			if a <= 0 {
 				continue
 			}
-			tr := e.executeTrade(taker, maker, price, a)
-			trades = append(trades, tr)
+			dst = e.executeTrade(taker, maker, price, a, dst)
 			if trackMakers {
 				if makerOrders == nil {
 					makerOrders = make(map[int64]*types.Order)
@@ -656,7 +674,7 @@ func (e *Engine) matchProRata(taker *types.Order) ([]*types.Trade, map[int64]*ty
 		// If the level wasn't fully consumed, the taker is filled ⇒ loop ends.
 	}
 
-	return e.finish(trades), makerOrders
+	return e.recordLast(dst, start), makerOrders
 }
 
 // proRataAllocate splits q across orders in proportion to their remaining size,
@@ -670,10 +688,7 @@ func proRataAllocate(orders []*types.Order, q int64) []int64 {
 	allocs := make([]int64, len(orders))
 	var allocated int64
 	for i, o := range orders {
-		a := q * o.RemainingQty / total
-		if a > o.RemainingQty {
-			a = o.RemainingQty
-		}
+		a := min(q*o.RemainingQty/total, o.RemainingQty)
 		allocs[i] = a
 		allocated += a
 	}
@@ -692,18 +707,18 @@ func proRataAllocate(orders []*types.Order, q int64) []int64 {
 	return allocs
 }
 
-// finish records the last trade price if any trades occurred and returns the
-// trade slice unchanged (a small helper to keep the match loop's early returns
-// consistent).
-func (e *Engine) finish(trades []*types.Trade) []*types.Trade {
-	if len(trades) > 0 {
-		e.book.SetLastTradePrice(trades[len(trades)-1].Price)
+// recordLast sets the last trade price from the final trade appended since start
+// (if any) and returns dst unchanged.
+func (e *Engine) recordLast(dst []types.Trade, start int) []types.Trade {
+	if len(dst) > start {
+		e.book.SetLastTradePrice(dst[len(dst)-1].Price)
 	}
-	return trades
+	return dst
 }
 
-// executeTrade fills both sides, sequences the trade, and builds it at price.
-func (e *Engine) executeTrade(taker, maker *types.Order, price, qty int64) *types.Trade {
+// executeTrade fills both sides, sequences the trade, and appends it (as a value)
+// to dst at price — no per-trade heap allocation.
+func (e *Engine) executeTrade(taker, maker *types.Order, price, qty int64, dst []types.Trade) []types.Trade {
 	_ = taker.Fill(qty)
 	_ = maker.Fill(qty)
 	e.tradeSeq++
@@ -714,16 +729,16 @@ func (e *Engine) executeTrade(taker, maker *types.Order, price, qty int64) *type
 	} else {
 		buy, sell = maker, taker
 	}
-	tr := types.NewTrade(e.config.Symbol, price, qty, buy, sell, taker.Side)
+	tr := types.NewTradeValue(e.config.Symbol, price, qty, buy, sell, taker.Side)
 	tr.ID = e.tradeSeq
 	tr.SequenceNum = e.tradeSeq
-	return tr
+	return append(dst, tr)
 }
 
 // reverseTrade unwinds a single trade against a maker (FOK failure path),
 // restoring the maker's quantities, its resting level total, and re-adding it to
 // the book if it had been fully consumed.
-func (e *Engine) reverseTrade(tr *types.Trade, makerOrders map[int64]*types.Order) {
+func (e *Engine) reverseTrade(tr types.Trade, makerOrders map[int64]*types.Order) {
 	maker, ok := makerOrders[tr.MakerOrderID]
 	if !ok {
 		maker, ok = e.book.Get(tr.MakerOrderID)
