@@ -35,6 +35,10 @@ const (
 	STPCancelOldest SelfTradePrevention = "CANCEL_OLDEST"
 	// STPCancelBoth cancels both the incoming order and the resting maker.
 	STPCancelBoth SelfTradePrevention = "CANCEL_BOTH"
+	// STPDecrement reduces both orders by their overlapping quantity without a
+	// trade (the smaller side fully cancels, the larger shrinks) and continues —
+	// the modern Binance default. Preserves the most liquidity of the four.
+	STPDecrement SelfTradePrevention = "DECREMENT"
 	// STPAllow permits the self-trade to execute.
 	STPAllow SelfTradePrevention = "ALLOW"
 )
@@ -313,7 +317,7 @@ func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trad
 		order.Status = types.OrderStatusRejected
 		return dst, types.OrderStatusRejected, types.ErrNewOrdersHalted
 	}
-	if order.Type == types.OrderTypeLimit && e.outsideBand(order.Price) {
+	if order.Type == types.OrderTypeLimit && !order.Privileged && e.outsideBand(order.Price) {
 		order.Status = types.OrderStatusRejected
 		return dst, types.OrderStatusRejected, types.ErrPriceOutsideBand
 	}
@@ -647,9 +651,9 @@ func (e *Engine) match(taker *types.Order, dst []types.Trade) ([]types.Trade, ma
 			}
 		}
 
-		// Self-trade prevention.
-		if taker.UserID == maker.UserID {
-			switch e.config.SelfTradePrevention {
+		// Self-trade prevention (the taker's mode decides).
+		if e.isSelfMatch(taker, maker) {
+			switch e.takerSTP(taker) {
 			case STPCancelNewest:
 				taker.Status = types.OrderStatusCancelled
 				return e.recordLast(dst, start), makerOrders
@@ -662,6 +666,18 @@ func (e *Engine) match(taker *types.Order, dst []types.Trade) ([]types.Trade, ma
 				_ = maker.Cancel()
 				_, _ = e.book.Remove(maker.ID)
 				return e.recordLast(dst, start), makerOrders
+			case STPDecrement:
+				// Reduce both by the overlap with no trade; the smaller side fully
+				// cancels, the larger shrinks; then continue matching the taker.
+				e.decrement(taker, maker)
+				if maker.RemainingQty == 0 {
+					_, _ = e.book.Remove(maker.ID)
+				}
+				if taker.RemainingQty == 0 {
+					taker.Status = types.OrderStatusCancelled
+					return e.recordLast(dst, start), makerOrders
+				}
+				continue
 			case STPAllow:
 				// fall through and trade
 			}
@@ -695,6 +711,40 @@ func (e *Engine) match(taker *types.Order, dst []types.Trade) ([]types.Trade, ma
 	}
 
 	return e.recordLast(dst, start), makerOrders
+}
+
+// isSelfMatch reports whether taker and maker should be self-trade-prevented: same
+// user, or a shared non-zero trade group. Privileged (e.g. liquidation) takers are
+// exempt so their own orders are never self-blocked.
+func (e *Engine) isSelfMatch(taker, maker *types.Order) bool {
+	if taker.Privileged {
+		return false
+	}
+	if taker.UserID == maker.UserID {
+		return true
+	}
+	return taker.TradeGroupID != 0 && taker.TradeGroupID == maker.TradeGroupID
+}
+
+// takerSTP is the self-trade-prevention mode that governs this match — the taker's
+// per-order STPMode if set, else the engine default (the taker's mode decides).
+func (e *Engine) takerSTP(taker *types.Order) SelfTradePrevention {
+	if taker.STPMode != "" {
+		return SelfTradePrevention(taker.STPMode)
+	}
+	return e.config.SelfTradePrevention
+}
+
+// decrement applies STPDecrement: reduce both orders by their overlap (quantity and
+// remaining, keeping filled), printing no trade, and shrink the maker's resting
+// level aggregate accordingly.
+func (e *Engine) decrement(taker, maker *types.Order) {
+	d := min(taker.RemainingQty, maker.RemainingQty)
+	taker.Quantity -= d
+	taker.RemainingQty -= d
+	maker.Quantity -= d
+	maker.RemainingQty -= d
+	e.book.UpdateOrderQuantity(maker.ID, d)
 }
 
 // outsideBand reports whether price is beyond the circuit-breaker collar around
@@ -787,7 +837,7 @@ func (e *Engine) matchProRata(taker *types.Order, dst []types.Trade) ([]types.Tr
 		eligible := make([]*types.Order, 0)
 		var total int64
 		for _, o := range e.book.GetOrdersAtPrice(oppSide, price) {
-			if o.UserID == taker.UserID {
+			if e.isSelfMatch(taker, o) {
 				continue
 			}
 			eligible = append(eligible, o)

@@ -78,6 +78,19 @@ type Order struct {
 	Status        OrderStatus `json:"status"`
 	CreatedAt     time.Time   `json:"created_at"`
 	UpdatedAt     time.Time   `json:"updated_at"`
+
+	// STPMode, if non-empty, overrides the engine's self-trade-prevention mode for
+	// this (taker) order — the taker's mode decides, as real venues do. Values are
+	// the matching.SelfTradePrevention constants (carried as a string to avoid a
+	// package cycle).
+	STPMode string `json:"stp_mode,omitempty"`
+	// TradeGroupID, if non-zero, extends self-trade prevention across accounts: two
+	// orders sharing a group are treated as self even with different UserIDs.
+	TradeGroupID int64 `json:"trade_group_id,omitempty"`
+	// Privileged marks an order (e.g. a liquidation / forced match injected by the
+	// risk layer) exempt from self-trade prevention and the price band, so the
+	// liquidation engine's own orders are never self-blocked or collared.
+	Privileged bool `json:"privileged,omitempty"`
 }
 
 // AsPostOnly marks the order maker-only and returns it (for fluent construction).
