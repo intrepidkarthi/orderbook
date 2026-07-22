@@ -7,6 +7,7 @@
 // orderID → *node index gives O(1) cancellation of any order without scanning.
 // Best bid/ask is O(1).
 //
+// Prices are integer ticks and quantities integer lots (int64) — exact and fast.
 // The book is safe for concurrent use, but it is intended to be driven by a
 // single writer (the matching engine); readers should prefer Snapshot.
 package orderbook
@@ -16,7 +17,6 @@ import (
 	"time"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
-	"github.com/shopspring/decimal"
 )
 
 // node is an order's entry in a price level's intrusive FIFO list. It also holds
@@ -28,10 +28,11 @@ type node struct {
 	level *PriceLevel
 }
 
-// PriceLevel is the FIFO queue of resting orders at one price.
+// PriceLevel is the FIFO queue of resting orders at one price. Price is in ticks
+// and TotalQty in lots.
 type PriceLevel struct {
-	Price    decimal.Decimal
-	TotalQty decimal.Decimal
+	Price    int64
+	TotalQty int64
 	head     *node // oldest order (front of the FIFO)
 	tail     *node // newest order
 	count    int
@@ -48,7 +49,7 @@ func (pl *PriceLevel) push(n *node) {
 	}
 	pl.tail = n
 	pl.count++
-	pl.TotalQty = pl.TotalQty.Add(n.order.RemainingQty)
+	pl.TotalQty += n.order.RemainingQty
 }
 
 // unlink removes a node in O(1) and decrements the aggregate.
@@ -64,7 +65,7 @@ func (pl *PriceLevel) unlink(n *node) {
 		pl.tail = n.prev
 	}
 	pl.count--
-	pl.TotalQty = pl.TotalQty.Sub(n.order.RemainingQty)
+	pl.TotalQty -= n.order.RemainingQty
 	n.prev, n.next = nil, nil
 }
 
@@ -74,14 +75,15 @@ func (pl *PriceLevel) isEmpty() bool { return pl.count == 0 }
 type OrderBook struct {
 	mu             sync.RWMutex
 	symbol         string
-	bids           map[string]*PriceLevel // price string -> level
-	asks           map[string]*PriceLevel
-	nodes          map[string]*node  // orderID -> node, for O(1) cancel
-	bidPrices      []decimal.Decimal // sorted descending (best first)
-	askPrices      []decimal.Decimal // sorted ascending (best first)
-	lastTradePrice decimal.Decimal
+	bids           map[int64]*PriceLevel // price ticks -> level
+	asks           map[int64]*PriceLevel
+	nodes          map[int64]*node // orderID -> node, for O(1) cancel
+	bidPrices      []int64         // sorted descending (best first)
+	askPrices      []int64         // sorted ascending (best first)
+	lastTradePrice int64
 	lastTradeTime  time.Time
-	sequenceNum    uint64
+	sequenceNum    uint64 // book version, bumped on each add
+	orderSeq       int64  // assigns ids to orders that arrive without one
 	maxOrders      int
 }
 
@@ -98,11 +100,11 @@ func New(config Config) *OrderBook {
 	}
 	return &OrderBook{
 		symbol:    config.Symbol,
-		bids:      make(map[string]*PriceLevel),
-		asks:      make(map[string]*PriceLevel),
-		nodes:     make(map[string]*node),
-		bidPrices: make([]decimal.Decimal, 0),
-		askPrices: make([]decimal.Decimal, 0),
+		bids:      make(map[int64]*PriceLevel),
+		asks:      make(map[int64]*PriceLevel),
+		nodes:     make(map[int64]*node),
+		bidPrices: make([]int64, 0),
+		askPrices: make([]int64, 0),
 		maxOrders: config.MaxOrders,
 	}
 }
@@ -110,7 +112,8 @@ func New(config Config) *OrderBook {
 // Symbol returns the book's instrument symbol.
 func (ob *OrderBook) Symbol() string { return ob.symbol }
 
-// Add inserts a resting order. Duplicate ids are ignored; a full book returns
+// Add inserts a resting order. An order that arrives without an id (ID==0) is
+// assigned a monotonic one. Duplicate ids are ignored; a full book returns
 // ErrOrderBookFull.
 func (ob *OrderBook) Add(order *types.Order) error {
 	ob.mu.Lock()
@@ -119,29 +122,32 @@ func (ob *OrderBook) Add(order *types.Order) error {
 	if len(ob.nodes) >= ob.maxOrders {
 		return types.ErrOrderBookFull
 	}
+
+	ob.sequenceNum++
+	if order.ID == 0 {
+		ob.orderSeq++
+		order.ID = ob.orderSeq
+	}
 	if _, exists := ob.nodes[order.ID]; exists {
 		return nil
 	}
 
-	ob.sequenceNum++
-	order.SequenceNum = ob.sequenceNum
-
-	priceStr := order.Price.String()
+	price := order.Price
 	var level *PriceLevel
 	if order.Side == types.SideBuy {
-		l, ok := ob.bids[priceStr]
+		l, ok := ob.bids[price]
 		if !ok {
-			l = &PriceLevel{Price: order.Price}
-			ob.bids[priceStr] = l
-			ob.insertBidPrice(order.Price)
+			l = &PriceLevel{Price: price}
+			ob.bids[price] = l
+			ob.insertBidPrice(price)
 		}
 		level = l
 	} else {
-		l, ok := ob.asks[priceStr]
+		l, ok := ob.asks[price]
 		if !ok {
-			l = &PriceLevel{Price: order.Price}
-			ob.asks[priceStr] = l
-			ob.insertAskPrice(order.Price)
+			l = &PriceLevel{Price: price}
+			ob.asks[price] = l
+			ob.insertAskPrice(price)
 		}
 		level = l
 	}
@@ -154,7 +160,7 @@ func (ob *OrderBook) Add(order *types.Order) error {
 
 // Remove deletes an order by id in O(1) (plus O(P) only when it empties its
 // level, which cleans up the price slice), and returns the order.
-func (ob *OrderBook) Remove(orderID string) (*types.Order, error) {
+func (ob *OrderBook) Remove(orderID int64) (*types.Order, error) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 
@@ -167,20 +173,20 @@ func (ob *OrderBook) Remove(orderID string) (*types.Order, error) {
 	delete(ob.nodes, orderID)
 
 	if level.isEmpty() {
-		priceStr := n.order.Price.String()
+		price := n.order.Price
 		if n.order.Side == types.SideBuy {
-			delete(ob.bids, priceStr)
-			ob.removeBidPrice(n.order.Price)
+			delete(ob.bids, price)
+			ob.removeBidPrice(price)
 		} else {
-			delete(ob.asks, priceStr)
-			ob.removeAskPrice(n.order.Price)
+			delete(ob.asks, price)
+			ob.removeAskPrice(price)
 		}
 	}
 	return n.order, nil
 }
 
 // Get returns a resting order by id.
-func (ob *OrderBook) Get(orderID string) (*types.Order, bool) {
+func (ob *OrderBook) Get(orderID int64) (*types.Order, bool) {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
 	n, ok := ob.nodes[orderID]
@@ -190,26 +196,26 @@ func (ob *OrderBook) Get(orderID string) (*types.Order, bool) {
 	return n.order, true
 }
 
-// BestBid returns the highest bid price and its aggregate quantity.
-func (ob *OrderBook) BestBid() (price, qty decimal.Decimal, ok bool) {
+// BestBid returns the highest bid price (ticks) and its aggregate quantity (lots).
+func (ob *OrderBook) BestBid() (price, qty int64, ok bool) {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
 	if len(ob.bidPrices) == 0 {
-		return decimal.Zero, decimal.Zero, false
+		return 0, 0, false
 	}
 	p := ob.bidPrices[0]
-	return p, ob.bids[p.String()].TotalQty, true
+	return p, ob.bids[p].TotalQty, true
 }
 
-// BestAsk returns the lowest ask price and its aggregate quantity.
-func (ob *OrderBook) BestAsk() (price, qty decimal.Decimal, ok bool) {
+// BestAsk returns the lowest ask price (ticks) and its aggregate quantity (lots).
+func (ob *OrderBook) BestAsk() (price, qty int64, ok bool) {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
 	if len(ob.askPrices) == 0 {
-		return decimal.Zero, decimal.Zero, false
+		return 0, 0, false
 	}
 	p := ob.askPrices[0]
-	return p, ob.asks[p.String()].TotalQty, true
+	return p, ob.asks[p].TotalQty, true
 }
 
 // PeekBestBidOrder returns the front (oldest) order at the best bid without
@@ -220,7 +226,7 @@ func (ob *OrderBook) PeekBestBidOrder() *types.Order {
 	if len(ob.bidPrices) == 0 {
 		return nil
 	}
-	level := ob.bids[ob.bidPrices[0].String()]
+	level := ob.bids[ob.bidPrices[0]]
 	if level == nil || level.head == nil {
 		return nil
 	}
@@ -235,42 +241,43 @@ func (ob *OrderBook) PeekBestAskOrder() *types.Order {
 	if len(ob.askPrices) == 0 {
 		return nil
 	}
-	level := ob.asks[ob.askPrices[0].String()]
+	level := ob.asks[ob.askPrices[0]]
 	if level == nil || level.head == nil {
 		return nil
 	}
 	return level.head.order
 }
 
-// Spread returns best ask − best bid, or ok=false if either side is empty.
-func (ob *OrderBook) Spread() (decimal.Decimal, bool) {
+// Spread returns best ask − best bid (ticks), or ok=false if either side is empty.
+func (ob *OrderBook) Spread() (int64, bool) {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
 	if len(ob.bidPrices) == 0 || len(ob.askPrices) == 0 {
-		return decimal.Zero, false
+		return 0, false
 	}
-	return ob.askPrices[0].Sub(ob.bidPrices[0]), true
+	return ob.askPrices[0] - ob.bidPrices[0], true
 }
 
-// MidPrice returns (best bid + best ask) / 2, or ok=false if either side is empty.
-func (ob *OrderBook) MidPrice() (decimal.Decimal, bool) {
+// MidPrice returns (best bid + best ask) / 2 in ticks (floored), or ok=false if
+// either side is empty.
+func (ob *OrderBook) MidPrice() (int64, bool) {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
 	if len(ob.bidPrices) == 0 || len(ob.askPrices) == 0 {
-		return decimal.Zero, false
+		return 0, false
 	}
-	return ob.bidPrices[0].Add(ob.askPrices[0]).Div(decimal.NewFromInt(2)), true
+	return (ob.bidPrices[0] + ob.askPrices[0]) / 2, true
 }
 
-// LastTradePrice returns the most recent execution price.
-func (ob *OrderBook) LastTradePrice() decimal.Decimal {
+// LastTradePrice returns the most recent execution price (ticks).
+func (ob *OrderBook) LastTradePrice() int64 {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
 	return ob.lastTradePrice
 }
 
-// SetLastTradePrice records the most recent execution price and time.
-func (ob *OrderBook) SetLastTradePrice(price decimal.Decimal) {
+// SetLastTradePrice records the most recent execution price (ticks) and time.
+func (ob *OrderBook) SetLastTradePrice(price int64) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 	ob.lastTradePrice = price
@@ -283,7 +290,7 @@ func (ob *OrderBook) GetBidLevels(depth int) []*PriceLevel {
 	defer ob.mu.RUnlock()
 	levels := make([]*PriceLevel, 0, depth)
 	for i := 0; i < len(ob.bidPrices) && i < depth; i++ {
-		l := ob.bids[ob.bidPrices[i].String()]
+		l := ob.bids[ob.bidPrices[i]]
 		levels = append(levels, &PriceLevel{Price: l.Price, TotalQty: l.TotalQty})
 	}
 	return levels
@@ -295,21 +302,22 @@ func (ob *OrderBook) GetAskLevels(depth int) []*PriceLevel {
 	defer ob.mu.RUnlock()
 	levels := make([]*PriceLevel, 0, depth)
 	for i := 0; i < len(ob.askPrices) && i < depth; i++ {
-		l := ob.asks[ob.askPrices[i].String()]
+		l := ob.asks[ob.askPrices[i]]
 		levels = append(levels, &PriceLevel{Price: l.Price, TotalQty: l.TotalQty})
 	}
 	return levels
 }
 
-// GetOrdersAtPrice returns a copy of the FIFO order queue at a given side/price.
-func (ob *OrderBook) GetOrdersAtPrice(side types.Side, price decimal.Decimal) []*types.Order {
+// GetOrdersAtPrice returns a copy of the FIFO order queue at a given side/price
+// (ticks).
+func (ob *OrderBook) GetOrdersAtPrice(side types.Side, price int64) []*types.Order {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
 	var level *PriceLevel
 	if side == types.SideBuy {
-		level = ob.bids[price.String()]
+		level = ob.bids[price]
 	} else {
-		level = ob.asks[price.String()]
+		level = ob.asks[price]
 	}
 	if level == nil {
 		return nil
@@ -323,21 +331,21 @@ func (ob *OrderBook) GetOrdersAtPrice(side types.Side, price decimal.Decimal) []
 
 // UpdateOrderQuantity decrements the aggregate quantity at a resting order's
 // level after that order is partially filled in place. O(1).
-func (ob *OrderBook) UpdateOrderQuantity(orderID string, filledQty decimal.Decimal) {
+func (ob *OrderBook) UpdateOrderQuantity(orderID int64, filledQty int64) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 	if n, ok := ob.nodes[orderID]; ok {
-		n.level.TotalQty = n.level.TotalQty.Sub(filledQty)
+		n.level.TotalQty -= filledQty
 	}
 }
 
 // RestoreOrderQuantity adds qty back to the aggregate total at a resting order's
 // level, undoing a prior UpdateOrderQuantity (used by FOK reversal). O(1).
-func (ob *OrderBook) RestoreOrderQuantity(orderID string, qty decimal.Decimal) {
+func (ob *OrderBook) RestoreOrderQuantity(orderID int64, qty int64) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 	if n, ok := ob.nodes[orderID]; ok {
-		n.level.TotalQty = n.level.TotalQty.Add(qty)
+		n.level.TotalQty += qty
 	}
 }
 
@@ -349,76 +357,76 @@ func (ob *OrderBook) Count() int {
 }
 
 // insertBidPrice inserts price into the descending-sorted bid price slice.
-func (ob *OrderBook) insertBidPrice(price decimal.Decimal) {
+func (ob *OrderBook) insertBidPrice(price int64) {
 	low, high := 0, len(ob.bidPrices)
 	for low < high {
 		mid := (low + high) / 2
-		if ob.bidPrices[mid].GreaterThan(price) {
+		if ob.bidPrices[mid] > price {
 			low = mid + 1
 		} else {
 			high = mid
 		}
 	}
-	ob.bidPrices = append(ob.bidPrices, decimal.Zero)
+	ob.bidPrices = append(ob.bidPrices, 0)
 	copy(ob.bidPrices[low+1:], ob.bidPrices[low:])
 	ob.bidPrices[low] = price
 }
 
 // insertAskPrice inserts price into the ascending-sorted ask price slice.
-func (ob *OrderBook) insertAskPrice(price decimal.Decimal) {
+func (ob *OrderBook) insertAskPrice(price int64) {
 	low, high := 0, len(ob.askPrices)
 	for low < high {
 		mid := (low + high) / 2
-		if ob.askPrices[mid].LessThan(price) {
+		if ob.askPrices[mid] < price {
 			low = mid + 1
 		} else {
 			high = mid
 		}
 	}
-	ob.askPrices = append(ob.askPrices, decimal.Zero)
+	ob.askPrices = append(ob.askPrices, 0)
 	copy(ob.askPrices[low+1:], ob.askPrices[low:])
 	ob.askPrices[low] = price
 }
 
 // removeBidPrice deletes price from the descending-sorted bid price slice using
-// binary search (O(log P) to locate) — not a linear scan, which on decimals
-// would call the allocating Equal for every level.
-func (ob *OrderBook) removeBidPrice(price decimal.Decimal) {
+// binary search (O(log P) to locate).
+func (ob *OrderBook) removeBidPrice(price int64) {
 	low, high := 0, len(ob.bidPrices)
 	for low < high {
 		mid := (low + high) / 2
-		if ob.bidPrices[mid].GreaterThan(price) {
+		if ob.bidPrices[mid] > price {
 			low = mid + 1
 		} else {
 			high = mid
 		}
 	}
-	if low < len(ob.bidPrices) && ob.bidPrices[low].Equal(price) {
+	if low < len(ob.bidPrices) && ob.bidPrices[low] == price {
 		ob.bidPrices = append(ob.bidPrices[:low], ob.bidPrices[low+1:]...)
 	}
 }
 
 // removeAskPrice deletes price from the ascending-sorted ask price slice using
 // binary search.
-func (ob *OrderBook) removeAskPrice(price decimal.Decimal) {
+func (ob *OrderBook) removeAskPrice(price int64) {
 	low, high := 0, len(ob.askPrices)
 	for low < high {
 		mid := (low + high) / 2
-		if ob.askPrices[mid].LessThan(price) {
+		if ob.askPrices[mid] < price {
 			low = mid + 1
 		} else {
 			high = mid
 		}
 	}
-	if low < len(ob.askPrices) && ob.askPrices[low].Equal(price) {
+	if low < len(ob.askPrices) && ob.askPrices[low] == price {
 		ob.askPrices = append(ob.askPrices[:low], ob.askPrices[low+1:]...)
 	}
 }
 
-// SnapshotLevel is one aggregated price level in a Snapshot.
+// SnapshotLevel is one aggregated price level in a Snapshot (price in ticks,
+// quantity in lots).
 type SnapshotLevel struct {
-	Price    decimal.Decimal `json:"price"`
-	Quantity decimal.Decimal `json:"quantity"`
+	Price    int64 `json:"price"`
+	Quantity int64 `json:"quantity"`
 }
 
 // Snapshot is a consistent, copyable view of the book to a given depth — the
@@ -427,18 +435,18 @@ type Snapshot struct {
 	Symbol         string          `json:"symbol"`
 	Bids           []SnapshotLevel `json:"bids"`
 	Asks           []SnapshotLevel `json:"asks"`
-	LastTradePrice decimal.Decimal `json:"last_trade_price"`
+	LastTradePrice int64           `json:"last_trade_price"`
 	SequenceNum    uint64          `json:"sequence_num"`
 	Timestamp      time.Time       `json:"timestamp"`
 }
 
 // L3Order is a single resting order in an L3 (market-by-order) snapshot.
 type L3Order struct {
-	OrderID     string          `json:"order_id"`
-	UserID      string          `json:"user_id"`
-	Price       decimal.Decimal `json:"price"`
-	Quantity    decimal.Decimal `json:"quantity"` // remaining
-	SequenceNum uint64          `json:"sequence_num"`
+	OrderID     int64  `json:"order_id"`
+	UserID      string `json:"user_id"`
+	Price       int64  `json:"price"`
+	Quantity    int64  `json:"quantity"` // remaining
+	SequenceNum int64  `json:"sequence_num"`
 }
 
 // SnapshotL3 is a market-by-order (L3) view: every resting order individually,
@@ -458,16 +466,16 @@ func (ob *OrderBook) SnapshotL3(depth int) *SnapshotL3 {
 	defer ob.mu.RUnlock()
 
 	s := &SnapshotL3{Symbol: ob.symbol, SequenceNum: ob.sequenceNum, Timestamp: time.Now().UTC()}
-	appendSide := func(prices []decimal.Decimal, levels map[string]*PriceLevel) []L3Order {
+	appendSide := func(prices []int64, levels map[int64]*PriceLevel) []L3Order {
 		out := make([]L3Order, 0, depth)
 		for i := 0; i < len(prices) && i < depth; i++ {
-			for n := levels[prices[i].String()].head; n != nil; n = n.next {
+			for n := levels[prices[i]].head; n != nil; n = n.next {
 				out = append(out, L3Order{
 					OrderID:     n.order.ID,
 					UserID:      n.order.UserID,
 					Price:       n.order.Price,
 					Quantity:    n.order.RemainingQty,
-					SequenceNum: n.order.SequenceNum,
+					SequenceNum: n.order.ID,
 				})
 			}
 		}
@@ -492,11 +500,11 @@ func (ob *OrderBook) Snapshot(depth int) *Snapshot {
 		Timestamp:      time.Now().UTC(),
 	}
 	for i := 0; i < len(ob.bidPrices) && i < depth; i++ {
-		l := ob.bids[ob.bidPrices[i].String()]
+		l := ob.bids[ob.bidPrices[i]]
 		s.Bids = append(s.Bids, SnapshotLevel{Price: l.Price, Quantity: l.TotalQty})
 	}
 	for i := 0; i < len(ob.askPrices) && i < depth; i++ {
-		l := ob.asks[ob.askPrices[i].String()]
+		l := ob.asks[ob.askPrices[i]]
 		s.Asks = append(s.Asks, SnapshotLevel{Price: l.Price, Quantity: l.TotalQty})
 	}
 	return s

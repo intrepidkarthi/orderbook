@@ -4,6 +4,10 @@
 // JSON API to JavaScript, so the browser demo runs the *real* engine rather than
 // a reimplementation (docs/DEMO-SPEC.md §3).
 //
+// The engine works in integer ticks/lots; this bridge stays decimal-facing for
+// JavaScript, converting at an Instrument boundary (cent ticks, milli lots) so
+// the front-end keeps sending and receiving human decimals.
+//
 // Build:  GOOS=js GOARCH=wasm go build -o web/obook.wasm ./cmd/obwasm
 //
 // JS globals installed: obReset(symbol), obSubmit(user,side,type,price,qty),
@@ -19,10 +23,20 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-var engine *matching.Engine
+var (
+	engine *matching.Engine
+	inst   types.Instrument
+)
+
+// demoInstrument prices to the cent and sizes to the milli-unit — fine grained
+// enough for anything the demo UI sends, while staying exact integers inside.
+func demoInstrument(symbol string) types.Instrument {
+	return types.NewInstrument(symbol, decimal.RequireFromString("0.01"), decimal.RequireFromString("0.001"))
+}
 
 func main() {
-	engine = matching.NewEngine(matching.DefaultConfig("DEMO"))
+	inst = demoInstrument("DEMO")
+	engine = matching.NewEngine(matching.DefaultConfig(inst.Symbol))
 	js.Global().Set("obReset", js.FuncOf(reset))
 	js.Global().Set("obSubmit", js.FuncOf(submit))
 	js.Global().Set("obSnapshot", js.FuncOf(snapshot))
@@ -34,6 +48,7 @@ func reset(_ js.Value, args []js.Value) any {
 	if len(args) > 0 && args[0].Type() == js.TypeString {
 		symbol = args[0].String()
 	}
+	inst = demoInstrument(symbol)
 	engine = matching.NewEngine(matching.DefaultConfig(symbol))
 	return `{"ok":true}`
 }
@@ -72,7 +87,7 @@ func submit(_ js.Value, args []js.Value) any {
 	if otype == types.OrderTypeMarket {
 		tif = types.TIFImmediateOrCancel
 	}
-	order, err := types.NewOrder(user, engine.Book().Symbol(), side, otype, price, qty, tif)
+	order, err := inst.NewOrder(user, side, otype, price, qty, tif)
 	if err != nil {
 		return errJSON(err.Error())
 	}
@@ -84,8 +99,8 @@ func submit(_ js.Value, args []js.Value) any {
 	}
 	for _, tr := range res.Trades {
 		out.Trades = append(out.Trades, tradeOut{
-			Price:    tr.Price.String(),
-			Quantity: tr.Quantity.String(),
+			Price:    inst.TicksToPrice(tr.Price).String(),
+			Quantity: inst.LotsToQty(tr.Quantity).String(),
 			Taker:    string(tr.TakerSide),
 		})
 	}
@@ -116,19 +131,19 @@ func snapshot(_ js.Value, args []js.Value) any {
 	out := snapOut{
 		Bids:      make([]levelOut, 0, len(s.Bids)),
 		Asks:      make([]levelOut, 0, len(s.Asks)),
-		LastTrade: s.LastTradePrice.String(),
+		LastTrade: inst.TicksToPrice(s.LastTradePrice).String(),
 	}
 	for _, b := range s.Bids {
-		out.Bids = append(out.Bids, levelOut{Price: b.Price.String(), Size: b.Quantity.String()})
+		out.Bids = append(out.Bids, levelOut{Price: inst.TicksToPrice(b.Price).String(), Size: inst.LotsToQty(b.Quantity).String()})
 	}
 	for _, a := range s.Asks {
-		out.Asks = append(out.Asks, levelOut{Price: a.Price.String(), Size: a.Quantity.String()})
+		out.Asks = append(out.Asks, levelOut{Price: inst.TicksToPrice(a.Price).String(), Size: inst.LotsToQty(a.Quantity).String()})
 	}
 	if sp, ok := engine.Spread(); ok {
-		out.Spread = sp.String()
+		out.Spread = inst.TicksToPrice(sp).String()
 	}
 	if mid, ok := engine.MidPrice(); ok {
-		out.Mid = mid.String()
+		out.Mid = inst.TicksToPrice(mid).String()
 	}
 	return toJSON(out)
 }

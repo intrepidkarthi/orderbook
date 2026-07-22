@@ -5,7 +5,6 @@ import (
 	"strconv"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
-	"github.com/shopspring/decimal"
 )
 
 // NoiseTrader is an uninformed agent representing a *population* of participants:
@@ -20,12 +19,12 @@ import (
 // are realistic and simply get STP-cancelled.
 type NoiseTrader struct {
 	UserID         string
-	Population     int             // distinct trader identities (default 50)
-	ActProb        float64         // probability of acting on a given step
-	MarketFraction float64         // fraction of actions that are market orders
-	MaxOffsetTicks int             // passive limits sit 0..N ticks off the ref
-	Tick           decimal.Decimal // price increment
-	MinSize        int             // order size drawn uniformly in [MinSize,MaxSize]
+	Population     int     // distinct trader identities (default 50)
+	ActProb        float64 // probability of acting on a given step
+	MarketFraction float64 // fraction of actions that are market orders
+	MaxOffsetTicks int     // passive limits sit 0..N ticks off the ref
+	Tick           int64   // price increment (ticks)
+	MinSize        int     // order size drawn uniformly in [MinSize,MaxSize]
 	MaxSize        int
 }
 
@@ -37,7 +36,7 @@ func DefaultNoiseTrader(userID string) *NoiseTrader {
 		ActProb:        0.9,
 		MarketFraction: 0.3,
 		MaxOffsetTicks: 5,
-		Tick:           decimal.NewFromInt(1),
+		Tick:           1,
 		MinSize:        1,
 		MaxSize:        10,
 	}
@@ -57,12 +56,12 @@ func (nt *NoiseTrader) Act(v View, rng *rand.Rand) []*types.Order {
 	if rng.Float64() < 0.5 {
 		side = types.SideSell
 	}
-	size := decimal.NewFromInt(int64(nt.MinSize + rng.Intn(nt.maxMinusMin()+1)))
+	size := int64(nt.MinSize + rng.Intn(nt.maxMinusMin()+1))
 
 	// A market order (only worthwhile if there's liquidity to take).
 	if v.HasBook && rng.Float64() < nt.MarketFraction {
 		o, err := types.NewOrder(user, v.Symbol, side, types.OrderTypeMarket,
-			decimal.Zero, size, types.TIFImmediateOrCancel)
+			0, size, types.TIFImmediateOrCancel)
 		if err != nil {
 			return nil
 		}
@@ -70,15 +69,15 @@ func (nt *NoiseTrader) Act(v View, rng *rand.Rand) []*types.Order {
 	}
 
 	// A passive limit sitting offset ticks away from the reference price.
-	offset := nt.Tick.Mul(decimal.NewFromInt(int64(rng.Intn(nt.MaxOffsetTicks + 1))))
-	var price decimal.Decimal
+	offset := nt.tick() * int64(rng.Intn(nt.MaxOffsetTicks+1))
+	var price int64
 	if side == types.SideBuy {
-		price = v.Ref.Sub(offset)
+		price = v.Ref - offset
 	} else {
-		price = v.Ref.Add(offset)
+		price = v.Ref + offset
 	}
-	if price.LessThanOrEqual(decimal.Zero) {
-		price = nt.Tick
+	if price <= 0 {
+		price = nt.tick()
 	}
 
 	o, err := types.NewOrder(user, v.Symbol, side, types.OrderTypeLimit,
@@ -101,4 +100,11 @@ func (nt *NoiseTrader) population() int {
 		return 50
 	}
 	return nt.Population
+}
+
+func (nt *NoiseTrader) tick() int64 {
+	if nt.Tick <= 0 {
+		return 1
+	}
+	return nt.Tick
 }

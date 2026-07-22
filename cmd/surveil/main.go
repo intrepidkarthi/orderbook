@@ -11,12 +11,11 @@ import (
 
 	"github.com/intrepidkarthi/orderbook/pkg/surveillance"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
-	"github.com/shopspring/decimal"
 )
 
 func main() {
 	mon := surveillance.NewMonitor(
-		surveillance.NewSpoofDetector(surveillance.SpoofConfig{MinSize: decimal.NewFromInt(50), MaxLifetime: 4}),
+		surveillance.NewSpoofDetector(surveillance.SpoofConfig{MinSize: 50, MaxLifetime: 4}),
 		surveillance.NewRateLimiter(surveillance.RateConfig{MaxOrders: 5, Window: 8}),
 	)
 
@@ -49,34 +48,34 @@ func scenario() []surveillance.Event {
 	seq := uint64(0)
 	next := func() uint64 { seq++; return seq }
 
-	placed := func(user, id, size string) {
+	placed := func(user string, id, size int64) {
 		ev = append(ev, surveillance.Event{Kind: surveillance.OrderPlaced, Seq: next(),
-			UserID: user, OrderID: id, Side: types.SideBuy, Quantity: decimal.RequireFromString(size)})
+			UserID: user, OrderID: id, Side: types.SideBuy, Quantity: size})
 	}
-	cancelled := func(user, id string) {
+	cancelled := func(user string, id int64) {
 		ev = append(ev, surveillance.Event{Kind: surveillance.OrderCancelled, Seq: next(), UserID: user, OrderID: id})
 	}
-	trade := func(makerID, takerID, qty string) {
+	trade := func(makerID, takerID, qty int64) {
 		ev = append(ev, surveillance.Event{Kind: surveillance.Trade, Seq: next(),
-			MakerOrderID: makerID, TakerOrderID: takerID, Quantity: decimal.RequireFromString(qty)})
+			MakerOrderID: makerID, TakerOrderID: takerID, Quantity: qty})
 	}
 
 	// 1. A genuine market maker: posts, gets filled, then cancels the rest.
-	placed("maker", "m1", "80")
-	trade("m1", "taker-x", "80") // fully filled → legitimate
-	cancelled("maker", "m1")     // already filled; no alert
+	placed("maker", 1, 80)
+	trade(1, 99, 80)     // fully filled → legitimate
+	cancelled("maker", 1) // already filled; no alert
 
 	// 2. A spoofer layers three large bids and yanks them unfilled.
-	placed("spoofer", "s1", "100")
-	placed("spoofer", "s2", "120")
-	placed("spoofer", "s3", "90")
-	cancelled("spoofer", "s1")
-	cancelled("spoofer", "s2")
-	cancelled("spoofer", "s3")
+	placed("spoofer", 2, 100)
+	placed("spoofer", 3, 120)
+	placed("spoofer", 4, 90)
+	cancelled("spoofer", 2)
+	cancelled("spoofer", 3)
+	cancelled("spoofer", 4)
 
 	// 3. A quote-stuffer fires a burst of small orders.
 	for i := range 7 {
-		placed("stuffer", fmt.Sprintf("q%d", i), "1")
+		placed("stuffer", int64(100+i), 1)
 	}
 
 	return ev

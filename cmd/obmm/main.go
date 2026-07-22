@@ -11,7 +11,6 @@ import (
 
 	"github.com/intrepidkarthi/orderbook/pkg/backtest"
 	"github.com/intrepidkarthi/orderbook/pkg/strategy"
-	"github.com/shopspring/decimal"
 )
 
 func main() {
@@ -26,7 +25,7 @@ func main() {
 		Symbol:       "SIM",
 		Steps:        3000,
 		Seed:         1,
-		InitialPrice: decimal.NewFromInt(100),
+		InitialPrice: 100,
 		Quoter:       as,
 	}
 	r := backtest.Run(cfg)
@@ -39,9 +38,9 @@ func main() {
 	fmt.Printf("  steps       %d   (seed %d)\n", cfg.Steps, cfg.Seed)
 	fmt.Println(line)
 	fmt.Printf("  fills       %d\n", r.Fills)
-	fmt.Printf("  volume      %s\n", r.Volume)
-	fmt.Printf("  max |inv|   %s\n", r.MaxAbsInventory)
-	fmt.Printf("  final inv   %s\n", r.FinalInventory)
+	fmt.Printf("  volume      %d\n", r.Volume)
+	fmt.Printf("  max |inv|   %d\n", r.MaxAbsInventory)
+	fmt.Printf("  final inv   %d\n", r.FinalInventory)
 	fmt.Printf("  final PnL   %.2f\n", r.FinalPnL)
 	fmt.Printf("  Sharpe      %.2f\n", r.Sharpe)
 	fmt.Println(line)

@@ -13,7 +13,6 @@ import (
 	"fmt"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
-	"github.com/shopspring/decimal"
 )
 
 // EventKind is the type of an observed event.
@@ -31,12 +30,12 @@ type Event struct {
 	Kind         EventKind
 	Seq          uint64
 	UserID       string
-	OrderID      string
+	OrderID      int64
 	Side         types.Side
-	Price        decimal.Decimal
-	Quantity     decimal.Decimal
-	MakerOrderID string
-	TakerOrderID string
+	Price        int64 // ticks
+	Quantity     int64 // lots
+	MakerOrderID int64
+	TakerOrderID int64
 }
 
 // Alert is a raised surveillance signal.
@@ -80,8 +79,8 @@ func (m *Monitor) Alerts() []Alert { return m.alerts }
 
 // SpoofConfig configures the spoof detector.
 type SpoofConfig struct {
-	MinSize     decimal.Decimal // only orders at least this large are candidates
-	MaxLifetime uint64          // cancelled within this many events of placement
+	MinSize     int64  // only orders at least this large are candidates (lots)
+	MaxLifetime uint64 // cancelled within this many events of placement
 }
 
 // SpoofDetector flags large resting orders that are cancelled, unfilled, very
@@ -90,33 +89,33 @@ type SpoofConfig struct {
 // layering.
 type SpoofDetector struct {
 	cfg  SpoofConfig
-	live map[string]*orderRec
+	live map[int64]*orderRec
 }
 
 type orderRec struct {
 	user      string
 	placedSeq uint64
-	size      decimal.Decimal
-	filled    decimal.Decimal
+	size      int64
+	filled    int64
 }
 
 // NewSpoofDetector builds a spoof detector.
 func NewSpoofDetector(cfg SpoofConfig) *SpoofDetector {
-	return &SpoofDetector{cfg: cfg, live: make(map[string]*orderRec)}
+	return &SpoofDetector{cfg: cfg, live: make(map[int64]*orderRec)}
 }
 
 // Observe implements Detector.
 func (d *SpoofDetector) Observe(e Event) []Alert {
 	switch e.Kind {
 	case OrderPlaced:
-		d.live[e.OrderID] = &orderRec{user: e.UserID, placedSeq: e.Seq, size: e.Quantity, filled: decimal.Zero}
+		d.live[e.OrderID] = &orderRec{user: e.UserID, placedSeq: e.Seq, size: e.Quantity, filled: 0}
 
 	case Trade:
 		if r, ok := d.live[e.MakerOrderID]; ok {
-			r.filled = r.filled.Add(e.Quantity)
+			r.filled += e.Quantity
 		}
 		if r, ok := d.live[e.TakerOrderID]; ok {
-			r.filled = r.filled.Add(e.Quantity)
+			r.filled += e.Quantity
 		}
 
 	case OrderCancelled:
@@ -126,12 +125,12 @@ func (d *SpoofDetector) Observe(e Event) []Alert {
 		}
 		delete(d.live, e.OrderID)
 		lifetime := e.Seq - r.placedSeq
-		if r.filled.IsZero() && r.size.GreaterThanOrEqual(d.cfg.MinSize) && lifetime <= d.cfg.MaxLifetime {
+		if r.filled == 0 && r.size >= d.cfg.MinSize && lifetime <= d.cfg.MaxLifetime {
 			return []Alert{{
 				Kind:   "spoofing",
 				UserID: r.user,
 				Seq:    e.Seq,
-				Detail: fmt.Sprintf("order %s (size %s) cancelled unfilled %d events after placement", e.OrderID, r.size, lifetime),
+				Detail: fmt.Sprintf("order %d (size %d) cancelled unfilled %d events after placement", e.OrderID, r.size, lifetime),
 			}}
 		}
 	}

@@ -5,14 +5,11 @@ import (
 
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
-	"github.com/shopspring/decimal"
 )
 
-func dec(s string) decimal.Decimal { return decimal.RequireFromString(s) }
-
-func lim(t *testing.T, user string, side types.Side, price, qty string) *types.Order {
+func lim(t *testing.T, user string, side types.Side, price, qty int64) *types.Order {
 	t.Helper()
-	o, err := types.NewOrder(user, "BTC-USD", side, types.OrderTypeLimit, dec(price), dec(qty), types.TIFGoodTillCancel)
+	o, err := types.NewOrder(user, "BTC-USD", side, types.OrderTypeLimit, price, qty, types.TIFGoodTillCancel)
 	if err != nil {
 		t.Fatalf("NewOrder: %v", err)
 	}
@@ -24,11 +21,11 @@ func engine() *matching.Engine { return matching.NewEngine(matching.DefaultConfi
 // scriptOrders is a fixed set of orders that produce several trades.
 func scriptOrders(t *testing.T) []*types.Order {
 	return []*types.Order{
-		lim(t, "s1", types.SideSell, "101", "5"),
-		lim(t, "s2", types.SideSell, "102", "5"),
-		lim(t, "b1", types.SideBuy, "100", "3"),
-		lim(t, "b2", types.SideBuy, "102", "7"), // crosses s1 then s2
-		lim(t, "b3", types.SideBuy, "101", "1"),
+		lim(t, "s1", types.SideSell, 101, 5),
+		lim(t, "s2", types.SideSell, 102, 5),
+		lim(t, "b1", types.SideBuy, 100, 3),
+		lim(t, "b2", types.SideBuy, 102, 7), // crosses s1 then s2
+		lim(t, "b3", types.SideBuy, 101, 1),
 	}
 }
 
@@ -79,7 +76,7 @@ func TestDigest_Distinguishes(t *testing.T) {
 	base := Digest(Replay(engine(), NewStream(scriptOrders(t)...)))
 
 	// A different flow (extra crossing order) must change the digest.
-	extra := append(scriptOrders(t), lim(t, "b4", types.SideBuy, "102", "2"))
+	extra := append(scriptOrders(t), lim(t, "b4", types.SideBuy, 102, 2))
 	other := Digest(Replay(engine(), NewStream(extra...)))
 
 	if base == other {
@@ -98,7 +95,7 @@ func TestValueDigest(t *testing.T) {
 		t.Errorf("ValueDigest not stable across replay: %s vs %s", v1, v2)
 	}
 	// Distinguishes a different flow.
-	extra := append(scriptOrders(t), lim(t, "b4", types.SideBuy, "102", "2"))
+	extra := append(scriptOrders(t), lim(t, "b4", types.SideBuy, 102, 2))
 	if ValueDigest(Replay(engine(), stream)) == ValueDigest(Replay(engine(), NewStream(extra...))) {
 		t.Error("ValueDigest should differ for different flow")
 	}

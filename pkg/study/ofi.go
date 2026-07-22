@@ -15,7 +15,6 @@ import (
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
 	"github.com/intrepidkarthi/orderbook/pkg/signals"
 	"github.com/intrepidkarthi/orderbook/pkg/sim"
-	"github.com/shopspring/decimal"
 )
 
 // OFIConfig parameterizes the OFI study.
@@ -23,7 +22,7 @@ type OFIConfig struct {
 	Symbol       string
 	Steps        int
 	Seed         int64
-	InitialPrice decimal.Decimal
+	InitialPrice int64 // ticks
 	Noise        *sim.NoiseTrader
 }
 
@@ -34,11 +33,17 @@ func (c *OFIConfig) applyDefaults() {
 	if c.Steps <= 0 {
 		c.Steps = 5000
 	}
-	if c.InitialPrice.IsZero() {
-		c.InitialPrice = decimal.NewFromInt(100)
+	if c.InitialPrice == 0 {
+		c.InitialPrice = 100
 	}
 	if c.Noise == nil {
-		c.Noise = sim.DefaultNoiseTrader("noise")
+		// A deeper resting book than the shallow default: on the integer-tick grid,
+		// best-level order flow needs enough price levels around the touch to move
+		// the mid cleanly, which is what the OFI↔Δprice regression measures. A
+		// 5-tick book quantizes the signal away; ~40 ticks restores it.
+		nt := sim.DefaultNoiseTrader("noise")
+		nt.MaxOffsetTicks = 40
+		c.Noise = nt
 	}
 }
 
@@ -65,7 +70,7 @@ func RunOFI(cfg OFIConfig) OFIResult {
 	for step := 0; step < cfg.Steps; step++ {
 		if mid, ok := eng.MidPrice(); ok {
 			lastMid = mid
-		} else if ltp := eng.LastTradePrice(); ltp.IsPositive() {
+		} else if ltp := eng.LastTradePrice(); ltp > 0 {
 			lastMid = ltp
 		}
 		view := sim.View{
@@ -79,19 +84,27 @@ func RunOFI(cfg OFIConfig) OFIResult {
 			eng.Process(o)
 		}
 
-		// Capture the post-step best level and mid.
-		snaps = append(snaps, eng.Snapshot(1))
+		// Capture the post-step best level and mid. The regression needs the mid at
+		// full resolution, so compute it as a float from the best levels rather than
+		// the engine's integer-floored MidPrice (which would quantize away half-tick
+		// moves and drown the OFI signal in rounding noise).
+		sn := eng.Snapshot(1)
+		snaps = append(snaps, sn)
 		if mid, ok := eng.MidPrice(); ok {
 			lastMid = mid
 		}
-		mids = append(mids, lastMid.InexactFloat64())
+		midF := float64(lastMid)
+		if len(sn.Bids) > 0 && len(sn.Asks) > 0 {
+			midF = (float64(sn.Bids[0].Price) + float64(sn.Asks[0].Price)) / 2
+		}
+		mids = append(mids, midF)
 	}
 
 	// Per-interval OFI and contemporaneous price change.
 	ofi := make([]float64, 0, len(snaps))
 	dContemp := make([]float64, 0, len(snaps))
 	for i := 1; i < len(snaps); i++ {
-		ofi = append(ofi, signals.OFIStep(snaps[i-1], snaps[i]).InexactFloat64())
+		ofi = append(ofi, float64(signals.OFIStep(snaps[i-1], snaps[i])))
 		dContemp = append(dContemp, mids[i]-mids[i-1])
 	}
 

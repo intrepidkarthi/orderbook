@@ -9,24 +9,24 @@ import (
 
 func TestPostOnly_RestsWhenPassive(t *testing.T) {
 	e := newEngine()
-	e.Process(lim(t, "mm", types.SideSell, "101", "5")) // best ask 101
+	e.Process(lim(t, "mm", types.SideSell, 101, 5)) // best ask 101
 
 	// A post-only buy at 100 does not cross → rests as a maker.
-	res := e.Process(lim(t, "pm", types.SideBuy, "100", "3").AsPostOnly())
+	res := e.Process(lim(t, "pm", types.SideBuy, 100, 3).AsPostOnly())
 	if res.Status == types.OrderStatusRejected {
 		t.Fatalf("passive post-only should rest, got %q (%v)", res.Status, res.RejectionReason)
 	}
-	if bid, qty, ok := e.BestBid(); !ok || !bid.Equal(dec("100")) || !qty.Equal(dec("3")) {
-		t.Errorf("post-only should rest at 100 x 3, got %s x %s", bid, qty)
+	if bid, qty, ok := e.BestBid(); !ok || bid != 100 || qty != 3 {
+		t.Errorf("post-only should rest at 100 x 3, got %d x %d", bid, qty)
 	}
 }
 
 func TestPostOnly_RejectedWhenCrossing(t *testing.T) {
 	e := newEngine()
-	e.Process(lim(t, "mm", types.SideSell, "101", "5")) // best ask 101
+	e.Process(lim(t, "mm", types.SideSell, 101, 5)) // best ask 101
 
 	// A post-only buy at 101 would take → rejected, nothing rests, no trade.
-	res := e.Process(lim(t, "pm", types.SideBuy, "101", "3").AsPostOnly())
+	res := e.Process(lim(t, "pm", types.SideBuy, 101, 3).AsPostOnly())
 	if res.Status != types.OrderStatusRejected {
 		t.Fatalf("crossing post-only should be rejected, got %q", res.Status)
 	}
@@ -40,17 +40,17 @@ func TestPostOnly_RejectedWhenCrossing(t *testing.T) {
 	if _, _, ok := e.BestBid(); ok {
 		t.Error("rejected post-only must not rest on the book")
 	}
-	if _, qty, _ := e.BestAsk(); !qty.Equal(dec("5")) {
-		t.Errorf("resting ask should be untouched (5), got %s", qty)
+	if _, qty, _ := e.BestAsk(); qty != 5 {
+		t.Errorf("resting ask should be untouched (5), got %d", qty)
 	}
 }
 
 func TestPostOnly_LockingPriceCrosses(t *testing.T) {
 	e := newEngine()
-	e.Process(lim(t, "mm", types.SideBuy, "100", "5")) // best bid 100
+	e.Process(lim(t, "mm", types.SideBuy, 100, 5)) // best bid 100
 
 	// A post-only sell at 100 locks the book (sell price <= best bid) → rejected.
-	res := e.Process(lim(t, "pm", types.SideSell, "100", "3").AsPostOnly())
+	res := e.Process(lim(t, "pm", types.SideSell, 100, 3).AsPostOnly())
 	if res.Status != types.OrderStatusRejected {
 		t.Errorf("post-only sell at the bid should be rejected, got %q", res.Status)
 	}

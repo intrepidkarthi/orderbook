@@ -4,12 +4,11 @@ import (
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
-	"github.com/shopspring/decimal"
 )
 
 func mkOrder(user string, side types.Side, price int64, qty int64) *types.Order {
 	o, _ := types.NewOrder(user, "X", side, types.OrderTypeLimit,
-		decimal.NewFromInt(price), decimal.NewFromInt(qty), types.TIFGoodTillCancel)
+		price, qty, types.TIFGoodTillCancel)
 	return o
 }
 

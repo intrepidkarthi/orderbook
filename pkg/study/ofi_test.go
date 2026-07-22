@@ -2,12 +2,10 @@ package study
 
 import (
 	"testing"
-
-	"github.com/shopspring/decimal"
 )
 
 func TestRunOFI_ContemporaneousBeatsPredictive(t *testing.T) {
-	r := RunOFI(OFIConfig{Steps: 5000, Seed: 1, InitialPrice: decimal.NewFromInt(100)})
+	r := RunOFI(OFIConfig{Steps: 5000, Seed: 1, InitialPrice: 100})
 
 	if r.N != 4999 {
 		t.Errorf("N = %d, want 4999", r.N)
@@ -33,8 +31,8 @@ func TestRunOFI_ContemporaneousBeatsPredictive(t *testing.T) {
 }
 
 func TestRunOFI_Deterministic(t *testing.T) {
-	a := RunOFI(OFIConfig{Steps: 2000, Seed: 3, InitialPrice: decimal.NewFromInt(100)})
-	b := RunOFI(OFIConfig{Steps: 2000, Seed: 3, InitialPrice: decimal.NewFromInt(100)})
+	a := RunOFI(OFIConfig{Steps: 2000, Seed: 3, InitialPrice: 100})
+	b := RunOFI(OFIConfig{Steps: 2000, Seed: 3, InitialPrice: 100})
 	if a.ContemporaneousR2 != b.ContemporaneousR2 || a.PredictiveR2 != b.PredictiveR2 {
 		t.Errorf("non-deterministic: contemp %.6f/%.6f pred %.6f/%.6f",
 			a.ContemporaneousR2, b.ContemporaneousR2, a.PredictiveR2, b.PredictiveR2)

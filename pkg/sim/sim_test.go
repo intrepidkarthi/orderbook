@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/marketdata"
-	"github.com/shopspring/decimal"
 )
 
 func baseConfig(seed int64) Config {
@@ -12,7 +11,7 @@ func baseConfig(seed int64) Config {
 		Symbol:       "SIM",
 		Steps:        2000,
 		Seed:         seed,
-		InitialPrice: decimal.NewFromInt(100),
+		InitialPrice: 100,
 	}
 }
 
@@ -20,8 +19,7 @@ func TestRun_Deterministic(t *testing.T) {
 	a := Run(baseConfig(42))
 	b := Run(baseConfig(42))
 
-	// Compare the matching *outcome* (ValueDigest), not the per-run UUID order
-	// ids, which are non-deterministic by design.
+	// Compare the matching *outcome* (ValueDigest), independent of order ids.
 	if da, db := marketdata.ValueDigest(a.Trades), marketdata.ValueDigest(b.Trades); da != db {
 		t.Errorf("same seed produced different trades:\n a=%s\n b=%s", da, db)
 	}
@@ -29,8 +27,8 @@ func TestRun_Deterministic(t *testing.T) {
 		t.Fatalf("price path lengths differ: %d vs %d", len(a.Prices), len(b.Prices))
 	}
 	for i := range a.Prices {
-		if !a.Prices[i].Equal(b.Prices[i]) {
-			t.Fatalf("price path diverges at step %d: %s vs %s", i, a.Prices[i], b.Prices[i])
+		if a.Prices[i] != b.Prices[i] {
+			t.Fatalf("price path diverges at step %d: %d vs %d", i, a.Prices[i], b.Prices[i])
 		}
 	}
 }
@@ -46,8 +44,8 @@ func TestRun_ProducesTradesAndValidBook(t *testing.T) {
 	}
 	// The resting book must never be crossed (best bid < best ask).
 	if len(r.Final.Bids) > 0 && len(r.Final.Asks) > 0 {
-		if !r.Final.Bids[0].Price.LessThan(r.Final.Asks[0].Price) {
-			t.Errorf("final book crossed: best bid %s !< best ask %s",
+		if r.Final.Bids[0].Price >= r.Final.Asks[0].Price {
+			t.Errorf("final book crossed: best bid %d !< best ask %d",
 				r.Final.Bids[0].Price, r.Final.Asks[0].Price)
 		}
 	}
@@ -66,7 +64,7 @@ func TestRun_CustomAgentsAndSteps(t *testing.T) {
 		Symbol:       "SIM",
 		Steps:        50,
 		Seed:         3,
-		InitialPrice: decimal.NewFromInt(50),
+		InitialPrice: 50,
 		Agents: []Agent{
 			DefaultNoiseTrader("mm-a"),
 			DefaultNoiseTrader("mm-b"),

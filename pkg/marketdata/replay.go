@@ -92,32 +92,32 @@ func (r *Recorder) Trades() []*types.Trade { return r.trades }
 // Digest returns a stable hex fingerprint of a trade sequence including the
 // maker/taker order ids. Use it when the order ids are preserved across the runs
 // being compared — e.g. record→Replay of the same Stream — where identical ids
-// strengthen the check. It is NOT suitable for comparing two independent runs
-// that mint fresh orders (their UUID ids differ); use ValueDigest for that.
+// strengthen the check. Order ids are engine-assigned int64 sequence numbers, so
+// two runs that submit the same flow in the same order now produce the same ids;
+// ValueDigest remains the id-independent option for outcome-only comparison.
 func Digest(trades []*types.Trade) string { return hashTrades(trades, true) }
 
 // ValueDigest returns a stable hex fingerprint over only the matching *outcome*
-// (sequence, price, quantity, taker side) — independent of the per-run UUID
-// order/trade ids and wall clock. Two runs that make the same matching decisions
-// (e.g. the same seeded simulation) yield the same ValueDigest even though their
-// order ids differ.
+// (sequence, price, quantity, taker side) — independent of the per-run order/
+// trade ids and wall clock. Two runs that make the same matching decisions (e.g.
+// the same seeded simulation) yield the same ValueDigest.
 func ValueDigest(trades []*types.Trade) string { return hashTrades(trades, false) }
 
 func hashTrades(trades []*types.Trade, includeIDs bool) string {
 	var b strings.Builder
 	for _, t := range trades {
-		b.WriteString(strconv.FormatUint(t.SequenceNum, 10))
+		b.WriteString(strconv.FormatInt(t.SequenceNum, 10))
 		b.WriteByte('|')
-		b.WriteString(t.Price.String())
+		b.WriteString(strconv.FormatInt(t.Price, 10))
 		b.WriteByte('|')
-		b.WriteString(t.Quantity.String())
+		b.WriteString(strconv.FormatInt(t.Quantity, 10))
 		b.WriteByte('|')
 		b.WriteString(string(t.TakerSide))
 		if includeIDs {
 			b.WriteByte('|')
-			b.WriteString(t.MakerOrderID)
+			b.WriteString(strconv.FormatInt(t.MakerOrderID, 10))
 			b.WriteByte('|')
-			b.WriteString(t.TakerOrderID)
+			b.WriteString(strconv.FormatInt(t.TakerOrderID, 10))
 		}
 		b.WriteByte('\n')
 	}

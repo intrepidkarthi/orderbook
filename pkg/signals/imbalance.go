@@ -15,7 +15,6 @@ package signals
 
 import (
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
-	"github.com/shopspring/decimal"
 )
 
 // DepthImbalance returns the depth-weighted order-book imbalance over the top
@@ -33,11 +32,11 @@ func DepthImbalance(snap *orderbook.Snapshot, levels int) float64 {
 	}
 	bid := sumTopQty(snap.Bids, levels)
 	ask := sumTopQty(snap.Asks, levels)
-	den := bid.Add(ask)
-	if den.IsZero() {
+	den := bid + ask
+	if den == 0 {
 		return 0
 	}
-	return bid.Sub(ask).Div(den).InexactFloat64()
+	return float64(bid-ask) / float64(den)
 }
 
 // BestImbalance is DepthImbalance over only the best (top) level of each side.
@@ -45,10 +44,10 @@ func BestImbalance(snap *orderbook.Snapshot) float64 {
 	return DepthImbalance(snap, 1)
 }
 
-func sumTopQty(levels []orderbook.SnapshotLevel, n int) decimal.Decimal {
-	sum := decimal.Zero
+func sumTopQty(levels []orderbook.SnapshotLevel, n int) int64 {
+	var sum int64
 	for i := 0; i < len(levels) && i < n; i++ {
-		sum = sum.Add(levels[i].Quantity)
+		sum += levels[i].Quantity
 	}
 	return sum
 }

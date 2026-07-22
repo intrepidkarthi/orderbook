@@ -5,6 +5,9 @@
 // Determinism is the point: a Config with a fixed Seed reproduces the same
 // trades, book, and price path on every run, which is what makes simulated
 // experiments and backtests trustworthy.
+//
+// Prices are integer ticks and quantities integer lots (int64), matching the
+// engine's representation.
 package sim
 
 import (
@@ -13,7 +16,6 @@ import (
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
-	"github.com/shopspring/decimal"
 )
 
 // View is the market state handed to an agent each step.
@@ -21,8 +23,8 @@ type View struct {
 	Symbol   string
 	Step     int
 	Snapshot *orderbook.Snapshot
-	Ref      decimal.Decimal // reference price: mid, else last trade, else initial
-	HasBook  bool            // true if any liquidity is resting
+	Ref      int64 // reference price (ticks): mid, else last trade, else initial
+	HasBook  bool  // true if any liquidity is resting
 }
 
 // Agent produces orders to submit given the current market view. Implementations
@@ -37,8 +39,8 @@ type Config struct {
 	Symbol       string
 	Steps        int
 	Seed         int64
-	InitialPrice decimal.Decimal
-	Depth        int // snapshot depth exposed to agents
+	InitialPrice int64 // ticks
+	Depth        int   // snapshot depth exposed to agents
 	Agents       []Agent
 }
 
@@ -49,8 +51,8 @@ func (c *Config) applyDefaults() {
 	if c.Steps <= 0 {
 		c.Steps = 1000
 	}
-	if c.InitialPrice.IsZero() {
-		c.InitialPrice = decimal.NewFromInt(100)
+	if c.InitialPrice == 0 {
+		c.InitialPrice = 100
 	}
 	if c.Depth <= 0 {
 		c.Depth = 10
@@ -64,7 +66,7 @@ func (c *Config) applyDefaults() {
 type Result struct {
 	Engine *matching.Engine
 	Trades []*types.Trade
-	Prices []decimal.Decimal // reference price per step
+	Prices []int64 // reference price per step (ticks)
 	Final  *orderbook.Snapshot
 }
 
@@ -79,7 +81,7 @@ func Run(cfg Config) *Result {
 	for step := 0; step < cfg.Steps; step++ {
 		if mid, ok := eng.MidPrice(); ok {
 			ref = mid
-		} else if ltp := eng.LastTradePrice(); ltp.IsPositive() {
+		} else if ltp := eng.LastTradePrice(); ltp > 0 {
 			ref = ltp
 		}
 

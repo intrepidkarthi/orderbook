@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/intrepidkarthi/orderbook/pkg/study"
-	"github.com/shopspring/decimal"
 )
 
 func main() {
@@ -24,7 +23,7 @@ func main() {
 		r := study.RunOFI(study.OFIConfig{
 			Steps:        5000,
 			Seed:         seed,
-			InitialPrice: decimal.NewFromInt(100),
+			InitialPrice: 100,
 		})
 		fmt.Printf("  %-6d %-10d %-22.4f %-22.4f\n",
 			seed, r.N, r.ContemporaneousR2, r.PredictiveR2)

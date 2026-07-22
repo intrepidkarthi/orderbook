@@ -1,17 +1,14 @@
 // Package types defines the core domain values shared across the order book and
 // matching engine: orders, trades, and the small set of errors they raise.
 //
-// Prices and quantities are exact decimals (shopspring/decimal) — never floats —
-// so that money arithmetic is precise. This is the single most important
-// correctness decision in the project; see docs/SPEC.md §6.1.
+// Prices and quantities are integer ticks and lots (int64) — exact and fast, the
+// production choice. Human decimals are converted at the API boundary by an
+// Instrument (see instrument.go); the hot path never touches decimal or floats.
+// This is the single most important representation decision in the project; see
+// docs/SPEC.md §6.1.
 package types
 
-import (
-	"time"
-
-	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
-)
+import "time"
 
 // Side is the direction of an order.
 type Side string
@@ -57,24 +54,30 @@ const (
 
 // Order is a single instruction to buy or sell a quantity of a symbol.
 //
-// RemainingQty is the authoritative "how much is still live" figure the matching
-// engine reads and mutates; FilledQty + RemainingQty always equals Quantity.
+// Price is in integer ticks (0 for market orders); Quantity, FilledQty and
+// RemainingQty are in integer lots. RemainingQty is the authoritative "how much
+// is still live" figure the matching engine reads and mutates; FilledQty +
+// RemainingQty always equals Quantity.
+//
+// ID is a monotonic int64 assigned on entry to the engine (or the book) — unique,
+// ordered, and deterministic. It doubles as the price-time sequence number.
+// ClientOrderID is an optional caller-supplied correlation string.
 type Order struct {
-	ID           string          `json:"id"`
-	UserID       string          `json:"user_id"`
-	Symbol       string          `json:"symbol"`
-	Side         Side            `json:"side"`
-	Type         OrderType       `json:"type"`
-	Price        decimal.Decimal `json:"price"`
-	Quantity     decimal.Decimal `json:"quantity"`
-	FilledQty    decimal.Decimal `json:"filled_qty"`
-	RemainingQty decimal.Decimal `json:"remaining_qty"`
-	TimeInForce  TimeInForce     `json:"time_in_force"`
-	PostOnly     bool            `json:"post_only,omitempty"` // maker-only: reject if it would cross
-	Status       OrderStatus     `json:"status"`
-	CreatedAt    time.Time       `json:"created_at"`
-	UpdatedAt    time.Time       `json:"updated_at"`
-	SequenceNum  uint64          `json:"sequence_num"`
+	ID            int64       `json:"id"`
+	ClientOrderID string      `json:"client_order_id,omitempty"`
+	UserID        string      `json:"user_id"`
+	Symbol        string      `json:"symbol"`
+	Side          Side        `json:"side"`
+	Type          OrderType   `json:"type"`
+	Price         int64       `json:"price"` // ticks
+	Quantity      int64       `json:"quantity"`
+	FilledQty     int64       `json:"filled_qty"`
+	RemainingQty  int64       `json:"remaining_qty"`
+	TimeInForce   TimeInForce `json:"time_in_force"`
+	PostOnly      bool        `json:"post_only,omitempty"` // maker-only: reject if it would cross
+	Status        OrderStatus `json:"status"`
+	CreatedAt     time.Time   `json:"created_at"`
+	UpdatedAt     time.Time   `json:"updated_at"`
 }
 
 // AsPostOnly marks the order maker-only and returns it (for fluent construction).
@@ -84,12 +87,13 @@ func (o *Order) AsPostOnly() *Order {
 	return o
 }
 
-// NewOrder constructs a validated order with a time-ordered UUIDv7 id.
+// NewOrder constructs a validated order from integer ticks/lots. The ID is left
+// zero and assigned on entry to the engine/book.
 //
-// Quantity must be positive. Limit orders require a positive price; market
-// orders ignore price (it is forced to zero, since a market order takes
-// whatever the book offers).
-func NewOrder(userID, symbol string, side Side, orderType OrderType, price, quantity decimal.Decimal, tif TimeInForce) (*Order, error) {
+// Quantity must be positive. Limit orders require a positive price; market orders
+// ignore price (it is forced to zero, since a market order takes whatever the
+// book offers).
+func NewOrder(userID, symbol string, side Side, orderType OrderType, price, quantity int64, tif TimeInForce) (*Order, error) {
 	switch side {
 	case SideBuy, SideSell:
 	default:
@@ -108,26 +112,25 @@ func NewOrder(userID, symbol string, side Side, orderType OrderType, price, quan
 		return nil, ErrInvalidTimeInForce
 	}
 
-	if quantity.LessThanOrEqual(decimal.Zero) {
+	if quantity <= 0 {
 		return nil, ErrInvalidQuantity
 	}
 
 	if orderType == OrderTypeMarket {
-		price = decimal.Zero
-	} else if price.LessThanOrEqual(decimal.Zero) {
+		price = 0
+	} else if price <= 0 {
 		return nil, ErrInvalidPrice
 	}
 
 	now := time.Now().UTC()
 	return &Order{
-		ID:           uuid.Must(uuid.NewV7()).String(),
 		UserID:       userID,
 		Symbol:       symbol,
 		Side:         side,
 		Type:         orderType,
 		Price:        price,
 		Quantity:     quantity,
-		FilledQty:    decimal.Zero,
+		FilledQty:    0,
 		RemainingQty: quantity,
 		TimeInForce:  tif,
 		Status:       OrderStatusNew,
@@ -138,19 +141,19 @@ func NewOrder(userID, symbol string, side Side, orderType OrderType, price, quan
 
 // Fill applies a fill of qty to the order, advancing FilledQty/RemainingQty and
 // Status. It returns an error if qty is non-positive or exceeds RemainingQty.
-func (o *Order) Fill(qty decimal.Decimal) error {
-	if qty.LessThanOrEqual(decimal.Zero) {
+func (o *Order) Fill(qty int64) error {
+	if qty <= 0 {
 		return ErrInvalidQuantity
 	}
-	if qty.GreaterThan(o.RemainingQty) {
+	if qty > o.RemainingQty {
 		return ErrFillExceedsRemaining
 	}
 
-	o.FilledQty = o.FilledQty.Add(qty)
-	o.RemainingQty = o.RemainingQty.Sub(qty)
+	o.FilledQty += qty
+	o.RemainingQty -= qty
 	o.UpdatedAt = time.Now().UTC()
 
-	if o.RemainingQty.IsZero() {
+	if o.RemainingQty == 0 {
 		o.Status = OrderStatusFilled
 	} else {
 		o.Status = OrderStatusPartiallyFilled
@@ -173,31 +176,31 @@ func (o *Order) Cancel() error {
 }
 
 // IsFilled reports whether the order has no remaining quantity.
-func (o *Order) IsFilled() bool { return o.RemainingQty.IsZero() }
+func (o *Order) IsFilled() bool { return o.RemainingQty == 0 }
 
 // IsActive reports whether the order can still be matched or cancelled.
 func (o *Order) IsActive() bool {
 	return o.Status == OrderStatusNew || o.Status == OrderStatusPartiallyFilled
 }
 
-// NotionalValue is Price × Quantity (zero for market orders, which have no price).
-func (o *Order) NotionalValue() decimal.Decimal { return o.Price.Mul(o.Quantity) }
+// NotionalValue is Price × Quantity in tick·lot units (zero for market orders).
+func (o *Order) NotionalValue() int64 { return o.Price * o.Quantity }
 
-// RemainingValue is Price × RemainingQty.
-func (o *Order) RemainingValue() decimal.Decimal { return o.Price.Mul(o.RemainingQty) }
+// RemainingValue is Price × RemainingQty in tick·lot units.
+func (o *Order) RemainingValue() int64 { return o.Price * o.RemainingQty }
 
 // Fresh returns a copy of the order reset to its initial, unfilled state
-// (FilledQty=0, RemainingQty=Quantity, Status=NEW, SequenceNum=0) while keeping
-// its identity and parameters (ID, user, symbol, side, type, price, quantity,
-// TIF). It exists for deterministic replay and simulation, where the same order
-// must be re-submitted to a fresh engine without carrying prior fill state. The
+// (FilledQty=0, RemainingQty=Quantity, Status=NEW, ID=0) while keeping its
+// parameters (user, symbol, side, type, price, quantity, TIF). It exists for
+// deterministic replay and simulation, where the same order must be re-submitted
+// to a fresh engine without carrying prior fill state or its assigned ID. The
 // original order is not modified.
 func (o *Order) Fresh() *Order {
 	c := *o
-	c.FilledQty = decimal.Zero
+	c.FilledQty = 0
 	c.RemainingQty = o.Quantity
 	c.Status = OrderStatusNew
-	c.SequenceNum = 0
+	c.ID = 0
 	c.UpdatedAt = o.CreatedAt
 	return &c
 }

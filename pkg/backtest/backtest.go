@@ -8,6 +8,10 @@
 // part in (as maker or taker) and marks the book to compute PnL — the honest
 // scorecard the research plan calls for (docs/research-roadmap.md §3): inventory
 // path, PnL, and Sharpe, not just "it quotes".
+//
+// Prices are integer ticks and sizes integer lots (int64); cash is carried in
+// tick·lot units. The strategy interface is float-based (mid, inventory), with
+// the float↔tick conversion at the quoting boundary.
 package backtest
 
 import (
@@ -18,7 +22,6 @@ import (
 	"github.com/intrepidkarthi/orderbook/pkg/sim"
 	"github.com/intrepidkarthi/orderbook/pkg/strategy"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
-	"github.com/shopspring/decimal"
 )
 
 // Quoter is a two-sided market-making strategy (e.g. strategy.AvellanedaStoikov).
@@ -31,9 +34,9 @@ type Config struct {
 	Symbol       string
 	Steps        int
 	Seed         int64
-	InitialPrice decimal.Decimal
-	Tick         decimal.Decimal // quote prices snap to this grid
-	QuoteSize    decimal.Decimal // size posted on each side
+	InitialPrice int64 // ticks
+	Tick         int64 // quote prices snap to this grid (ticks)
+	QuoteSize    int64 // size posted on each side (lots)
 	MMUserID     string
 	Quoter       Quoter           // required
 	Noise        *sim.NoiseTrader // background flow (default provided)
@@ -46,14 +49,14 @@ func (c *Config) applyDefaults() {
 	if c.Steps <= 0 {
 		c.Steps = 3000
 	}
-	if c.InitialPrice.IsZero() {
-		c.InitialPrice = decimal.NewFromInt(100)
+	if c.InitialPrice == 0 {
+		c.InitialPrice = 100
 	}
-	if c.Tick.IsZero() {
-		c.Tick = decimal.NewFromFloat(0.1)
+	if c.Tick == 0 {
+		c.Tick = 1
 	}
-	if c.QuoteSize.IsZero() {
-		c.QuoteSize = decimal.NewFromInt(2)
+	if c.QuoteSize == 0 {
+		c.QuoteSize = 2
 	}
 	if c.MMUserID == "" {
 		c.MMUserID = "mm"
@@ -63,17 +66,18 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// Result is the outcome and scorecard of a backtest.
+// Result is the outcome and scorecard of a backtest. Inventory/cash/volume are
+// integer lots / tick·lot units.
 type Result struct {
 	Steps           int
-	FinalInventory  decimal.Decimal
-	FinalCash       decimal.Decimal
+	FinalInventory  int64
+	FinalCash       int64
 	FinalPnL        float64
-	Fills           int             // number of maker fills
-	Volume          decimal.Decimal // maker traded volume
-	MaxAbsInventory decimal.Decimal
-	Sharpe          float64 // of per-step PnL increments
+	Fills           int   // number of maker fills
+	Volume          int64 // maker traded volume (lots)
+	MaxAbsInventory int64
 
+	Sharpe        float64   // of per-step PnL increments
 	PnL           []float64 // mark-to-market PnL per step
 	InventoryPath []float64
 	MidPath       []float64
@@ -85,12 +89,9 @@ func Run(cfg Config) *Result {
 	rng := rand.New(rand.NewSource(cfg.Seed))
 	eng := matching.NewEngine(matching.DefaultConfig(cfg.Symbol))
 
-	inv := decimal.Zero
-	cash := decimal.Zero
+	var inv, cash, volume, maxAbsInv int64
 	fills := 0
-	volume := decimal.Zero
-	maxAbsInv := decimal.Zero
-	var bidID, askID string
+	var bidID, askID int64
 
 	res := &Result{Steps: cfg.Steps}
 
@@ -103,15 +104,15 @@ func Run(cfg Config) *Result {
 		askID = cancel(eng, askID, cfg.MMUserID)
 
 		// 2. Ask the strategy for a fresh quote.
-		q := cfg.Quoter.Quote(mid.InexactFloat64(), inv.InexactFloat64(), timeRemaining)
+		q := cfg.Quoter.Quote(float64(mid), float64(inv), timeRemaining)
 
 		// 3. Post the quotes (snapped to the tick grid; skip non-positive prices).
 		bidPx := snap(q.Bid, cfg.Tick)
 		askPx := snap(q.Ask, cfg.Tick)
-		if bidPx.IsPositive() {
+		if bidPx > 0 {
 			bidID = post(eng, cfg, types.SideBuy, bidPx, &inv, &cash, &fills, &volume)
 		}
-		if askPx.IsPositive() && askPx.GreaterThan(bidPx) {
+		if askPx > 0 && askPx > bidPx {
 			askID = post(eng, cfg, types.SideSell, askPx, &inv, &cash, &fills, &volume)
 		}
 
@@ -129,14 +130,14 @@ func Run(cfg Config) *Result {
 		}
 
 		// 5. Mark to market and record.
-		if inv.Abs().GreaterThan(maxAbsInv) {
-			maxAbsInv = inv.Abs()
+		if abs64(inv) > maxAbsInv {
+			maxAbsInv = abs64(inv)
 		}
 		markMid := refPrice(eng, cfg.InitialPrice)
-		pnl := cash.Add(inv.Mul(markMid)).InexactFloat64()
+		pnl := float64(cash) + float64(inv)*float64(markMid)
 		res.PnL = append(res.PnL, pnl)
-		res.InventoryPath = append(res.InventoryPath, inv.InexactFloat64())
-		res.MidPath = append(res.MidPath, markMid.InexactFloat64())
+		res.InventoryPath = append(res.InventoryPath, float64(inv))
+		res.MidPath = append(res.MidPath, float64(markMid))
 	}
 
 	res.FinalInventory = inv
@@ -152,64 +153,71 @@ func Run(cfg Config) *Result {
 }
 
 // post submits a maker limit order, accounts any immediate fills, and returns
-// the resting order id ("" if it filled fully).
-func post(eng *matching.Engine, cfg Config, side types.Side, price decimal.Decimal,
-	inv, cash *decimal.Decimal, fills *int, volume *decimal.Decimal) string {
+// the resting order id (0 if it filled fully).
+func post(eng *matching.Engine, cfg Config, side types.Side, price int64,
+	inv, cash *int64, fills *int, volume *int64) int64 {
 	o, err := types.NewOrder(cfg.MMUserID, cfg.Symbol, side, types.OrderTypeLimit,
 		price, cfg.QuoteSize, types.TIFGoodTillCancel)
 	if err != nil {
-		return ""
+		return 0
 	}
 	r := eng.Process(o)
 	account(r.Trades, cfg.MMUserID, inv, cash, fills, volume)
 	if o.IsFilled() {
-		return ""
+		return 0
 	}
 	return o.ID
 }
 
 // account folds any trades the maker took part in into inventory and cash.
-func account(trades []*types.Trade, mm string, inv, cash *decimal.Decimal, fills *int, volume *decimal.Decimal) {
+func account(trades []*types.Trade, mm string, inv, cash *int64, fills *int, volume *int64) {
 	for _, t := range trades {
-		notional := t.Price.Mul(t.Quantity)
+		notional := t.Price * t.Quantity
 		if t.BuyerUserID == mm {
-			*inv = inv.Add(t.Quantity)
-			*cash = cash.Sub(notional)
+			*inv += t.Quantity
+			*cash -= notional
 			*fills++
-			*volume = volume.Add(t.Quantity)
+			*volume += t.Quantity
 		}
 		if t.SellerUserID == mm {
-			*inv = inv.Sub(t.Quantity)
-			*cash = cash.Add(notional)
+			*inv -= t.Quantity
+			*cash += notional
 			*fills++
-			*volume = volume.Add(t.Quantity)
+			*volume += t.Quantity
 		}
 	}
 }
 
-func cancel(eng *matching.Engine, id, user string) string {
-	if id != "" {
+func cancel(eng *matching.Engine, id int64, user string) int64 {
+	if id != 0 {
 		_, _ = eng.Cancel(id, user)
 	}
-	return ""
+	return 0
 }
 
-func refPrice(eng *matching.Engine, initial decimal.Decimal) decimal.Decimal {
+func refPrice(eng *matching.Engine, initial int64) int64 {
 	if mid, ok := eng.MidPrice(); ok {
 		return mid
 	}
-	if ltp := eng.LastTradePrice(); ltp.IsPositive() {
+	if ltp := eng.LastTradePrice(); ltp > 0 {
 		return ltp
 	}
 	return initial
 }
 
-// snap rounds a float price onto the tick grid.
-func snap(px float64, tick decimal.Decimal) decimal.Decimal {
-	if tick.IsZero() {
-		return decimal.NewFromFloat(px)
+// snap rounds a float price onto the integer tick grid.
+func snap(px float64, tick int64) int64 {
+	if tick <= 0 {
+		tick = 1
 	}
-	return decimal.NewFromFloat(px).Div(tick).Round(0).Mul(tick)
+	return int64(math.Round(px/float64(tick))) * tick
+}
+
+func abs64(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // sharpe is mean/stddev of per-step PnL increments, scaled by sqrt(N).

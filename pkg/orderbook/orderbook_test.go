@@ -5,14 +5,11 @@ import (
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
-	"github.com/shopspring/decimal"
 )
 
-func dec(s string) decimal.Decimal { return decimal.RequireFromString(s) }
-
-func limit(t *testing.T, user string, side types.Side, price, qty string) *types.Order {
+func limit(t *testing.T, user string, side types.Side, price, qty int64) *types.Order {
 	t.Helper()
-	o, err := types.NewOrder(user, "BTC-USD", side, types.OrderTypeLimit, dec(price), dec(qty), types.TIFGoodTillCancel)
+	o, err := types.NewOrder(user, "BTC-USD", side, types.OrderTypeLimit, price, qty, types.TIFGoodTillCancel)
 	if err != nil {
 		t.Fatalf("NewOrder: %v", err)
 	}
@@ -47,63 +44,64 @@ func TestEmptyBook(t *testing.T) {
 
 func TestBestBidAsk_SpreadMid(t *testing.T) {
 	ob := New(Config{Symbol: "BTC-USD"})
-	mustAdd(t, ob, limit(t, "a", types.SideBuy, "99", "1"))
-	mustAdd(t, ob, limit(t, "b", types.SideBuy, "100", "2")) // better bid
-	mustAdd(t, ob, limit(t, "c", types.SideSell, "102", "1"))
-	mustAdd(t, ob, limit(t, "d", types.SideSell, "101", "3")) // better ask
+	mustAdd(t, ob, limit(t, "a", types.SideBuy, 99, 1))
+	mustAdd(t, ob, limit(t, "b", types.SideBuy, 100, 2)) // better bid
+	mustAdd(t, ob, limit(t, "c", types.SideSell, 102, 1))
+	mustAdd(t, ob, limit(t, "d", types.SideSell, 101, 3)) // better ask
 
 	bid, bidQty, ok := ob.BestBid()
-	if !ok || !bid.Equal(dec("100")) || !bidQty.Equal(dec("2")) {
-		t.Errorf("best bid = %s (qty %s), want 100 (qty 2)", bid, bidQty)
+	if !ok || bid != 100 || bidQty != 2 {
+		t.Errorf("best bid = %d (qty %d), want 100 (qty 2)", bid, bidQty)
 	}
 	ask, askQty, ok := ob.BestAsk()
-	if !ok || !ask.Equal(dec("101")) || !askQty.Equal(dec("3")) {
-		t.Errorf("best ask = %s (qty %s), want 101 (qty 3)", ask, askQty)
+	if !ok || ask != 101 || askQty != 3 {
+		t.Errorf("best ask = %d (qty %d), want 101 (qty 3)", ask, askQty)
 	}
-	if sp, _ := ob.Spread(); !sp.Equal(dec("1")) {
-		t.Errorf("spread = %s, want 1", sp)
+	if sp, _ := ob.Spread(); sp != 1 {
+		t.Errorf("spread = %d, want 1", sp)
 	}
-	if mid, _ := ob.MidPrice(); !mid.Equal(dec("100.5")) {
-		t.Errorf("mid = %s, want 100.5", mid)
+	// Mid is floored integer ticks: (100+101)/2 = 100.
+	if mid, _ := ob.MidPrice(); mid != 100 {
+		t.Errorf("mid = %d, want 100 (floored)", mid)
 	}
 }
 
 func TestPriceOrdering(t *testing.T) {
 	ob := New(Config{Symbol: "BTC-USD"})
 	// Insert deliberately out of order.
-	for _, p := range []string{"100", "103", "101", "104", "102"} {
-		mustAdd(t, ob, limit(t, "u", types.SideBuy, p, "1"))
+	for _, p := range []int64{100, 103, 101, 104, 102} {
+		mustAdd(t, ob, limit(t, "u", types.SideBuy, p, 1))
 	}
-	for _, p := range []string{"110", "107", "109", "106", "108"} {
-		mustAdd(t, ob, limit(t, "u", types.SideSell, p, "1"))
+	for _, p := range []int64{110, 107, 109, 106, 108} {
+		mustAdd(t, ob, limit(t, "u", types.SideSell, p, 1))
 	}
 
 	// Bids descending (best first).
-	wantBids := []string{"104", "103", "102", "101", "100"}
+	wantBids := []int64{104, 103, 102, 101, 100}
 	for i, l := range ob.GetBidLevels(10) {
-		if !l.Price.Equal(dec(wantBids[i])) {
-			t.Errorf("bid level %d = %s, want %s", i, l.Price, wantBids[i])
+		if l.Price != wantBids[i] {
+			t.Errorf("bid level %d = %d, want %d", i, l.Price, wantBids[i])
 		}
 	}
 	// Asks ascending (best first).
-	wantAsks := []string{"106", "107", "108", "109", "110"}
+	wantAsks := []int64{106, 107, 108, 109, 110}
 	for i, l := range ob.GetAskLevels(10) {
-		if !l.Price.Equal(dec(wantAsks[i])) {
-			t.Errorf("ask level %d = %s, want %s", i, l.Price, wantAsks[i])
+		if l.Price != wantAsks[i] {
+			t.Errorf("ask level %d = %d, want %d", i, l.Price, wantAsks[i])
 		}
 	}
 }
 
 func TestFIFOWithinLevel(t *testing.T) {
 	ob := New(Config{Symbol: "BTC-USD"})
-	first := limit(t, "a", types.SideBuy, "100", "1")
-	second := limit(t, "b", types.SideBuy, "100", "2")
-	third := limit(t, "c", types.SideBuy, "100", "3")
+	first := limit(t, "a", types.SideBuy, 100, 1)
+	second := limit(t, "b", types.SideBuy, 100, 2)
+	third := limit(t, "c", types.SideBuy, 100, 3)
 	mustAdd(t, ob, first)
 	mustAdd(t, ob, second)
 	mustAdd(t, ob, third)
 
-	orders := ob.GetOrdersAtPrice(types.SideBuy, dec("100"))
+	orders := ob.GetOrdersAtPrice(types.SideBuy, 100)
 	if len(orders) != 3 {
 		t.Fatalf("got %d orders, want 3", len(orders))
 	}
@@ -111,8 +109,8 @@ func TestFIFOWithinLevel(t *testing.T) {
 		t.Error("orders not in FIFO (insertion) order")
 	}
 	// Aggregate quantity at the level.
-	if _, qty, _ := ob.BestBid(); !qty.Equal(dec("6")) {
-		t.Errorf("level qty = %s, want 6", qty)
+	if _, qty, _ := ob.BestBid(); qty != 6 {
+		t.Errorf("level qty = %d, want 6", qty)
 	}
 	// Peek returns the oldest.
 	if ob.PeekBestBidOrder().ID != first.ID {
@@ -122,8 +120,8 @@ func TestFIFOWithinLevel(t *testing.T) {
 
 func TestRemove_CleansLevel(t *testing.T) {
 	ob := New(Config{Symbol: "BTC-USD"})
-	best := limit(t, "a", types.SideSell, "101", "1")
-	next := limit(t, "b", types.SideSell, "102", "1")
+	best := limit(t, "a", types.SideSell, 101, 1)
+	next := limit(t, "b", types.SideSell, 102, 1)
 	mustAdd(t, ob, best)
 	mustAdd(t, ob, next)
 
@@ -131,8 +129,8 @@ func TestRemove_CleansLevel(t *testing.T) {
 		t.Fatalf("Remove: %v", err)
 	}
 	// Best ask should now be the next level.
-	if ask, _, ok := ob.BestAsk(); !ok || !ask.Equal(dec("102")) {
-		t.Errorf("best ask after remove = %s, want 102", ask)
+	if ask, _, ok := ob.BestAsk(); !ok || ask != 102 {
+		t.Errorf("best ask after remove = %d, want 102", ask)
 	}
 	if ob.Count() != 1 {
 		t.Errorf("count = %d, want 1", ob.Count())
@@ -145,35 +143,35 @@ func TestRemove_CleansLevel(t *testing.T) {
 
 func TestUpdateOrderQuantity(t *testing.T) {
 	ob := New(Config{Symbol: "BTC-USD"})
-	o := limit(t, "a", types.SideBuy, "100", "10")
+	o := limit(t, "a", types.SideBuy, 100, 10)
 	mustAdd(t, ob, o)
-	ob.UpdateOrderQuantity(o.ID, dec("4"))
-	if _, qty, _ := ob.BestBid(); !qty.Equal(dec("6")) {
-		t.Errorf("level qty after partial = %s, want 6", qty)
+	ob.UpdateOrderQuantity(o.ID, 4)
+	if _, qty, _ := ob.BestBid(); qty != 6 {
+		t.Errorf("level qty after partial = %d, want 6", qty)
 	}
 }
 
 func TestRestoreOrderQuantity(t *testing.T) {
 	ob := New(Config{Symbol: "BTC-USD"})
-	o := limit(t, "a", types.SideSell, "101", "10")
+	o := limit(t, "a", types.SideSell, 101, 10)
 	mustAdd(t, ob, o)
 
 	// Simulate a partial fill in place, then undo it.
-	ob.UpdateOrderQuantity(o.ID, dec("4"))
-	if _, qty, _ := ob.BestAsk(); !qty.Equal(dec("6")) {
-		t.Fatalf("after partial: level qty = %s, want 6", qty)
+	ob.UpdateOrderQuantity(o.ID, 4)
+	if _, qty, _ := ob.BestAsk(); qty != 6 {
+		t.Fatalf("after partial: level qty = %d, want 6", qty)
 	}
-	ob.RestoreOrderQuantity(o.ID, dec("4"))
-	if _, qty, _ := ob.BestAsk(); !qty.Equal(dec("10")) {
-		t.Errorf("after restore: level qty = %s, want 10", qty)
+	ob.RestoreOrderQuantity(o.ID, 4)
+	if _, qty, _ := ob.BestAsk(); qty != 10 {
+		t.Errorf("after restore: level qty = %d, want 10", qty)
 	}
 	// Restoring an unknown id is a no-op (no panic).
-	ob.RestoreOrderQuantity("missing", dec("1"))
+	ob.RestoreOrderQuantity(999999, 1)
 }
 
 func TestDuplicateAddIgnored(t *testing.T) {
 	ob := New(Config{Symbol: "BTC-USD"})
-	o := limit(t, "a", types.SideBuy, "100", "1")
+	o := limit(t, "a", types.SideBuy, 100, 1)
 	mustAdd(t, ob, o)
 	mustAdd(t, ob, o) // ignored, no error
 	if ob.Count() != 1 {
@@ -183,9 +181,9 @@ func TestDuplicateAddIgnored(t *testing.T) {
 
 func TestOrderBookFull(t *testing.T) {
 	ob := New(Config{Symbol: "BTC-USD", MaxOrders: 2})
-	mustAdd(t, ob, limit(t, "a", types.SideBuy, "100", "1"))
-	mustAdd(t, ob, limit(t, "b", types.SideBuy, "99", "1"))
-	err := ob.Add(limit(t, "c", types.SideBuy, "98", "1"))
+	mustAdd(t, ob, limit(t, "a", types.SideBuy, 100, 1))
+	mustAdd(t, ob, limit(t, "b", types.SideBuy, 99, 1))
+	err := ob.Add(limit(t, "c", types.SideBuy, 98, 1))
 	if !errors.Is(err, types.ErrOrderBookFull) {
 		t.Errorf("err = %v, want ErrOrderBookFull", err)
 	}
@@ -193,10 +191,10 @@ func TestOrderBookFull(t *testing.T) {
 
 func TestSnapshot(t *testing.T) {
 	ob := New(Config{Symbol: "BTC-USD"})
-	mustAdd(t, ob, limit(t, "a", types.SideBuy, "100", "2"))
-	mustAdd(t, ob, limit(t, "b", types.SideBuy, "99", "1"))
-	mustAdd(t, ob, limit(t, "c", types.SideSell, "101", "3"))
-	ob.SetLastTradePrice(dec("100.5"))
+	mustAdd(t, ob, limit(t, "a", types.SideBuy, 100, 2))
+	mustAdd(t, ob, limit(t, "b", types.SideBuy, 99, 1))
+	mustAdd(t, ob, limit(t, "c", types.SideSell, 101, 3))
+	ob.SetLastTradePrice(100)
 
 	snap := ob.Snapshot(5)
 	if snap.Symbol != "BTC-USD" {
@@ -205,11 +203,11 @@ func TestSnapshot(t *testing.T) {
 	if len(snap.Bids) != 2 || len(snap.Asks) != 1 {
 		t.Fatalf("bids=%d asks=%d, want 2/1", len(snap.Bids), len(snap.Asks))
 	}
-	if !snap.Bids[0].Price.Equal(dec("100")) || !snap.Bids[0].Quantity.Equal(dec("2")) {
-		t.Errorf("top bid = %s x %s, want 100 x 2", snap.Bids[0].Price, snap.Bids[0].Quantity)
+	if snap.Bids[0].Price != 100 || snap.Bids[0].Quantity != 2 {
+		t.Errorf("top bid = %d x %d, want 100 x 2", snap.Bids[0].Price, snap.Bids[0].Quantity)
 	}
-	if !snap.LastTradePrice.Equal(dec("100.5")) {
-		t.Errorf("last trade = %s, want 100.5", snap.LastTradePrice)
+	if snap.LastTradePrice != 100 {
+		t.Errorf("last trade = %d, want 100", snap.LastTradePrice)
 	}
 }
 
@@ -218,23 +216,21 @@ func TestSnapshot(t *testing.T) {
 func TestLadderInvariant(t *testing.T) {
 	ob := New(Config{Symbol: "BTC-USD"})
 	// Pseudo-random-ish but deterministic price sequence.
-	prices := []int{50, 12, 87, 33, 91, 5, 66, 42, 78, 21, 99, 3, 55, 60, 71}
+	prices := []int64{50, 12, 87, 33, 91, 5, 66, 42, 78, 21, 99, 3, 55, 60, 71}
 	for _, p := range prices {
-		mustAdd(t, ob, limit(t, "u", types.SideBuy, itoa(p), "1"))
-		mustAdd(t, ob, limit(t, "u", types.SideSell, itoa(p+1000), "1"))
+		mustAdd(t, ob, limit(t, "u", types.SideBuy, p, 1))
+		mustAdd(t, ob, limit(t, "u", types.SideSell, p+1000, 1))
 	}
 	bids := ob.GetBidLevels(100)
 	for i := 1; i < len(bids); i++ {
-		if !bids[i-1].Price.GreaterThan(bids[i].Price) {
-			t.Fatalf("bids not strictly descending at %d: %s !> %s", i, bids[i-1].Price, bids[i].Price)
+		if bids[i-1].Price <= bids[i].Price {
+			t.Fatalf("bids not strictly descending at %d: %d !> %d", i, bids[i-1].Price, bids[i].Price)
 		}
 	}
 	asks := ob.GetAskLevels(100)
 	for i := 1; i < len(asks); i++ {
-		if !asks[i-1].Price.LessThan(asks[i].Price) {
-			t.Fatalf("asks not strictly ascending at %d: %s !< %s", i, asks[i-1].Price, asks[i].Price)
+		if asks[i-1].Price >= asks[i].Price {
+			t.Fatalf("asks not strictly ascending at %d: %d !< %d", i, asks[i-1].Price, asks[i].Price)
 		}
 	}
 }
-
-func itoa(n int) string { return decimal.NewFromInt(int64(n)).String() }

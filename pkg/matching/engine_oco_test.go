@@ -9,8 +9,8 @@ import (
 func makeOCO(t *testing.T) *types.OCOOrder {
 	t.Helper()
 	// Bracket for a long: take-profit sell at 105, stop-loss sell stop at 95.
-	primary := lim(t, "trader", types.SideSell, "105", "3")
-	stop := stopOrder(t, "trader", types.SideSell, "3", "95")
+	primary := lim(t, "trader", types.SideSell, 105, 3)
+	stop := stopOrder(t, "trader", types.SideSell, 3, 95)
 	oco, err := types.NewOCOOrder(primary, stop)
 	if err != nil {
 		t.Fatalf("NewOCOOrder: %v", err)
@@ -25,15 +25,15 @@ func TestOCO_PrimaryFillCancelsStop(t *testing.T) {
 	e.ProcessOCO(oco)
 
 	// Primary rests as an ask at 105; stop rests pending.
-	if ask, _, ok := e.BestAsk(); !ok || !ask.Equal(dec("105")) {
-		t.Fatalf("primary should rest at 105, got %s (ok=%v)", ask, ok)
+	if ask, _, ok := e.BestAsk(); !ok || ask != 105 {
+		t.Fatalf("primary should rest at 105, got %d (ok=%v)", ask, ok)
 	}
 	if e.PendingStopCount() != 1 {
 		t.Fatalf("pending stops = %d, want 1", e.PendingStopCount())
 	}
 
 	// A buyer lifts the take-profit → primary fills → stop is cancelled.
-	e.Process(lim(t, "buyer", types.SideBuy, "105", "3"))
+	e.Process(lim(t, "buyer", types.SideBuy, 105, 3))
 	if !oco.Primary.IsFilled() {
 		t.Error("primary should be filled")
 	}
@@ -49,7 +49,7 @@ func TestOCO_StopTriggerCancelsPrimary(t *testing.T) {
 	e.ProcessOCO(oco)
 
 	// Drive price down to 95 → stop-loss fires → primary limit is cancelled.
-	e.Process(marketOrder(t, "seller", types.SideSell, "11"))
+	e.Process(marketOrder(t, "seller", types.SideSell, 11))
 
 	if e.PendingStopCount() != 0 {
 		t.Errorf("stop should have triggered, pending = %d", e.PendingStopCount())
@@ -60,7 +60,7 @@ func TestOCO_StopTriggerCancelsPrimary(t *testing.T) {
 	if oco.Primary.Status != types.OrderStatusCancelled {
 		t.Errorf("primary status = %q, want CANCELLED", oco.Primary.Status)
 	}
-	if oco.Stop.Order.FilledQty.IsZero() {
+	if oco.Stop.Order.FilledQty == 0 {
 		t.Error("triggered stop should have filled")
 	}
 }

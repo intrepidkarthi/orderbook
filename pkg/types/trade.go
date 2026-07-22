@@ -1,35 +1,32 @@
 package types
 
-import (
-	"time"
-
-	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
-)
+import "time"
 
 // Trade is a single execution between a resting maker order and an incoming
-// taker order. It always prints at the maker's (resting) price.
+// taker order. It always prints at the maker's (resting) price. Price is in
+// integer ticks and Quantity in integer lots. ID/SequenceNum are monotonic
+// int64 values assigned by the engine.
 type Trade struct {
-	ID           string          `json:"id"`
-	Symbol       string          `json:"symbol"`
-	Price        decimal.Decimal `json:"price"`
-	Quantity     decimal.Decimal `json:"quantity"`
-	BuyOrderID   string          `json:"buy_order_id"`
-	SellOrderID  string          `json:"sell_order_id"`
-	BuyerUserID  string          `json:"buyer_user_id"`
-	SellerUserID string          `json:"seller_user_id"`
-	MakerOrderID string          `json:"maker_order_id"`
-	TakerOrderID string          `json:"taker_order_id"`
-	TakerSide    Side            `json:"taker_side"`
-	CreatedAt    time.Time       `json:"created_at"`
-	SequenceNum  uint64          `json:"sequence_num"`
+	ID           int64     `json:"id"`
+	Symbol       string    `json:"symbol"`
+	Price        int64     `json:"price"` // ticks
+	Quantity     int64     `json:"quantity"`
+	BuyOrderID   int64     `json:"buy_order_id"`
+	SellOrderID  int64     `json:"sell_order_id"`
+	BuyerUserID  string    `json:"buyer_user_id"`
+	SellerUserID string    `json:"seller_user_id"`
+	MakerOrderID int64     `json:"maker_order_id"`
+	TakerOrderID int64     `json:"taker_order_id"`
+	TakerSide    Side      `json:"taker_side"`
+	CreatedAt    time.Time `json:"created_at"`
+	SequenceNum  int64     `json:"sequence_num"`
 }
 
 // NewTrade builds a trade from the matched buy/sell orders. takerSide identifies
 // which side crossed the spread, from which maker/taker order ids are derived.
-func NewTrade(symbol string, price, quantity decimal.Decimal, buyOrder, sellOrder *Order, takerSide Side) *Trade {
+// ID/SequenceNum are left zero and assigned by the engine.
+func NewTrade(symbol string, price, quantity int64, buyOrder, sellOrder *Order, takerSide Side) *Trade {
 	t := &Trade{
-		ID:           uuid.Must(uuid.NewV7()).String(),
 		Symbol:       symbol,
 		Price:        price,
 		Quantity:     quantity,
@@ -51,8 +48,8 @@ func NewTrade(symbol string, price, quantity decimal.Decimal, buyOrder, sellOrde
 	return t
 }
 
-// NotionalValue is Price × Quantity of the trade.
-func (t *Trade) NotionalValue() decimal.Decimal { return t.Price.Mul(t.Quantity) }
+// NotionalValue is Price × Quantity of the trade in tick·lot units.
+func (t *Trade) NotionalValue() int64 { return t.Price * t.Quantity }
 
 // IsSelfTrade reports whether both sides belong to the same user.
 func (t *Trade) IsSelfTrade() bool { return t.BuyerUserID == t.SellerUserID }

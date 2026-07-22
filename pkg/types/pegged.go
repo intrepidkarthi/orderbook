@@ -1,7 +1,5 @@
 package types
 
-import "github.com/shopspring/decimal"
-
 // PegReference is the market price a pegged order tracks.
 type PegReference string
 
@@ -15,14 +13,15 @@ const (
 // plus a signed offset at the moment it is submitted (price = reference +
 // Offset). This is a static peg — it resolves once on entry; continuously
 // re-pegging as the book moves is a future extension (docs/SPEC.md §5.1).
+// Offset is in integer ticks (may be negative).
 type PeggedOrder struct {
 	Order  *Order
 	Ref    PegReference
-	Offset decimal.Decimal
+	Offset int64 // ticks
 }
 
-// NewPeggedOrder wraps a limit order with a peg reference and offset.
-func NewPeggedOrder(order *Order, ref PegReference, offset decimal.Decimal) (*PeggedOrder, error) {
+// NewPeggedOrder wraps a limit order with a peg reference and offset (in ticks).
+func NewPeggedOrder(order *Order, ref PegReference, offset int64) (*PeggedOrder, error) {
 	if order == nil {
 		return nil, ErrNilOrder
 	}

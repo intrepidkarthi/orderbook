@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/strategy"
-	"github.com/shopspring/decimal"
 )
 
 func asQuoter(t *testing.T) *strategy.AvellanedaStoikov {
@@ -21,7 +20,7 @@ func cfg(seed int64, q Quoter) Config {
 		Symbol:       "SIM",
 		Steps:        3000,
 		Seed:         seed,
-		InitialPrice: decimal.NewFromInt(100),
+		InitialPrice: 100,
 		Quoter:       q,
 	}
 }
@@ -34,7 +33,7 @@ func TestRun_MechanicsAndDeterminism(t *testing.T) {
 	if a.Fills == 0 {
 		t.Error("expected the market maker to get fills")
 	}
-	if !a.Volume.IsPositive() {
+	if a.Volume <= 0 {
 		t.Error("expected positive traded volume")
 	}
 	for _, n := range []int{len(a.PnL), len(a.InventoryPath), len(a.MidPath)} {
@@ -48,21 +47,24 @@ func TestRun_MechanicsAndDeterminism(t *testing.T) {
 		t.Errorf("non-deterministic: fills %d/%d pnl %.6f/%.6f sharpe %.6f/%.6f",
 			a.Fills, b.Fills, a.FinalPnL, b.FinalPnL, a.Sharpe, b.Sharpe)
 	}
-	if !a.FinalInventory.Equal(b.FinalInventory) {
-		t.Errorf("inventory differs: %s vs %s", a.FinalInventory, b.FinalInventory)
+	if a.FinalInventory != b.FinalInventory {
+		t.Errorf("inventory differs: %d vs %d", a.FinalInventory, b.FinalInventory)
 	}
 }
 
 func TestRun_InventoryStaysBounded(t *testing.T) {
 	// The reservation-price skew steers inventory back toward flat, so the maker
-	// should not accumulate a runaway position relative to its gross volume.
+	// should not accumulate a runaway position relative to its gross volume. The
+	// bound is looser than with continuous prices: at mid≈100 on an integer tick
+	// grid the sub-tick skew rounds away until inventory is sizeable, so control
+	// kicks in later — still bounded, just coarser.
 	r := Run(cfg(1, asQuoter(t)))
-	if !r.MaxAbsInventory.LessThan(decimal.NewFromInt(100)) {
-		t.Errorf("max abs inventory = %s, expected well-bounded (<100)", r.MaxAbsInventory)
+	if r.MaxAbsInventory >= 250 {
+		t.Errorf("max abs inventory = %d, expected well-bounded (<250)", r.MaxAbsInventory)
 	}
 	// Round-tripping, not accumulating: |final inventory| << gross volume.
-	if r.FinalInventory.Abs().GreaterThan(r.Volume) {
-		t.Errorf("final inventory %s exceeds volume %s (not round-tripping)",
+	if abs64(r.FinalInventory) > r.Volume {
+		t.Errorf("final inventory %d exceeds volume %d (not round-tripping)",
 			r.FinalInventory, r.Volume)
 	}
 }
@@ -76,7 +78,7 @@ func (f fixedQuoter) Quote(mid, _, _ float64) strategy.Quote {
 }
 
 func TestRun_QuoterAgnostic(t *testing.T) {
-	r := Run(cfg(2, fixedQuoter{half: 0.5}))
+	r := Run(cfg(2, fixedQuoter{half: 2}))
 	if r.Fills == 0 {
 		t.Error("fixed-spread quoter should also get fills")
 	}

@@ -9,7 +9,6 @@ import (
 
 	"github.com/intrepidkarthi/orderbook/pkg/backtest"
 	"github.com/intrepidkarthi/orderbook/pkg/strategy"
-	"github.com/shopspring/decimal"
 )
 
 func main() {
@@ -22,10 +21,10 @@ func main() {
 		Symbol:       "SIM",
 		Steps:        3000,
 		Seed:         1,
-		InitialPrice: decimal.NewFromInt(100),
+		InitialPrice: 100,
 		Quoter:       as,
 	})
 
-	fmt.Printf("fills=%d  volume=%s  finalPnL=%.2f  sharpe=%.2f  max|inv|=%s\n",
+	fmt.Printf("fills=%d  volume=%d  finalPnL=%.2f  sharpe=%.2f  max|inv|=%d\n",
 		r.Fills, r.Volume, r.FinalPnL, r.Sharpe, r.MaxAbsInventory)
 }

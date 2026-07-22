@@ -2,7 +2,6 @@ package signals
 
 import (
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
-	"github.com/shopspring/decimal"
 )
 
 // OFIStep computes the best-level order-flow-imbalance contribution e_n between
@@ -21,39 +20,40 @@ import (
 //	          Q'          if P' < P   (ask stepped down: fresh sell size)
 //
 // Positive e_n reflects net buy pressure at the touch, negative net sell
-// pressure. A side missing from either snapshot contributes 0.
-func OFIStep(prev, cur *orderbook.Snapshot) decimal.Decimal {
-	e := decimal.Zero
+// pressure. A side missing from either snapshot contributes 0. Quantities are
+// integer lots, so e_n is exact.
+func OFIStep(prev, cur *orderbook.Snapshot) int64 {
+	var e int64
 	if pb, ok := bestBid(prev); ok {
 		if cb, ok := bestBid(cur); ok {
-			e = e.Add(bidDelta(pb, cb))
+			e += bidDelta(pb, cb)
 		}
 	}
 	if pa, ok := bestAsk(prev); ok {
 		if ca, ok := bestAsk(cur); ok {
-			e = e.Sub(askDelta(pa, ca))
+			e -= askDelta(pa, ca)
 		}
 	}
 	return e
 }
 
-func bidDelta(prev, cur orderbook.SnapshotLevel) decimal.Decimal {
+func bidDelta(prev, cur orderbook.SnapshotLevel) int64 {
 	switch {
-	case cur.Price.GreaterThan(prev.Price):
+	case cur.Price > prev.Price:
 		return cur.Quantity
-	case cur.Price.Equal(prev.Price):
-		return cur.Quantity.Sub(prev.Quantity)
+	case cur.Price == prev.Price:
+		return cur.Quantity - prev.Quantity
 	default:
-		return prev.Quantity.Neg()
+		return -prev.Quantity
 	}
 }
 
-func askDelta(prev, cur orderbook.SnapshotLevel) decimal.Decimal {
+func askDelta(prev, cur orderbook.SnapshotLevel) int64 {
 	switch {
-	case cur.Price.GreaterThan(prev.Price):
-		return prev.Quantity.Neg()
-	case cur.Price.Equal(prev.Price):
-		return cur.Quantity.Sub(prev.Quantity)
+	case cur.Price > prev.Price:
+		return -prev.Quantity
+	case cur.Price == prev.Price:
+		return cur.Quantity - prev.Quantity
 	default:
 		return cur.Quantity
 	}
@@ -79,11 +79,11 @@ func bestAsk(s *orderbook.Snapshot) (orderbook.SnapshotLevel, bool) {
 // against price change). Not safe for concurrent use.
 type OFI struct {
 	prev *orderbook.Snapshot
-	cum  decimal.Decimal
+	cum  int64
 }
 
 // NewOFI returns an empty accumulator.
-func NewOFI() *OFI { return &OFI{cum: decimal.Zero} }
+func NewOFI() *OFI { return &OFI{} }
 
 // Observe folds one snapshot into the accumulator and returns the per-step e_n.
 // The very first snapshot only primes the previous state and returns 0.
@@ -93,19 +93,19 @@ func (o *OFI) Observe(cur *orderbook.Snapshot) float64 {
 		return 0
 	}
 	e := OFIStep(o.prev, cur)
-	o.cum = o.cum.Add(e)
+	o.cum += e
 	o.prev = cur
-	return e.InexactFloat64()
+	return float64(e)
 }
 
 // Cumulative returns the running sum of e_n since the last Reset.
-func (o *OFI) Cumulative() float64 { return o.cum.InexactFloat64() }
+func (o *OFI) Cumulative() float64 { return float64(o.cum) }
 
-// CumulativeExact returns the running sum as an exact decimal.
-func (o *OFI) CumulativeExact() decimal.Decimal { return o.cum }
+// CumulativeExact returns the running sum as an exact integer (lots).
+func (o *OFI) CumulativeExact() int64 { return o.cum }
 
 // Reset clears the previous observation and cumulative total.
 func (o *OFI) Reset() {
 	o.prev = nil
-	o.cum = decimal.Zero
+	o.cum = 0
 }

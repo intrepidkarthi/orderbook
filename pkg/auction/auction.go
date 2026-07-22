@@ -3,26 +3,27 @@
 // and reports how much trades there. This is the mechanism behind opening and
 // closing auctions (docs/SPEC.md §5.2) — orders accumulate, then cross once at a
 // common price instead of continuously.
+//
+// Prices are integer ticks and quantities integer lots (int64).
 package auction
 
 import (
 	"sort"
 
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
-	"github.com/shopspring/decimal"
 )
 
 // Level is aggregated size at a price.
 type Level struct {
-	Price decimal.Decimal
-	Qty   decimal.Decimal
+	Price int64
+	Qty   int64
 }
 
 // Result is the outcome of an uncross.
 type Result struct {
 	HasClearing   bool
-	ClearingPrice decimal.Decimal
-	Volume        decimal.Decimal // quantity that trades at the clearing price
+	ClearingPrice int64
+	Volume        int64 // quantity that trades at the clearing price
 }
 
 // Uncross computes the clearing price that maximises matched volume across bids
@@ -31,20 +32,20 @@ type Result struct {
 // nothing crosses, HasClearing is false.
 func Uncross(bids, asks []Level) Result {
 	best := Result{}
-	bestImbalance := decimal.Zero
+	var bestImbalance int64
 	first := true
 
 	for _, p := range candidatePrices(bids, asks) {
 		demand := sumQtyAtLeast(bids, p) // buyers willing to pay ≥ p
 		supply := sumQtyAtMost(asks, p)  // sellers willing to accept ≤ p
-		vol := decimal.Min(demand, supply)
-		if vol.LessThanOrEqual(decimal.Zero) {
+		vol := min(demand, supply)
+		if vol <= 0 {
 			continue
 		}
-		imbalance := demand.Sub(supply).Abs()
+		imbalance := abs64(demand - supply)
 
-		better := !best.HasClearing || vol.GreaterThan(best.Volume) ||
-			(vol.Equal(best.Volume) && imbalance.LessThan(bestImbalance))
+		better := !best.HasClearing || vol > best.Volume ||
+			(vol == best.Volume && imbalance < bestImbalance)
 		if first || better {
 			best = Result{HasClearing: true, ClearingPrice: p, Volume: vol}
 			bestImbalance = imbalance
@@ -67,39 +68,46 @@ func FromSnapshot(s *orderbook.Snapshot) Result {
 	return Uncross(bids, asks)
 }
 
-func sumQtyAtLeast(levels []Level, p decimal.Decimal) decimal.Decimal {
-	sum := decimal.Zero
+func sumQtyAtLeast(levels []Level, p int64) int64 {
+	var sum int64
 	for _, l := range levels {
-		if l.Price.GreaterThanOrEqual(p) {
-			sum = sum.Add(l.Qty)
+		if l.Price >= p {
+			sum += l.Qty
 		}
 	}
 	return sum
 }
 
-func sumQtyAtMost(levels []Level, p decimal.Decimal) decimal.Decimal {
-	sum := decimal.Zero
+func sumQtyAtMost(levels []Level, p int64) int64 {
+	var sum int64
 	for _, l := range levels {
-		if l.Price.LessThanOrEqual(p) {
-			sum = sum.Add(l.Qty)
+		if l.Price <= p {
+			sum += l.Qty
 		}
 	}
 	return sum
 }
 
 // candidatePrices returns the distinct prices across both sides, ascending.
-func candidatePrices(bids, asks []Level) []decimal.Decimal {
-	seen := make(map[string]decimal.Decimal)
+func candidatePrices(bids, asks []Level) []int64 {
+	seen := make(map[int64]struct{})
 	for _, l := range bids {
-		seen[l.Price.String()] = l.Price
+		seen[l.Price] = struct{}{}
 	}
 	for _, l := range asks {
-		seen[l.Price.String()] = l.Price
+		seen[l.Price] = struct{}{}
 	}
-	out := make([]decimal.Decimal, 0, len(seen))
-	for _, p := range seen {
+	out := make([]int64, 0, len(seen))
+	for p := range seen {
 		out = append(out, p)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].LessThan(out[j]) })
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
+}
+
+func abs64(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }

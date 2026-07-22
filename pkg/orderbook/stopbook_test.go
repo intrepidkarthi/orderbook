@@ -4,17 +4,18 @@ import (
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
-	"github.com/shopspring/decimal"
 )
 
-func stop(t *testing.T, seq uint64, side types.Side, stopPrice string) *types.StopOrder {
+// stop builds a resting sell/buy stop whose underlying id is seq — the id doubles
+// as the deterministic trigger-ordering key.
+func stop(t *testing.T, seq int64, side types.Side, stopPrice int64) *types.StopOrder {
 	t.Helper()
-	o, err := types.NewOrder("u", "BTC-USD", side, types.OrderTypeMarket, decimal.Zero, dec("1"), types.TIFImmediateOrCancel)
+	o, err := types.NewOrder("u", "BTC-USD", side, types.OrderTypeMarket, 0, 1, types.TIFImmediateOrCancel)
 	if err != nil {
 		t.Fatalf("NewOrder: %v", err)
 	}
-	o.SequenceNum = seq
-	s, err := types.NewStopOrder(o, dec(stopPrice))
+	o.ID = seq
+	s, err := types.NewStopOrder(o, stopPrice)
 	if err != nil {
 		t.Fatalf("NewStopOrder: %v", err)
 	}
@@ -23,7 +24,7 @@ func stop(t *testing.T, seq uint64, side types.Side, stopPrice string) *types.St
 
 func TestStopBook_AddGetRemoveCount(t *testing.T) {
 	sb := NewStopBook("BTC-USD")
-	s := stop(t, 1, types.SideSell, "95")
+	s := stop(t, 1, types.SideSell, 95)
 	sb.Add(s)
 	if sb.Count() != 1 {
 		t.Fatalf("count = %d, want 1", sb.Count())
@@ -34,7 +35,7 @@ func TestStopBook_AddGetRemoveCount(t *testing.T) {
 	if !sb.Remove(s.Order.ID) || sb.Count() != 0 {
 		t.Error("Remove failed")
 	}
-	if sb.Remove("missing") {
+	if sb.Remove(999999) {
 		t.Error("removing missing id should be false")
 	}
 }
@@ -42,20 +43,20 @@ func TestStopBook_AddGetRemoveCount(t *testing.T) {
 func TestStopBook_TriggersInSequenceOrder(t *testing.T) {
 	sb := NewStopBook("BTC-USD")
 	// Three sell stops; only those with stop >= marketPrice fire (price fell to 94).
-	sb.Add(stop(t, 3, types.SideSell, "95"))
-	sb.Add(stop(t, 1, types.SideSell, "96"))
-	sb.Add(stop(t, 2, types.SideSell, "90")) // will NOT fire at 94
-	sb.Add(stop(t, 4, types.SideSell, "94"))
+	sb.Add(stop(t, 3, types.SideSell, 95))
+	sb.Add(stop(t, 1, types.SideSell, 96))
+	sb.Add(stop(t, 2, types.SideSell, 90)) // will NOT fire at 94
+	sb.Add(stop(t, 4, types.SideSell, 94))
 
-	fired := sb.CheckTriggers(dec("94"))
+	fired := sb.CheckTriggers(94)
 	if len(fired) != 3 {
 		t.Fatalf("fired = %d, want 3 (stops 96, 95, 94)", len(fired))
 	}
-	// Deterministic: ordered by sequence number (1, 3, 4).
-	wantSeq := []uint64{1, 3, 4}
+	// Deterministic: ordered by id (1, 3, 4).
+	wantSeq := []int64{1, 3, 4}
 	for i, s := range fired {
-		if s.Order.SequenceNum != wantSeq[i] {
-			t.Errorf("fired[%d] seq = %d, want %d", i, s.Order.SequenceNum, wantSeq[i])
+		if s.Order.ID != wantSeq[i] {
+			t.Errorf("fired[%d] id = %d, want %d", i, s.Order.ID, wantSeq[i])
 		}
 		if !s.IsTriggered() {
 			t.Error("fired stop should be marked triggered")
@@ -69,11 +70,11 @@ func TestStopBook_TriggersInSequenceOrder(t *testing.T) {
 
 func TestStopBook_BuyStops(t *testing.T) {
 	sb := NewStopBook("BTC-USD")
-	sb.Add(stop(t, 1, types.SideBuy, "105"))
-	sb.Add(stop(t, 2, types.SideBuy, "110"))
+	sb.Add(stop(t, 1, types.SideBuy, 105))
+	sb.Add(stop(t, 2, types.SideBuy, 110))
 	// Price rose to 106: only the 105 buy stop fires.
-	fired := sb.CheckTriggers(dec("106"))
-	if len(fired) != 1 || fired[0].Order.SequenceNum != 1 {
+	fired := sb.CheckTriggers(106)
+	if len(fired) != 1 || fired[0].Order.ID != 1 {
 		t.Fatalf("expected only the 105 buy stop to fire, got %d", len(fired))
 	}
 }

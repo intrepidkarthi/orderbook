@@ -4,16 +4,14 @@ import (
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
-	"github.com/shopspring/decimal"
 )
 
 func benchOrders(n int) []*types.Order {
 	orders := make([]*types.Order, n)
-	one := decimal.NewFromInt(1)
 	for i := range orders {
 		// Spread across ~2000 price levels to exercise the sorted ladder.
-		price := decimal.NewFromInt(int64(1000 + i%2000))
-		o, _ := types.NewOrder("u", "X", types.SideBuy, types.OrderTypeLimit, price, one, types.TIFGoodTillCancel)
+		price := int64(1000 + i%2000)
+		o, _ := types.NewOrder("u", "X", types.SideBuy, types.OrderTypeLimit, price, 1, types.TIFGoodTillCancel)
 		orders[i] = o
 	}
 	return orders
@@ -44,7 +42,7 @@ func BenchmarkOrderBook_BestBid(b *testing.B) {
 // --- P0: benchmarks that stress the weak paths (cancel, level churn) ---
 
 // BenchmarkOrderBook_Cancel drains a large book by cancelling every order —
-// exercises the O(n) level-slice removal + O(P) price-slice scan.
+// exercises the O(1) node unlink + O(log P) price-slice removal.
 func BenchmarkOrderBook_Cancel(b *testing.B) {
 	ob := New(Config{Symbol: "X", MaxOrders: b.N + 1})
 	orders := benchOrders(b.N)
@@ -79,17 +77,20 @@ func BenchmarkOrderBook_CancelReplace(b *testing.B) {
 }
 
 // BenchmarkOrderBook_LevelChurn adds and removes a brand-new price level against
-// a dense book — exercises the O(P) sorted-price-slice shift.
+// a dense book — exercises the O(P) sorted-price-slice shift. The base book sits
+// on even ticks and the churn on the interleaved odd ticks so every insert lands
+// mid-slice.
 func BenchmarkOrderBook_LevelChurn(b *testing.B) {
 	ob := New(Config{Symbol: "X", MaxOrders: 5000})
-	for _, o := range benchOrders(2000) {
+	for i := 0; i < 2000; i++ {
+		price := int64(1000 + 2*i) // even ticks
+		o, _ := types.NewOrder("u", "X", types.SideBuy, types.OrderTypeLimit, price, 1, types.TIFGoodTillCancel)
 		_ = ob.Add(o)
 	}
-	one := decimal.NewFromInt(1)
 	churn := make([]*types.Order, b.N)
 	for i := range churn {
-		price := decimal.NewFromFloat(1000.5 + float64(i%2000)) // new interleaved levels
-		o, _ := types.NewOrder("u", "X", types.SideBuy, types.OrderTypeLimit, price, one, types.TIFGoodTillCancel)
+		price := int64(1001 + 2*(i%2000)) // interleaved odd ticks (new levels)
+		o, _ := types.NewOrder("u", "X", types.SideBuy, types.OrderTypeLimit, price, 1, types.TIFGoodTillCancel)
 		churn[i] = o
 	}
 	b.ReportAllocs()
