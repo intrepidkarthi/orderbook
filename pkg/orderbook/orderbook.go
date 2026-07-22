@@ -85,6 +85,48 @@ type OrderBook struct {
 	sequenceNum    uint64 // book version, bumped on each add
 	orderSeq       int64  // assigns ids to orders that arrive without one
 	maxOrders      int
+
+	// Free-lists: recycled nodes and price levels so steady-state add/cancel and
+	// level churn allocate nothing on the heap. The book is single-writer (guarded
+	// by mu), so plain slices beat sync.Pool here — no GC handoff, no contention.
+	nodePool  []*node
+	levelPool []*PriceLevel
+}
+
+// getNode returns a node from the free-list (or a fresh one), initialised for
+// order at level.
+func (ob *OrderBook) getNode(order *types.Order, level *PriceLevel) *node {
+	if n := len(ob.nodePool); n > 0 {
+		nd := ob.nodePool[n-1]
+		ob.nodePool = ob.nodePool[:n-1]
+		nd.order, nd.level, nd.prev, nd.next = order, level, nil, nil
+		return nd
+	}
+	return &node{order: order, level: level}
+}
+
+// putNode clears and recycles a node.
+func (ob *OrderBook) putNode(nd *node) {
+	nd.order, nd.level, nd.prev, nd.next = nil, nil, nil, nil
+	ob.nodePool = append(ob.nodePool, nd)
+}
+
+// getLevel returns a price level from the free-list (or a fresh one), reset to
+// empty at price.
+func (ob *OrderBook) getLevel(price int64) *PriceLevel {
+	if n := len(ob.levelPool); n > 0 {
+		l := ob.levelPool[n-1]
+		ob.levelPool = ob.levelPool[:n-1]
+		*l = PriceLevel{Price: price}
+		return l
+	}
+	return &PriceLevel{Price: price}
+}
+
+// putLevel clears and recycles a price level.
+func (ob *OrderBook) putLevel(l *PriceLevel) {
+	*l = PriceLevel{}
+	ob.levelPool = append(ob.levelPool, l)
 }
 
 // Config configures a new order book.
@@ -137,7 +179,7 @@ func (ob *OrderBook) Add(order *types.Order) error {
 	if order.Side == types.SideBuy {
 		l, ok := ob.bids[price]
 		if !ok {
-			l = &PriceLevel{Price: price}
+			l = ob.getLevel(price)
 			ob.bids[price] = l
 			ob.insertBidPrice(price)
 		}
@@ -145,14 +187,14 @@ func (ob *OrderBook) Add(order *types.Order) error {
 	} else {
 		l, ok := ob.asks[price]
 		if !ok {
-			l = &PriceLevel{Price: price}
+			l = ob.getLevel(price)
 			ob.asks[price] = l
 			ob.insertAskPrice(price)
 		}
 		level = l
 	}
 
-	n := &node{order: order, level: level}
+	n := ob.getNode(order, level)
 	level.push(n)
 	ob.nodes[order.ID] = n
 	return nil
@@ -168,21 +210,24 @@ func (ob *OrderBook) Remove(orderID int64) (*types.Order, error) {
 	if !exists {
 		return nil, types.ErrOrderNotFound
 	}
+	order := n.order
 	level := n.level
 	level.unlink(n)
 	delete(ob.nodes, orderID)
+	ob.putNode(n)
 
 	if level.isEmpty() {
-		price := n.order.Price
-		if n.order.Side == types.SideBuy {
+		price := order.Price
+		if order.Side == types.SideBuy {
 			delete(ob.bids, price)
 			ob.removeBidPrice(price)
 		} else {
 			delete(ob.asks, price)
 			ob.removeAskPrice(price)
 		}
+		ob.putLevel(level)
 	}
-	return n.order, nil
+	return order, nil
 }
 
 // Get returns a resting order by id.
