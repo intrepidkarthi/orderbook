@@ -28,4 +28,6 @@ var (
 	ErrPegReferenceUnavailable = errors.New("peg reference price is unavailable")
 	ErrTradingHalted           = errors.New("trading is halted")
 	ErrPriceOutsideBand        = errors.New("price is outside the allowed band")
+	ErrOrderTypeDisabled       = errors.New("order type is disabled")
+	ErrNewOrdersHalted         = errors.New("engine is cancel-only: new liquidity is not accepted")
 )

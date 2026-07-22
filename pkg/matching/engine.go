@@ -39,6 +39,21 @@ const (
 	STPAllow SelfTradePrevention = "ALLOW"
 )
 
+// OrderClass names a gate-able family of advanced order types. Listing a class
+// in Config.DisabledClasses makes the engine reject that family with
+// ErrOrderTypeDisabled — so one buggy exotic type can be switched off without
+// halting the whole venue (the ASX combination-order and Binance trailing-stop
+// lesson). Plain limit/market orders cannot be disabled.
+type OrderClass string
+
+const (
+	ClassStop     OrderClass = "STOP"     // stop / stop-limit (ProcessStop)
+	ClassIceberg  OrderClass = "ICEBERG"  // iceberg (ProcessIceberg)
+	ClassPegged   OrderClass = "PEGGED"   // pegged (ProcessPegged)
+	ClassOCO      OrderClass = "OCO"      // one-cancels-other (ProcessOCO)
+	ClassTrailing OrderClass = "TRAILING" // trailing stop (ProcessTrailingStop)
+)
+
 // Config configures an Engine.
 type Config struct {
 	Symbol              string
@@ -59,6 +74,10 @@ type Config struct {
 	// clock makes replay byte-identical down to the timestamps — the single-writer
 	// state transition never reads the wall clock on its own.
 	Clock func() time.Time
+	// DisabledClasses lists advanced order families to reject (see OrderClass).
+	// Use it to feature-flag off a risky/buggy exotic type in production without a
+	// redeploy of the whole engine.
+	DisabledClasses []OrderClass
 }
 
 // DefaultConfig returns a sensible configuration for a symbol.
@@ -97,6 +116,7 @@ type Engine struct {
 	orderSeq      int64
 	tradeSeq      int64
 	clock         func() time.Time
+	disabled      map[OrderClass]bool
 }
 
 // maxStopCascade bounds how many rounds of stop triggering a single order may
@@ -110,6 +130,13 @@ func NewEngine(config Config) *Engine {
 	}
 	if config.Clock == nil {
 		config.Clock = time.Now
+	}
+	var disabled map[OrderClass]bool
+	if len(config.DisabledClasses) > 0 {
+		disabled = make(map[OrderClass]bool, len(config.DisabledClasses))
+		for _, c := range config.DisabledClasses {
+			disabled[c] = true
+		}
 	}
 	return &Engine{
 		config: config,
@@ -126,6 +153,7 @@ func NewEngine(config Config) *Engine {
 		// hot path never touches decimal for the common band-disabled case.
 		bandEnabled: config.PriceBand.GreaterThan(decimal.Zero),
 		clock:       config.Clock,
+		disabled:    disabled,
 	}
 }
 
@@ -182,6 +210,13 @@ func toMatchResult(order *types.Order, dst []types.Trade, status types.OrderStat
 		}
 	}
 	return res
+}
+
+// rejectDisabled builds a rejection for an order whose class is feature-flagged
+// off (Config.DisabledClasses), without touching the book.
+func rejectDisabled(order *types.Order) *MatchResult {
+	order.Status = types.OrderStatusRejected
+	return &MatchResult{Order: order, Status: types.OrderStatusRejected, RejectionReason: types.ErrOrderTypeDisabled}
 }
 
 // settleInto matches order and applies market/TIF resting rules, appending trades
@@ -282,6 +317,9 @@ func (e *Engine) cascadeStops(dst []types.Trade) []types.Trade {
 // reached the stop it fires immediately; otherwise it rests off-book until a
 // trade reaches the trigger price.
 func (e *Engine) ProcessStop(stop *types.StopOrder) *MatchResult {
+	if e.disabled[ClassStop] {
+		return rejectDisabled(stop.Order)
+	}
 	dst, status, reason := e.submitStopInto(stop, nil)
 	return toMatchResult(stop.Order, dst, status, reason)
 }
@@ -309,7 +347,9 @@ func (e *Engine) submitStopInto(stop *types.StopOrder, dst []types.Trade) ([]typ
 // (plus its offset) and submits it as a limit. It is rejected if the reference
 // price is unavailable or the resolved price is non-positive.
 func (e *Engine) ProcessPegged(p *types.PeggedOrder) *MatchResult {
-
+	if e.disabled[ClassPegged] {
+		return rejectDisabled(p.Order)
+	}
 	ref, ok := e.pegReference(p.Ref)
 	if !ok {
 		p.Order.Status = types.OrderStatusRejected
@@ -351,7 +391,9 @@ func (e *Engine) pegReference(ref types.PegReference) (int64, bool) {
 // current market and either fires immediately or rests, ratcheting as trades
 // move the market (handled in cascadeStops).
 func (e *Engine) ProcessTrailingStop(ts *types.TrailingStop) *MatchResult {
-
+	if e.disabled[ClassTrailing] {
+		return rejectDisabled(ts.Order)
+	}
 	e.nextID(ts.Order)
 
 	mp := e.book.LastTradePrice()
@@ -394,7 +436,9 @@ func (e *Engine) checkTrailingStops(marketPrice int64) []*types.TrailingStop {
 // completes first cancels the other (handled in match/cascadeStops via the OCO
 // registry).
 func (e *Engine) ProcessOCO(oco *types.OCOOrder) *MatchResult {
-
+	if e.disabled[ClassOCO] {
+		return rejectDisabled(oco.Primary)
+	}
 	// Ids must be assigned before registering the legs, since the registry is
 	// keyed by id (orders no longer arrive with a pre-set id).
 	e.nextID(oco.Primary)
@@ -452,7 +496,9 @@ func (e *Engine) dropOCO(oco *types.OCOOrder) {
 // visible in the book; as slices are consumed they refill from the hidden
 // reserve until the total is worked off.
 func (e *Engine) ProcessIceberg(ib *types.IcebergOrder) *MatchResult {
-
+	if e.disabled[ClassIceberg] {
+		return rejectDisabled(ib.Order)
+	}
 	e.nextID(ib.Order)
 	e.icebergOrders[ib.Order.ID] = ib
 

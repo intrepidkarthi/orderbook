@@ -83,6 +83,62 @@ func FuzzEngine(f *testing.F) {
 	})
 }
 
+// FuzzExoticOrders hammers the advanced order types (stop/iceberg/trailing) plus
+// market takers that trigger them, against a warm two-sided book — the surface
+// that actually breaks real engines (Binance's 2023 trailing-stop halt, ASX's
+// combination-order outage). It asserts invariants hold after every step (book
+// never crossed, quantity conserved) and that no exotic trips an unbounded
+// trigger loop (bounded by maxStopCascade, so the call must simply return).
+func FuzzExoticOrders(f *testing.F) {
+	f.Add([]byte{0x00, 0x5f, 0x05, 0x01, 0x63, 0x03, 0x03, 0x0a, 0x02})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		e := NewEngine(DefaultConfig("FX"))
+		// Seed a two-sided book and a last trade price (=100) so stops/trailing
+		// have a live reference.
+		e.Process(lim(t, "seed", types.SideBuy, 100, 50))
+		e.Process(lim(t, "seed2", types.SideSell, 100, 20)) // trades → last=100
+		e.Process(lim(t, "seed", types.SideBuy, 95, 50))
+		e.Process(lim(t, "seed", types.SideSell, 105, 50))
+
+		for i := 0; i+2 < len(data); i += 3 {
+			price := int64(data[i+1])%200 + 1
+			qty := int64(data[i+2])%50 + 1
+			switch data[i] % 4 {
+			case 0: // sell stop
+				o, err := types.NewOrder("x", "FX", types.SideSell, types.OrderTypeMarket, 0, qty, types.TIFImmediateOrCancel)
+				if err == nil {
+					if so, err := types.NewStopOrder(o, price); err == nil {
+						e.ProcessStop(so)
+					}
+				}
+			case 1: // iceberg buy
+				o, err := types.NewOrder("x", "FX", types.SideBuy, types.OrderTypeLimit, price, qty*2, types.TIFGoodTillCancel)
+				if err == nil {
+					if ib, err := types.NewIcebergOrder(o, qty); err == nil {
+						e.ProcessIceberg(ib)
+					}
+				}
+			case 2: // trailing sell stop
+				o, err := types.NewOrder("x", "FX", types.SideSell, types.OrderTypeMarket, 0, qty, types.TIFImmediateOrCancel)
+				if err == nil {
+					if ts, err := types.NewTrailingStop(o, price%20+1); err == nil {
+						e.ProcessTrailingStop(ts)
+					}
+				}
+			case 3: // market taker to move the price and trigger resting exotics
+				side := types.SideBuy
+				if qty%2 == 0 {
+					side = types.SideSell
+				}
+				if o, err := types.NewOrder("x", "FX", side, types.OrderTypeMarket, 0, qty, types.TIFImmediateOrCancel); err == nil {
+					e.Process(o)
+				}
+			}
+			checkInvariants(t, e, nil)
+		}
+	})
+}
+
 // TestSoak drives a long, deterministic, mixed order flow and checks invariants
 // throughout — a cheap stand-in for a soak run. Skipped under -short.
 func TestSoak(t *testing.T) {
