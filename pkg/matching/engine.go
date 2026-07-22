@@ -39,6 +39,33 @@ const (
 	STPAllow SelfTradePrevention = "ALLOW"
 )
 
+// EngineState is the engine's trading state. It moves between Open, CancelOnly
+// (accept cancels, reject new liquidity — the venue-wind-down state Coinbase
+// restarted through: cancel-only → auction → full), and Halted (reject
+// everything).
+type EngineState uint8
+
+const (
+	StateOpen       EngineState = iota // normal trading
+	StateCancelOnly                    // cancels only; new orders rejected
+	StateHalted                        // all orders rejected
+)
+
+// Guardrail is an optional self-output safety valve. If the engine prints more
+// than MaxTrades trades (or MaxNotional in tick·lot units) within Window, it
+// trips itself to Halted — the Knight Capital lesson: guard the engine's *own*
+// output, not just incoming prices. Zero MaxTrades and MaxNotional (or zero
+// Window) disable it.
+type Guardrail struct {
+	MaxTrades   int
+	MaxNotional int64
+	Window      time.Duration
+}
+
+func (g Guardrail) enabled() bool {
+	return g.Window > 0 && (g.MaxTrades > 0 || g.MaxNotional > 0)
+}
+
 // OrderClass names a gate-able family of advanced order types. Listing a class
 // in Config.DisabledClasses makes the engine reject that family with
 // ErrOrderTypeDisabled — so one buggy exotic type can be switched off without
@@ -78,6 +105,9 @@ type Config struct {
 	// Use it to feature-flag off a risky/buggy exotic type in production without a
 	// redeploy of the whole engine.
 	DisabledClasses []OrderClass
+	// Guardrail is an optional self-output tripwire (see Guardrail). Zero value
+	// disables it.
+	Guardrail Guardrail
 }
 
 // DefaultConfig returns a sensible configuration for a symbol.
@@ -111,12 +141,18 @@ type Engine struct {
 	icebergOrders map[int64]*types.IcebergOrder
 	ocoByOrderID  map[int64]*types.OCOOrder // both legs' ids map to the pair
 	trailingStops map[int64]*types.TrailingStop
-	halted        bool
+	state         EngineState
 	bandEnabled   bool // config.PriceBand > 0, precomputed to keep decimal off the hot path
 	orderSeq      int64
 	tradeSeq      int64
 	clock         func() time.Time
 	disabled      map[OrderClass]bool
+
+	// self-output guardrail window accounting
+	guard          Guardrail
+	windowStart    time.Time
+	windowTrades   int
+	windowNotional int64
 }
 
 // maxStopCascade bounds how many rounds of stop triggering a single order may
@@ -154,6 +190,7 @@ func NewEngine(config Config) *Engine {
 		bandEnabled: config.PriceBand.GreaterThan(decimal.Zero),
 		clock:       config.Clock,
 		disabled:    disabled,
+		guard:       config.Guardrail,
 	}
 }
 
@@ -223,10 +260,14 @@ func rejectDisabled(order *types.Order) *MatchResult {
 // to dst. It assumes the engine lock is held and the order's id is assigned, and
 // returns the extended buffer, the order's final status, and any rejection reason.
 func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
-	// Circuit breakers: halted market, or a limit price outside the collar.
-	if e.halted {
+	// Circuit breakers: engine state, then a limit price outside the collar.
+	switch e.state {
+	case StateHalted:
 		order.Status = types.OrderStatusRejected
 		return dst, types.OrderStatusRejected, types.ErrTradingHalted
+	case StateCancelOnly:
+		order.Status = types.OrderStatusRejected
+		return dst, types.OrderStatusRejected, types.ErrNewOrdersHalted
 	}
 	if order.Type == types.OrderTypeLimit && e.outsideBand(order.Price) {
 		order.Status = types.OrderStatusRejected
@@ -623,17 +664,27 @@ func (e *Engine) outsideBand(price int64) bool {
 
 // Halt suspends trading; every subsequent order is rejected until Resume.
 func (e *Engine) Halt() {
-	e.halted = true
+	e.state = StateHalted
 }
 
-// Resume lifts a trading halt.
+// SetCancelOnly puts the engine in cancel-only mode: cancels are accepted but new
+// liquidity is rejected (ErrNewOrdersHalted). Used to wind a venue down under
+// stress before a full halt or auction reopen.
+func (e *Engine) SetCancelOnly() {
+	e.state = StateCancelOnly
+}
+
+// Resume returns the engine to normal (Open) trading.
 func (e *Engine) Resume() {
-	e.halted = false
+	e.state = StateOpen
 }
 
-// IsHalted reports whether trading is currently halted.
+// State reports the current trading state.
+func (e *Engine) State() EngineState { return e.state }
+
+// IsHalted reports whether trading is fully halted.
 func (e *Engine) IsHalted() bool {
-	return e.halted
+	return e.state == StateHalted
 }
 
 // wouldCross reports whether a limit order would immediately take liquidity
@@ -776,6 +827,21 @@ func (e *Engine) executeTrade(taker, maker *types.Order, price, qty int64, dst [
 	now := e.clock().UTC()
 	taker.UpdatedAt = now
 	maker.UpdatedAt = now
+
+	// Self-output guardrail: trip to Halted if trade/notional volume in the
+	// current window exceeds the configured cap (the trip takes effect on the next
+	// order — the current order's own quantity is already bounded).
+	if e.guard.enabled() {
+		if e.windowStart.IsZero() || now.Sub(e.windowStart) >= e.guard.Window {
+			e.windowStart, e.windowTrades, e.windowNotional = now, 0, 0
+		}
+		e.windowTrades++
+		e.windowNotional += price * qty
+		if (e.guard.MaxTrades > 0 && e.windowTrades > e.guard.MaxTrades) ||
+			(e.guard.MaxNotional > 0 && e.windowNotional > e.guard.MaxNotional) {
+			e.state = StateHalted
+		}
+	}
 
 	var buy, sell *types.Order
 	if taker.Side == types.SideBuy {

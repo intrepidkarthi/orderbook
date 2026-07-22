@@ -16,6 +16,7 @@ const (
 	cmdTrailing
 	cmdHalt
 	cmdResume
+	cmdCancelOnly
 )
 
 // command is one unit of work for the matching goroutine. Exactly one payload

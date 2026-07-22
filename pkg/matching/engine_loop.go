@@ -77,6 +77,8 @@ func (r *Runner) dispatch(cmd command) {
 		r.engine.Halt()
 	case cmdResume:
 		r.engine.Resume()
+	case cmdCancelOnly:
+		r.engine.SetCancelOnly()
 	}
 	if cmd.reply != nil {
 		cmd.reply <- rep
@@ -132,7 +134,11 @@ func (r *Runner) ProcessTrailingStop(ts *types.TrailingStop) *MatchResult {
 // Halt suspends trading until Resume.
 func (r *Runner) Halt() { r.send(command{kind: cmdHalt}) }
 
-// Resume lifts a trading halt.
+// SetCancelOnly puts the engine in cancel-only mode (cancels accepted, new
+// liquidity rejected).
+func (r *Runner) SetCancelOnly() { r.send(command{kind: cmdCancelOnly}) }
+
+// Resume returns the engine to normal trading.
 func (r *Runner) Resume() { r.send(command{kind: cmdResume}) }
 
 // --- asynchronous submit ---
