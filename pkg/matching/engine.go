@@ -17,6 +17,7 @@ package matching
 
 import (
 	"sort"
+	"time"
 
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -53,6 +54,11 @@ type Config struct {
 	// of the default price–time (FIFO) priority. In this mode, self orders are
 	// skipped rather than STP-cancelled.
 	ProRata bool
+	// Clock supplies every timestamp the engine stamps (order Created/Updated,
+	// trade Created, book snapshots). nil => time.Now. Injecting a deterministic
+	// clock makes replay byte-identical down to the timestamps — the single-writer
+	// state transition never reads the wall clock on its own.
+	Clock func() time.Time
 }
 
 // DefaultConfig returns a sensible configuration for a symbol.
@@ -90,6 +96,7 @@ type Engine struct {
 	bandEnabled   bool // config.PriceBand > 0, precomputed to keep decimal off the hot path
 	orderSeq      int64
 	tradeSeq      int64
+	clock         func() time.Time
 }
 
 // maxStopCascade bounds how many rounds of stop triggering a single order may
@@ -101,11 +108,15 @@ func NewEngine(config Config) *Engine {
 	if config.SelfTradePrevention == "" {
 		config.SelfTradePrevention = STPCancelNewest
 	}
+	if config.Clock == nil {
+		config.Clock = time.Now
+	}
 	return &Engine{
 		config: config,
 		book: orderbook.New(orderbook.Config{
 			Symbol:    config.Symbol,
 			MaxOrders: config.MaxOrders,
+			Clock:     config.Clock,
 		}),
 		stopBook:      orderbook.NewStopBook(config.Symbol),
 		icebergOrders: make(map[int64]*types.IcebergOrder),
@@ -114,6 +125,7 @@ func NewEngine(config Config) *Engine {
 		// Resolve the band-enabled flag once (a decimal compare) so the per-order
 		// hot path never touches decimal for the common band-disabled case.
 		bandEnabled: config.PriceBand.GreaterThan(decimal.Zero),
+		clock:       config.Clock,
 	}
 }
 
@@ -125,6 +137,13 @@ func (e *Engine) nextID(order *types.Order) int64 {
 		e.orderSeq++
 		order.ID = e.orderSeq
 	}
+	// The engine is the single writer that owns time: it stamps the authoritative
+	// timestamps on intake from its injected clock, so replay is reproducible.
+	now := e.clock().UTC()
+	if order.CreatedAt.IsZero() {
+		order.CreatedAt = now
+	}
+	order.UpdatedAt = now
 	return order.ID
 }
 
@@ -708,6 +727,10 @@ func (e *Engine) executeTrade(taker, maker *types.Order, price, qty int64, dst [
 	_ = maker.Fill(qty)
 	e.tradeSeq++
 
+	now := e.clock().UTC()
+	taker.UpdatedAt = now
+	maker.UpdatedAt = now
+
 	var buy, sell *types.Order
 	if taker.Side == types.SideBuy {
 		buy, sell = taker, maker
@@ -717,6 +740,7 @@ func (e *Engine) executeTrade(taker, maker *types.Order, price, qty int64, dst [
 	tr := types.NewTradeValue(e.config.Symbol, price, qty, buy, sell, taker.Side)
 	tr.ID = e.tradeSeq
 	tr.SequenceNum = e.tradeSeq
+	tr.CreatedAt = now
 	return append(dst, tr)
 }
 
@@ -756,6 +780,7 @@ func (e *Engine) reverseTrade(tr types.Trade, makerOrders map[int64]*types.Order
 // Cancel removes a resting order (or a pending stop) if it belongs to userID and
 // is still active.
 func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
+	now := e.clock().UTC()
 
 	if order, exists := e.book.Get(orderID); exists {
 		if order.UserID != userID {
@@ -767,6 +792,7 @@ func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
 		if err := order.Cancel(); err != nil {
 			return nil, err
 		}
+		order.UpdatedAt = now
 		_, _ = e.book.Remove(orderID)
 		delete(e.icebergOrders, orderID) // no-op for non-iceberg orders
 		return order, nil
@@ -778,6 +804,7 @@ func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
 		}
 		e.stopBook.Remove(orderID)
 		_ = s.Order.Cancel()
+		s.Order.UpdatedAt = now
 		return s.Order, nil
 	}
 
@@ -787,6 +814,7 @@ func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
 		}
 		delete(e.trailingStops, orderID)
 		_ = ts.Order.Cancel()
+		ts.Order.UpdatedAt = now
 		return ts.Order, nil
 	}
 

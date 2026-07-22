@@ -85,6 +85,7 @@ type OrderBook struct {
 	sequenceNum    uint64 // book version, bumped on each add
 	orderSeq       int64  // assigns ids to orders that arrive without one
 	maxOrders      int
+	clock          func() time.Time
 
 	// Free-lists: recycled nodes and price levels so steady-state add/cancel and
 	// level churn allocate nothing on the heap. The book is single-writer (guarded
@@ -133,12 +134,19 @@ func (ob *OrderBook) putLevel(l *PriceLevel) {
 type Config struct {
 	Symbol    string
 	MaxOrders int // 0 => default of 100_000
+	// Clock supplies the timestamps stamped on snapshots and the last-trade time.
+	// nil => time.Now. Inject a deterministic clock to make snapshots byte-identical
+	// under replay.
+	Clock func() time.Time
 }
 
 // New builds an empty order book.
 func New(config Config) *OrderBook {
 	if config.MaxOrders == 0 {
 		config.MaxOrders = 100_000
+	}
+	if config.Clock == nil {
+		config.Clock = time.Now
 	}
 	return &OrderBook{
 		symbol:    config.Symbol,
@@ -148,6 +156,7 @@ func New(config Config) *OrderBook {
 		bidPrices: make([]int64, 0),
 		askPrices: make([]int64, 0),
 		maxOrders: config.MaxOrders,
+		clock:     config.Clock,
 	}
 }
 
@@ -326,7 +335,7 @@ func (ob *OrderBook) SetLastTradePrice(price int64) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 	ob.lastTradePrice = price
-	ob.lastTradeTime = time.Now().UTC()
+	ob.lastTradeTime = ob.clock().UTC()
 }
 
 // GetBidLevels returns up to depth aggregated bid levels, best first (copies).
@@ -510,7 +519,7 @@ func (ob *OrderBook) SnapshotL3(depth int) *SnapshotL3 {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
 
-	s := &SnapshotL3{Symbol: ob.symbol, SequenceNum: ob.sequenceNum, Timestamp: time.Now().UTC()}
+	s := &SnapshotL3{Symbol: ob.symbol, SequenceNum: ob.sequenceNum, Timestamp: ob.clock().UTC()}
 	appendSide := func(prices []int64, levels map[int64]*PriceLevel) []L3Order {
 		out := make([]L3Order, 0, depth)
 		for i := 0; i < len(prices) && i < depth; i++ {
@@ -542,7 +551,7 @@ func (ob *OrderBook) Snapshot(depth int) *Snapshot {
 		Asks:           make([]SnapshotLevel, 0, depth),
 		LastTradePrice: ob.lastTradePrice,
 		SequenceNum:    ob.sequenceNum,
-		Timestamp:      time.Now().UTC(),
+		Timestamp:      ob.clock().UTC(),
 	}
 	for i := 0; i < len(ob.bidPrices) && i < depth; i++ {
 		l := ob.bids[ob.bidPrices[i]]

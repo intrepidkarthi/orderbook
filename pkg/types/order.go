@@ -87,8 +87,9 @@ func (o *Order) AsPostOnly() *Order {
 	return o
 }
 
-// NewOrder constructs a validated order from integer ticks/lots. The ID is left
-// zero and assigned on entry to the engine/book.
+// NewOrder constructs a validated order from integer ticks/lots. The ID and the
+// CreatedAt/UpdatedAt timestamps are left zero and assigned by the engine on
+// entry (the engine owns the clock, so replay is deterministic).
 //
 // Quantity must be positive. Limit orders require a positive price; market orders
 // ignore price (it is forced to zero, since a market order takes whatever the
@@ -122,7 +123,6 @@ func NewOrder(userID, symbol string, side Side, orderType OrderType, price, quan
 		return nil, ErrInvalidPrice
 	}
 
-	now := time.Now().UTC()
 	return &Order{
 		UserID:       userID,
 		Symbol:       symbol,
@@ -134,8 +134,6 @@ func NewOrder(userID, symbol string, side Side, orderType OrderType, price, quan
 		RemainingQty: quantity,
 		TimeInForce:  tif,
 		Status:       OrderStatusNew,
-		CreatedAt:    now,
-		UpdatedAt:    now,
 	}, nil
 }
 
@@ -151,7 +149,6 @@ func (o *Order) Fill(qty int64) error {
 
 	o.FilledQty += qty
 	o.RemainingQty -= qty
-	o.UpdatedAt = time.Now().UTC()
 
 	if o.RemainingQty == 0 {
 		o.Status = OrderStatusFilled
@@ -171,7 +168,6 @@ func (o *Order) Cancel() error {
 		return ErrOrderNotActive
 	}
 	o.Status = OrderStatusCancelled
-	o.UpdatedAt = time.Now().UTC()
 	return nil
 }
 

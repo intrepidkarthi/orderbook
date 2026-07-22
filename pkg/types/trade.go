@@ -24,8 +24,9 @@ type Trade struct {
 
 // NewTradeValue builds a trade value (no heap allocation) from the matched
 // buy/sell orders. takerSide identifies which side crossed the spread, from which
-// maker/taker order ids are derived. ID/SequenceNum are left zero and assigned by
-// the engine. This is the form the zero-alloc match path appends into a buffer.
+// maker/taker order ids are derived. ID/SequenceNum/CreatedAt are left zero and
+// assigned by the engine (which owns the clock). This is the form the zero-alloc
+// match path appends into a buffer.
 func NewTradeValue(symbol string, price, quantity int64, buyOrder, sellOrder *Order, takerSide Side) Trade {
 	t := Trade{
 		Symbol:       symbol,
@@ -36,7 +37,6 @@ func NewTradeValue(symbol string, price, quantity int64, buyOrder, sellOrder *Or
 		BuyerUserID:  buyOrder.UserID,
 		SellerUserID: sellOrder.UserID,
 		TakerSide:    takerSide,
-		CreatedAt:    time.Now().UTC(),
 	}
 
 	if takerSide == SideBuy {
