@@ -4,7 +4,9 @@ How to embed the matching engine in a Go service and take it to production. This
 guide covers the reference architecture, how to drive the engine (single-threaded
 vs concurrent), determinism/recovery, market-data fan-out, observability, scaling,
 and the pitfalls of a single-writer engine. For the exhaustive knob list see
-[CONFIG.md](CONFIG.md); for the design rationale see [SPEC.md](SPEC.md).
+[CONFIG.md](CONFIG.md); for the design rationale see [SPEC.md](SPEC.md); for the
+generated API reference (with runnable examples) see
+[pkg.go.dev](https://pkg.go.dev/github.com/intrepidkarthi/orderbook).
 
 The library is a **pure matching core**: it owns the order book, the matching
 algorithm, order lifecycle, deterministic sequencing, and market-data snapshots.

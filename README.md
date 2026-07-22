@@ -164,6 +164,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 
 | Document | Contents |
 |---|---|
+| [API reference](https://pkg.go.dev/github.com/intrepidkarthi/orderbook) | Generated Go documentation for every package, with runnable examples, on pkg.go.dev. |
 | [INTEGRATION.md](docs/INTEGRATION.md) | Embedding the engine: reference architecture, single-writer vs concurrent, WAL and recovery, market-data fan-out, observability, multi-symbol scaling, and a production checklist. |
 | [CONFIG.md](docs/CONFIG.md) | Every configuration knob — `Instrument`, engine policy, time-in-force, order types — with defaults, validation, and the core-vs-layer boundary. |
 | [SPEC.md](docs/SPEC.md) | Architecture, the order model, core design decisions, and performance targets. |

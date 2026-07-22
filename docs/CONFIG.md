@@ -9,7 +9,10 @@ that boundary sharply is a deliberate design choice, not an omission.
 Prices are **integer ticks** and quantities **integer lots** (`int64`)
 everywhere inside the engine. Human decimals are converted only at the boundary,
 by an [`Instrument`](#instrument--the-priceqty-grid). See
-[SPEC.md §6.1](SPEC.md#61-price--quantity--int64-ticks--lots-decimal-at-the-edge).
+[SPEC.md §6.1](SPEC.md#61-price--quantity--int64-ticks--lots-decimal-at-the-edge)
+for the rationale, and the generated
+[API reference on pkg.go.dev](https://pkg.go.dev/github.com/intrepidkarthi/orderbook)
+for exact type and method signatures.
 
 ---
 
