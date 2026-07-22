@@ -124,9 +124,14 @@ Sequencer+Matcher core plus the snapshot primitives.
 
 Use a **bounded** queue (`RunnerConfig.QueueSize`). Size it to cover your
 worst-case burst × drain latency, and round to a power of two. Under sustained
-overload, a bounded queue is what lets you *shed or reject* instead of growing
-memory unboundedly and triggering GC pauses. Keep `SubmitAsync` for the
-data-plane; reserve synchronous `Process` for tests and low-rate control calls.
+overload, submit new liquidity with **`TrySubmit`** / **`TrySubmitAsync`**: they
+enqueue non-blocking and return **`ErrQueueFull`** when the queue is full, so you
+shed the order instead of growing memory unboundedly and triggering GC pauses. The
+blocking `Cancel` still waits for space — so under overload you shed new orders but
+**never drop cancels**, letting users de-risk (the Binance May-2021 lesson). Gauge
+pressure with `Runner.QueueLen()`/`QueueCap()`, and use degraded states
+(`SetCancelOnly`, `Halt`) to wind down. Reserve synchronous `Process` for tests and
+low-rate control calls.
 
 ---
 
@@ -160,10 +165,19 @@ only the WAL entries after it — checkpoint on a cadence to bound replay time.
 Idempotency comes from `ClientOrderID` + the sequence number: a duplicate seq on
 redelivery is ignored, so trades are never double-emitted.
 
-> The library ships the replay/digest primitives and byte-identical rebuild (see
-> the recovery tests in `pkg/marketdata`). The durable WAL writer and snapshot
-> cadence are yours to plug in — a `WALWriter`/`Snapshot` interface is on the
-> roadmap to make this a drop-in.
+The library provides the primitives:
+
+- **Ordered event stream.** Set `Config.EventSink` to receive every engine event
+  (`Accepted`/`Rejected`/`Trade`/`Canceled`) with a **monotonic `Seq`** — the seam
+  to feed a WAL writer, a market-data publisher, and drop copy. The sink must
+  return fast (push to a ring/channel); it never back-pressures the matcher.
+- **Snapshot + restore.** `Engine.TakeSnapshot()` captures a sequence-keyed copy
+  of the resting book, pending stops, and counters; `RestoreEngine` / `LoadSnapshot`
+  rebuild it. Recover by loading the newest snapshot and replaying the command log
+  after its `Seq` — bounding replay to O(recent).
+
+The durable WAL storage backend (writing the event stream to disk/replication) is
+yours to provide; the engine emits the sequenced stream and the snapshots.
 
 ---
 

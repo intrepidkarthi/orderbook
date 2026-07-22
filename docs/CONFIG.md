@@ -66,6 +66,7 @@ defaults.
 | `Clock` | `func() time.Time` | Timestamp source for orders/trades/snapshots | `nil` → `time.Now` | inject a deterministic clock for byte-identical replay |
 | `DisabledClasses` | `[]OrderClass` | Advanced order families to reject with `ErrOrderTypeDisabled` (`ClassStop`/`Iceberg`/`Pegged`/`OCO`/`Trailing`) | `nil` (all enabled) | feature-flag off a risky exotic type without a redeploy |
 | `Guardrail` | `Guardrail` | Self-output tripwire: trip to `Halted` when trades/notional in `Window` exceed `MaxTrades`/`MaxNotional` | zero (disabled) | guards the engine's *own* output (the Knight lesson) |
+| `EventSink` | `EventSink` | Receives the ordered, sequence-numbered event stream (`Accepted`/`Rejected`/`Trade`/`Canceled`) | `nil` (no events) | non-blocking; the seam for market-data/drop-copy/recovery adapters |
 
 ### Operational states & determinism (Phase A)
 
