@@ -63,6 +63,26 @@ defaults.
 | `MaxOrders` | `int` | Capacity; further inserts return `ErrOrderBookFull` | `100_000` | 0 → default |
 | `PriceBand` | `decimal.Decimal` | Circuit-breaker collar: reject a **limit** priced more than this fraction from the last trade (e.g. `0.10` = ±10%) | `0` (disabled) | decimal, cold path only |
 | `ProRata` | `bool` | Size-proportional allocation at a price level instead of FIFO price-time | `false` (FIFO) | see below |
+| `Clock` | `func() time.Time` | Timestamp source for orders/trades/snapshots | `nil` → `time.Now` | inject a deterministic clock for byte-identical replay |
+| `DisabledClasses` | `[]OrderClass` | Advanced order families to reject with `ErrOrderTypeDisabled` (`ClassStop`/`Iceberg`/`Pegged`/`OCO`/`Trailing`) | `nil` (all enabled) | feature-flag off a risky exotic type without a redeploy |
+| `Guardrail` | `Guardrail` | Self-output tripwire: trip to `Halted` when trades/notional in `Window` exceed `MaxTrades`/`MaxNotional` | zero (disabled) | guards the engine's *own* output (the Knight lesson) |
+
+### Operational states & determinism (Phase A)
+
+- **Injectable clock.** The engine is the sole timestamp authority: it stamps
+  order/trade/snapshot times from `Config.Clock`. Injecting a deterministic clock
+  makes replay byte-identical down to the timestamps — the "no wall clock in the
+  state transition" rule. Default is real time.
+- **Degraded states.** `Engine.State()` is one of `StateOpen`, `StateCancelOnly`
+  (cancels accepted, new liquidity rejected with `ErrNewOrdersHalted`), or
+  `StateHalted` (everything rejected). Drive with `Halt()` / `SetCancelOnly()` /
+  `Resume()` (also on `Runner`) — the cancel-only → auction → full recovery path
+  real venues use.
+- **Feature-flagged order types.** Any advanced family in `DisabledClasses` is
+  rejected at entry, so one buggy exotic type can be switched off without downing
+  the venue.
+- **Self-output guardrail.** An optional cap on the engine's own trade/notional
+  output per window that trips it to `Halted`.
 
 ### Self-trade prevention (STP)
 
