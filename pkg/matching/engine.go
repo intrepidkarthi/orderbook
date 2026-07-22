@@ -108,6 +108,9 @@ type Config struct {
 	// Guardrail is an optional self-output tripwire (see Guardrail). Zero value
 	// disables it.
 	Guardrail Guardrail
+	// EventSink, if set, receives the engine's ordered event stream (see
+	// EventSink). nil => no events, zero hot-path overhead.
+	EventSink EventSink
 }
 
 // DefaultConfig returns a sensible configuration for a symbol.
@@ -153,6 +156,11 @@ type Engine struct {
 	windowStart    time.Time
 	windowTrades   int
 	windowNotional int64
+
+	// ordered event stream
+	sink     EventSink
+	eventSeq int64
+	eventBuf []Event
 }
 
 // maxStopCascade bounds how many rounds of stop triggering a single order may
@@ -191,6 +199,7 @@ func NewEngine(config Config) *Engine {
 		clock:       config.Clock,
 		disabled:    disabled,
 		guard:       config.Guardrail,
+		sink:        config.EventSink,
 	}
 }
 
@@ -220,10 +229,11 @@ func (e *Engine) nextID(order *types.Order) int64 {
 // stop orders the fill triggers are appended too. This is the low-latency path;
 // Process wraps it for callers that prefer a *MatchResult.
 func (e *Engine) Match(order *types.Order, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
-
+	start := len(dst)
 	e.nextID(order)
 	dst, status, reason := e.settleInto(order, dst)
 	dst = e.cascadeStops(dst)
+	e.emitResult(order, dst[start:], status, reason)
 	return dst, status, reason
 }
 
@@ -249,10 +259,44 @@ func toMatchResult(order *types.Order, dst []types.Trade, status types.OrderStat
 	return res
 }
 
+// emitResult publishes the ordered events for one processed order — an
+// Accepted (or Rejected) for the order itself, then a Trade per fill it produced
+// (including fills from any stops it triggered). No-op without a sink, so the hot
+// path stays zero-overhead. The event batch reuses an engine-owned buffer.
+func (e *Engine) emitResult(order *types.Order, trades []types.Trade, status types.OrderStatus, reason error) {
+	if e.sink == nil {
+		return
+	}
+	buf := e.eventBuf[:0]
+	e.eventSeq++
+	if status == types.OrderStatusRejected {
+		buf = append(buf, Event{Seq: e.eventSeq, Kind: EventRejected, OrderID: order.ID, UserID: order.UserID, Order: order, Reason: reason})
+	} else {
+		buf = append(buf, Event{Seq: e.eventSeq, Kind: EventAccepted, OrderID: order.ID, UserID: order.UserID, Order: order})
+	}
+	for i := range trades {
+		e.eventSeq++
+		buf = append(buf, Event{Seq: e.eventSeq, Kind: EventTrade, OrderID: trades[i].TakerOrderID, Trade: &trades[i]})
+	}
+	e.eventBuf = buf
+	e.sink.OnEvents(buf)
+}
+
+// emitCancel publishes a single Canceled event for a removed resting order.
+func (e *Engine) emitCancel(order *types.Order) {
+	if e.sink == nil {
+		return
+	}
+	e.eventSeq++
+	e.eventBuf = append(e.eventBuf[:0], Event{Seq: e.eventSeq, Kind: EventCanceled, OrderID: order.ID, UserID: order.UserID, Order: order})
+	e.sink.OnEvents(e.eventBuf)
+}
+
 // rejectDisabled builds a rejection for an order whose class is feature-flagged
-// off (Config.DisabledClasses), without touching the book.
-func rejectDisabled(order *types.Order) *MatchResult {
+// off (Config.DisabledClasses), without touching the book, and emits it.
+func (e *Engine) rejectDisabled(order *types.Order) *MatchResult {
 	order.Status = types.OrderStatusRejected
+	e.emitResult(order, nil, types.OrderStatusRejected, types.ErrOrderTypeDisabled)
 	return &MatchResult{Order: order, Status: types.OrderStatusRejected, RejectionReason: types.ErrOrderTypeDisabled}
 }
 
@@ -359,9 +403,10 @@ func (e *Engine) cascadeStops(dst []types.Trade) []types.Trade {
 // trade reaches the trigger price.
 func (e *Engine) ProcessStop(stop *types.StopOrder) *MatchResult {
 	if e.disabled[ClassStop] {
-		return rejectDisabled(stop.Order)
+		return e.rejectDisabled(stop.Order)
 	}
 	dst, status, reason := e.submitStopInto(stop, nil)
+	e.emitResult(stop.Order, dst, status, reason)
 	return toMatchResult(stop.Order, dst, status, reason)
 }
 
@@ -389,16 +434,18 @@ func (e *Engine) submitStopInto(stop *types.StopOrder, dst []types.Trade) ([]typ
 // price is unavailable or the resolved price is non-positive.
 func (e *Engine) ProcessPegged(p *types.PeggedOrder) *MatchResult {
 	if e.disabled[ClassPegged] {
-		return rejectDisabled(p.Order)
+		return e.rejectDisabled(p.Order)
 	}
 	ref, ok := e.pegReference(p.Ref)
 	if !ok {
 		p.Order.Status = types.OrderStatusRejected
+		e.emitResult(p.Order, nil, types.OrderStatusRejected, types.ErrPegReferenceUnavailable)
 		return &MatchResult{Order: p.Order, Status: types.OrderStatusRejected, RejectionReason: types.ErrPegReferenceUnavailable}
 	}
 	price := ref + p.Offset
 	if price <= 0 {
 		p.Order.Status = types.OrderStatusRejected
+		e.emitResult(p.Order, nil, types.OrderStatusRejected, types.ErrInvalidPrice)
 		return &MatchResult{Order: p.Order, Status: types.OrderStatusRejected, RejectionReason: types.ErrInvalidPrice}
 	}
 	p.Order.Price = price
@@ -407,6 +454,7 @@ func (e *Engine) ProcessPegged(p *types.PeggedOrder) *MatchResult {
 	e.nextID(p.Order)
 	dst, status, reason := e.settleInto(p.Order, nil)
 	dst = e.cascadeStops(dst)
+	e.emitResult(p.Order, dst, status, reason)
 	return toMatchResult(p.Order, dst, status, reason)
 }
 
@@ -433,7 +481,7 @@ func (e *Engine) pegReference(ref types.PegReference) (int64, bool) {
 // move the market (handled in cascadeStops).
 func (e *Engine) ProcessTrailingStop(ts *types.TrailingStop) *MatchResult {
 	if e.disabled[ClassTrailing] {
-		return rejectDisabled(ts.Order)
+		return e.rejectDisabled(ts.Order)
 	}
 	e.nextID(ts.Order)
 
@@ -444,11 +492,13 @@ func (e *Engine) ProcessTrailingStop(ts *types.TrailingStop) *MatchResult {
 			ts.Trigger()
 			dst, status, reason := e.settleInto(ts.Order, nil)
 			dst = e.cascadeStops(dst)
+			e.emitResult(ts.Order, dst, status, reason)
 			return toMatchResult(ts.Order, dst, status, reason)
 		}
 	}
 	ts.Order.Status = types.OrderStatusPendingTrigger
 	e.trailingStops[ts.Order.ID] = ts
+	e.emitResult(ts.Order, nil, types.OrderStatusPendingTrigger, nil)
 	return &MatchResult{Order: ts.Order, Status: types.OrderStatusPendingTrigger}
 }
 
@@ -478,7 +528,7 @@ func (e *Engine) checkTrailingStops(marketPrice int64) []*types.TrailingStop {
 // registry).
 func (e *Engine) ProcessOCO(oco *types.OCOOrder) *MatchResult {
 	if e.disabled[ClassOCO] {
-		return rejectDisabled(oco.Primary)
+		return e.rejectDisabled(oco.Primary)
 	}
 	// Ids must be assigned before registering the legs, since the registry is
 	// keyed by id (orders no longer arrive with a pre-set id).
@@ -493,6 +543,7 @@ func (e *Engine) ProcessOCO(oco *types.OCOOrder) *MatchResult {
 	// Primary already done ⇒ the stop is never posted.
 	if oco.Primary.IsFilled() {
 		e.dropOCO(oco)
+		e.emitResult(oco.Primary, dst, status, reason)
 		return toMatchResult(oco.Primary, dst, status, reason)
 	}
 
@@ -503,6 +554,7 @@ func (e *Engine) ProcessOCO(oco *types.OCOOrder) *MatchResult {
 	if oco.Stop.IsTriggered() {
 		e.cancelOCOCounterpart(oco.Stop.Order.ID)
 	}
+	e.emitResult(oco.Primary, dst, status, reason)
 	return toMatchResult(oco.Primary, dst, status, reason)
 }
 
@@ -538,7 +590,7 @@ func (e *Engine) dropOCO(oco *types.OCOOrder) {
 // reserve until the total is worked off.
 func (e *Engine) ProcessIceberg(ib *types.IcebergOrder) *MatchResult {
 	if e.disabled[ClassIceberg] {
-		return rejectDisabled(ib.Order)
+		return e.rejectDisabled(ib.Order)
 	}
 	e.nextID(ib.Order)
 	e.icebergOrders[ib.Order.ID] = ib
@@ -557,6 +609,7 @@ func (e *Engine) ProcessIceberg(ib *types.IcebergOrder) *MatchResult {
 		status = types.OrderStatusFilled
 	}
 	dst = e.cascadeStops(dst)
+	e.emitResult(ib.Order, dst, status, reason)
 	return toMatchResult(ib.Order, dst, status, reason)
 }
 
@@ -907,6 +960,7 @@ func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
 		order.UpdatedAt = now
 		_, _ = e.book.Remove(orderID)
 		delete(e.icebergOrders, orderID) // no-op for non-iceberg orders
+		e.emitCancel(order)
 		return order, nil
 	}
 
@@ -917,6 +971,7 @@ func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
 		e.stopBook.Remove(orderID)
 		_ = s.Order.Cancel()
 		s.Order.UpdatedAt = now
+		e.emitCancel(s.Order)
 		return s.Order, nil
 	}
 
@@ -927,6 +982,7 @@ func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
 		delete(e.trailingStops, orderID)
 		_ = ts.Order.Cancel()
 		ts.Order.UpdatedAt = now
+		e.emitCancel(ts.Order)
 		return ts.Order, nil
 	}
 
