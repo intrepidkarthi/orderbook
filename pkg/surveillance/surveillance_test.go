@@ -15,6 +15,12 @@ func cancelled(seq uint64, user string, id int64) Event {
 func trade(seq uint64, makerID, takerID, qty int64) Event {
 	return Event{Kind: Trade, Seq: seq, MakerOrderID: makerID, TakerOrderID: takerID, Quantity: qty}
 }
+func tradeAt(seq uint64, makerID, takerID, qty, price int64) Event {
+	return Event{Kind: Trade, Seq: seq, MakerOrderID: makerID, TakerOrderID: takerID, Quantity: qty, Price: price}
+}
+func placedSide(seq uint64, user string, id, size int64, side types.Side) Event {
+	return Event{Kind: OrderPlaced, Seq: seq, UserID: user, OrderID: id, Side: side, Quantity: size}
+}
 
 func spoofDet() *SpoofDetector {
 	return NewSpoofDetector(SpoofConfig{MinSize: 50, MaxLifetime: 5})
@@ -88,6 +94,84 @@ func TestOTR_NeedsMinimumSample(t *testing.T) {
 	}
 	if len(last) != 0 {
 		t.Errorf("below the minimum sample should not flag, got %+v", last)
+	}
+}
+
+func TestCloseMarking_FlagsDominantAggressor(t *testing.T) {
+	d := NewCloseMarkingDetector(CloseMarkingConfig{Window: 100, MinVolume: 10, MaxShare: 0.7})
+	d.Observe(placed(1, "whale", 1, 100))
+	d.Observe(placed(2, "a", 2, 100))
+	d.Observe(placed(3, "b", 3, 100))
+	d.Observe(trade(4, 99, 2, 10))         // a takes 10
+	d.Observe(trade(5, 99, 3, 10))         // b takes 10
+	last := d.Observe(trade(6, 99, 1, 80)) // whale takes 80 → 80% of 100
+	if len(last) != 1 || last[0].Kind != "aggressor_dominance" || last[0].UserID != "whale" {
+		t.Fatalf("expected one aggressor_dominance alert for whale, got %+v", last)
+	}
+}
+
+func TestCloseMarking_QuietWhenBalanced(t *testing.T) {
+	d := NewCloseMarkingDetector(CloseMarkingConfig{Window: 100, MinVolume: 10, MaxShare: 0.7})
+	d.Observe(placed(1, "a", 1, 100))
+	d.Observe(placed(2, "b", 2, 100))
+	d.Observe(placed(3, "c", 3, 100))
+	d.Observe(trade(4, 99, 1, 30))
+	d.Observe(trade(5, 99, 2, 30))
+	if a := d.Observe(trade(6, 99, 3, 30)); len(a) != 0 { // 33% each
+		t.Errorf("balanced aggressors should not be flagged, got %+v", a)
+	}
+}
+
+func TestRamping_FlagsDirectionalPush(t *testing.T) {
+	d := NewRampingDetector(RampingConfig{Window: 100, MinTrades: 3, MinMoveTicks: 5})
+	d.Observe(placedSide(1, "ramp", 1, 10, types.SideBuy))
+	d.Observe(placedSide(2, "ramp", 2, 10, types.SideBuy))
+	d.Observe(placedSide(3, "ramp", 3, 10, types.SideBuy))
+	d.Observe(tradeAt(4, 99, 1, 10, 100))
+	d.Observe(tradeAt(5, 99, 2, 10, 103))
+	last := d.Observe(tradeAt(6, 99, 3, 10, 107)) // 100→107 = 7 ticks up over 3 buys
+	if len(last) != 1 || last[0].Kind != "ramping" || last[0].UserID != "ramp" {
+		t.Fatalf("expected one ramping alert, got %+v", last)
+	}
+}
+
+func TestRamping_QuietOnSmallMove(t *testing.T) {
+	d := NewRampingDetector(RampingConfig{Window: 100, MinTrades: 3, MinMoveTicks: 5})
+	d.Observe(placedSide(1, "u", 1, 10, types.SideBuy))
+	d.Observe(placedSide(2, "u", 2, 10, types.SideBuy))
+	d.Observe(placedSide(3, "u", 3, 10, types.SideBuy))
+	d.Observe(tradeAt(4, 99, 1, 10, 100))
+	d.Observe(tradeAt(5, 99, 2, 10, 101))
+	if a := d.Observe(tradeAt(6, 99, 3, 10, 102)); len(a) != 0 { // only 2 ticks
+		t.Errorf("a small move should not be flagged as ramping, got %+v", a)
+	}
+}
+
+func TestPinging_FlagsTinyBurst(t *testing.T) {
+	d := NewPingingDetector(PingingConfig{MaxSize: 5, MaxLifetime: 3, Window: 100, MinCount: 2})
+	d.Observe(placed(1, "p", 1, 1))
+	d.Observe(placed(2, "p", 2, 1))
+	d.Observe(placed(3, "p", 3, 1))
+	d.Observe(cancelled(4, "p", 1))         // ping 1 (lifetime 3)
+	d.Observe(cancelled(5, "p", 2))         // ping 2
+	last := d.Observe(cancelled(6, "p", 3)) // ping 3 > MinCount 2
+	if len(last) != 1 || last[0].Kind != "pinging" || last[0].UserID != "p" {
+		t.Fatalf("expected one pinging alert, got %+v", last)
+	}
+}
+
+func TestPinging_IgnoresLargeAndFilled(t *testing.T) {
+	d := NewPingingDetector(PingingConfig{MaxSize: 5, MaxLifetime: 3, Window: 100, MinCount: 1})
+	// A large order is not a ping.
+	d.Observe(placed(1, "u", 1, 100))
+	if a := d.Observe(cancelled(2, "u", 1)); len(a) != 0 {
+		t.Errorf("large order cancel is not a ping, got %+v", a)
+	}
+	// A tiny order that fills is real liquidity, not a ping.
+	d.Observe(placed(3, "u", 3, 1))
+	d.Observe(trade(4, 3, 99, 1)) // order 3 filled as maker
+	if a := d.Observe(cancelled(5, "u", 3)); len(a) != 0 {
+		t.Errorf("a filled tiny order is not a ping, got %+v", a)
 	}
 }
 

@@ -283,3 +283,255 @@ func pruneSeqs(seqs []uint64, cutoff uint64) []uint64 {
 	}
 	return kept
 }
+
+func windowCutoff(now, width uint64) uint64 {
+	if now > width {
+		return now - width
+	}
+	return 0
+}
+
+// --- Aggressor dominance (marking / banging the close) ---
+
+// CloseMarkingConfig configures the aggressor-dominance detector.
+type CloseMarkingConfig struct {
+	Window    uint64  // rolling window of events by sequence
+	MinVolume int64   // require at least this much taker volume in-window before rating
+	MaxShare  float64 // flag a user whose share of taker volume exceeds this (e.g. 0.7)
+}
+
+// CloseMarkingDetector flags a user who accounts for an outsized share of the
+// aggressive (taker) volume in a rolling window — the observable signature of
+// marking / banging the close (concentrating aggression into a print to set a
+// reference price). It is time-of-session-neutral: point the window at the close
+// (or run it continuously) and it catches the dominance that Athena's "Gravy"
+// algo showed — >70% of the last-seconds volume (SEC 2014). Alert-only.
+type CloseMarkingDetector struct {
+	cfg       CloseMarkingConfig
+	orderUser map[int64]string // taker order -> owner
+	window    []takerFill      // (seq, user, qty), oldest first
+	perUser   map[string]int64 // in-window taker volume per user
+	total     int64            // in-window taker volume
+}
+
+type takerFill struct {
+	seq  uint64
+	user string
+	qty  int64
+}
+
+// NewCloseMarkingDetector builds an aggressor-dominance detector.
+func NewCloseMarkingDetector(cfg CloseMarkingConfig) *CloseMarkingDetector {
+	return &CloseMarkingDetector{
+		cfg:       cfg,
+		orderUser: make(map[int64]string),
+		perUser:   make(map[string]int64),
+	}
+}
+
+// Observe implements Detector.
+func (d *CloseMarkingDetector) Observe(e Event) []Alert {
+	switch e.Kind {
+	case OrderPlaced:
+		d.orderUser[e.OrderID] = e.UserID
+	case OrderCancelled:
+		delete(d.orderUser, e.OrderID)
+	case Trade:
+		user, ok := d.orderUser[e.TakerOrderID]
+		if !ok {
+			return nil
+		}
+		d.window = append(d.window, takerFill{e.Seq, user, e.Quantity})
+		d.perUser[user] += e.Quantity
+		d.total += e.Quantity
+		d.prune(e.Seq)
+		if d.total < d.cfg.MinVolume {
+			return nil
+		}
+		if share := float64(d.perUser[user]) / float64(d.total); share > d.cfg.MaxShare {
+			return []Alert{{
+				Kind:   "aggressor_dominance",
+				UserID: user,
+				Seq:    e.Seq,
+				Detail: fmt.Sprintf("%.0f%% of %d taker volume within %d events (limit %.0f%%)",
+					share*100, d.total, d.cfg.Window, d.cfg.MaxShare*100),
+			}}
+		}
+	}
+	return nil
+}
+
+func (d *CloseMarkingDetector) prune(now uint64) {
+	cutoff := windowCutoff(now, d.cfg.Window)
+	i := 0
+	for i < len(d.window) && d.window[i].seq < cutoff {
+		f := d.window[i]
+		d.total -= f.qty
+		if d.perUser[f.user] -= f.qty; d.perUser[f.user] <= 0 {
+			delete(d.perUser, f.user)
+		}
+		i++
+	}
+	if i > 0 {
+		d.window = d.window[i:]
+	}
+}
+
+// --- Ramping / momentum ignition ---
+
+// RampingConfig configures the ramping detector.
+type RampingConfig struct {
+	Window       uint64 // rolling window of events by sequence
+	MinTrades    int    // at least this many of a user's aggressive trades in-window
+	MinMoveTicks int64  // net one-directional price move over those trades to flag
+}
+
+// RampingDetector flags a user whose aggressive (taker) trades push the price
+// consistently in one direction by at least MinMoveTicks within a window — the
+// observable core of ramping / momentum ignition (a burst of one-sided aggression
+// to move the market). It scores the sustained directional pressure, not the
+// subsequent reversal (which needs post-window prices and belongs to a heavier
+// model). Alert-only.
+type RampingDetector struct {
+	cfg       RampingConfig
+	orderUser map[int64]string     // taker order -> owner
+	orderSide map[int64]types.Side // taker order -> aggressor side
+	hist      map[string][]rampPt  // per-user windowed aggressive trades
+}
+
+type rampPt struct {
+	seq   uint64
+	price int64
+	side  types.Side
+}
+
+// NewRampingDetector builds a ramping detector.
+func NewRampingDetector(cfg RampingConfig) *RampingDetector {
+	return &RampingDetector{
+		cfg:       cfg,
+		orderUser: make(map[int64]string),
+		orderSide: make(map[int64]types.Side),
+		hist:      make(map[string][]rampPt),
+	}
+}
+
+// Observe implements Detector.
+func (d *RampingDetector) Observe(e Event) []Alert {
+	switch e.Kind {
+	case OrderPlaced:
+		d.orderUser[e.OrderID] = e.UserID
+		d.orderSide[e.OrderID] = e.Side
+	case OrderCancelled:
+		delete(d.orderUser, e.OrderID)
+		delete(d.orderSide, e.OrderID)
+	case Trade:
+		user, ok := d.orderUser[e.TakerOrderID]
+		if !ok {
+			return nil
+		}
+		side := d.orderSide[e.TakerOrderID]
+		pts := append(d.hist[user], rampPt{e.Seq, e.Price, side})
+		cutoff := windowCutoff(e.Seq, d.cfg.Window)
+		kept := pts[:0]
+		for _, p := range pts {
+			if p.seq >= cutoff {
+				kept = append(kept, p)
+			}
+		}
+		d.hist[user] = kept
+		if len(kept) < d.cfg.MinTrades {
+			return nil
+		}
+		first, last := kept[0], kept[len(kept)-1]
+		move := last.price - first.price
+		up := last.side == types.SideBuy && move >= d.cfg.MinMoveTicks
+		down := last.side == types.SideSell && -move >= d.cfg.MinMoveTicks
+		if up || down {
+			return []Alert{{
+				Kind:   "ramping",
+				UserID: user,
+				Seq:    e.Seq,
+				Detail: fmt.Sprintf("%d aggressive %s trades moved price %d→%d (%d ticks) within %d events",
+					len(kept), last.side, first.price, last.price, move, d.cfg.Window),
+			}}
+		}
+	}
+	return nil
+}
+
+// --- Pinging (hidden-liquidity detection) ---
+
+// PingingConfig configures the pinging detector.
+type PingingConfig struct {
+	MaxSize     int64  // only orders this small or smaller are "pings" (lots)
+	MaxLifetime uint64 // cancelled unfilled within this many events of placement
+	Window      uint64 // rolling window of events by sequence
+	MinCount    int    // more than this many pings in-window trips an alert
+}
+
+// PingingDetector flags a user firing bursts of tiny orders that are cancelled
+// unfilled almost immediately — the signature of pinging: probing for hidden /
+// iceberg liquidity before trading against the whale. It is the small-order dual
+// of SpoofDetector (which watches large orders): surgical pings slip under a
+// message-rate limit but cluster in this detector. Alert-only.
+type PingingDetector struct {
+	cfg   PingingConfig
+	live  map[int64]pingRec   // tiny live orders
+	pings map[string][]uint64 // per-user ping seqs (rolling)
+}
+
+type pingRec struct {
+	user      string
+	placedSeq uint64
+	filled    bool
+}
+
+// NewPingingDetector builds a pinging detector.
+func NewPingingDetector(cfg PingingConfig) *PingingDetector {
+	return &PingingDetector{
+		cfg:   cfg,
+		live:  make(map[int64]pingRec),
+		pings: make(map[string][]uint64),
+	}
+}
+
+// Observe implements Detector.
+func (d *PingingDetector) Observe(e Event) []Alert {
+	switch e.Kind {
+	case OrderPlaced:
+		if e.Quantity <= d.cfg.MaxSize {
+			d.live[e.OrderID] = pingRec{user: e.UserID, placedSeq: e.Seq}
+		}
+	case Trade:
+		if r, ok := d.live[e.MakerOrderID]; ok {
+			r.filled = true
+			d.live[e.MakerOrderID] = r
+		}
+		if r, ok := d.live[e.TakerOrderID]; ok {
+			r.filled = true
+			d.live[e.TakerOrderID] = r
+		}
+	case OrderCancelled:
+		r, ok := d.live[e.OrderID]
+		if !ok {
+			return nil
+		}
+		delete(d.live, e.OrderID)
+		if r.filled || e.Seq-r.placedSeq > d.cfg.MaxLifetime {
+			return nil // a filled or slowly-cancelled tiny order isn't a ping
+		}
+		recent := pruneSeqs(d.pings[r.user], windowCutoff(e.Seq, d.cfg.Window))
+		recent = append(recent, e.Seq)
+		d.pings[r.user] = recent
+		if len(recent) > d.cfg.MinCount {
+			return []Alert{{
+				Kind:   "pinging",
+				UserID: r.user,
+				Seq:    e.Seq,
+				Detail: fmt.Sprintf("%d tiny orders (≤%d) placed and pulled within %d events (limit %d)",
+					len(recent), d.cfg.MaxSize, d.cfg.Window, d.cfg.MinCount),
+			}}
+		}
+	}
+	return nil
+}
