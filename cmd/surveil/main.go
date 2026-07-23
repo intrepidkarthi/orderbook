@@ -17,6 +17,7 @@ func main() {
 	mon := surveillance.NewMonitor(
 		surveillance.NewSpoofDetector(surveillance.SpoofConfig{MinSize: 50, MaxLifetime: 4}),
 		surveillance.NewRateLimiter(surveillance.RateConfig{MaxOrders: 5, Window: 8}),
+		surveillance.NewOTRDetector(surveillance.OTRConfig{Window: 20, MinOrders: 5, MaxRatio: 4.0}),
 	)
 
 	events := scenario()

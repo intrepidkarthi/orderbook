@@ -52,6 +52,45 @@ func TestSpoof_IgnoresSmallAndSlow(t *testing.T) {
 	}
 }
 
+func TestOTR_FlagsManyOrdersFewFills(t *testing.T) {
+	d := NewOTRDetector(OTRConfig{Window: 100, MinOrders: 5, MaxRatio: 3.0})
+	// Ten placements, one fill: OTR 10 > 3 → flagged.
+	var last []Alert
+	for id := int64(1); id <= 10; id++ {
+		last = d.Observe(placed(uint64(id), "spoofer", id, 1))
+	}
+	d.Observe(trade(11, 1, 99, 1)) // one of the spoofer's orders finally fills
+	last = d.Observe(placed(12, "spoofer", 12, 1))
+	if len(last) != 1 || last[0].Kind != "order_to_trade_ratio" || last[0].UserID != "spoofer" {
+		t.Fatalf("expected one OTR alert, got %+v", last)
+	}
+}
+
+func TestOTR_QuietWhenTrading(t *testing.T) {
+	d := NewOTRDetector(OTRConfig{Window: 100, MinOrders: 5, MaxRatio: 3.0})
+	// Six placements, six fills: OTR 1.0 → never flagged.
+	var last []Alert
+	for id := int64(1); id <= 6; id++ {
+		last = d.Observe(placed(uint64(id*2-1), "mm", id, 1))
+		d.Observe(trade(uint64(id*2), id, 99, 1))
+	}
+	if len(last) != 0 {
+		t.Errorf("a genuine two-sided market maker should not be flagged, got %+v", last)
+	}
+}
+
+func TestOTR_NeedsMinimumSample(t *testing.T) {
+	d := NewOTRDetector(OTRConfig{Window: 100, MinOrders: 5, MaxRatio: 3.0})
+	// Four placements, zero fills — below MinOrders, so no alert yet.
+	var last []Alert
+	for id := int64(1); id <= 4; id++ {
+		last = d.Observe(placed(uint64(id), "u", id, 1))
+	}
+	if len(last) != 0 {
+		t.Errorf("below the minimum sample should not flag, got %+v", last)
+	}
+}
+
 func TestRate_FlagsBurst(t *testing.T) {
 	d := NewRateLimiter(RateConfig{MaxOrders: 3, Window: 10})
 	var last []Alert

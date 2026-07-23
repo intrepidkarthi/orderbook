@@ -185,3 +185,101 @@ func (d *RateLimiter) Observe(e Event) []Alert {
 	}
 	return nil
 }
+
+// --- Order-to-trade ratio (OTR) ---
+
+// OTRConfig configures the order-to-trade-ratio detector.
+type OTRConfig struct {
+	Window    uint64  // rolling window measured in event sequence numbers
+	MinOrders int     // require at least this many in-window placements before rating
+	MaxRatio  float64 // flag when placements / max(1, fills) exceeds this
+}
+
+// OTRDetector flags a user whose order-to-trade ratio — placements per executed
+// fill within a rolling window — is abnormally high. A high OTR is the strongest
+// standing signal of spoofing / layering and quote stuffing: many orders posted,
+// few (or none) actually trading. It complements SpoofDetector (which scores a
+// single order's lifetime) by scoring a user's whole flow, and RateLimiter (which
+// counts messages regardless of whether they trade). Real venues police an
+// order-to-trade ratio directly (e.g. Borsa Italiana, MiFID II RTS 9); this is the
+// explainable analog. Alert-only — enforcement belongs to the gateway.
+type OTRDetector struct {
+	cfg       OTRConfig
+	orderUser map[int64]string    // orderID -> owner, for attributing fills
+	places    map[string][]uint64 // per-user placement seqs (rolling)
+	fills     map[string][]uint64 // per-user fill seqs (rolling)
+}
+
+// NewOTRDetector builds an order-to-trade-ratio detector.
+func NewOTRDetector(cfg OTRConfig) *OTRDetector {
+	return &OTRDetector{
+		cfg:       cfg,
+		orderUser: make(map[int64]string),
+		places:    make(map[string][]uint64),
+		fills:     make(map[string][]uint64),
+	}
+}
+
+// Observe implements Detector. It attributes fills to the owning user via the
+// order it was placed under, so it needs to see OrderPlaced before the Trade.
+func (d *OTRDetector) Observe(e Event) []Alert {
+	switch e.Kind {
+	case OrderPlaced:
+		d.orderUser[e.OrderID] = e.UserID
+		d.places[e.UserID] = append(d.places[e.UserID], e.Seq)
+		return d.rate(e.UserID, e.Seq)
+	case Trade:
+		if u, ok := d.orderUser[e.MakerOrderID]; ok {
+			d.fills[u] = append(d.fills[u], e.Seq)
+		}
+		if u, ok := d.orderUser[e.TakerOrderID]; ok {
+			d.fills[u] = append(d.fills[u], e.Seq)
+		}
+	case OrderCancelled:
+		delete(d.orderUser, e.OrderID)
+	}
+	return nil
+}
+
+// rate prunes both windows to [seq-Window, seq] and flags an over-ratio user.
+func (d *OTRDetector) rate(user string, seq uint64) []Alert {
+	var cutoff uint64
+	if seq > d.cfg.Window {
+		cutoff = seq - d.cfg.Window
+	}
+	places := pruneSeqs(d.places[user], cutoff)
+	fills := pruneSeqs(d.fills[user], cutoff)
+	d.places[user] = places
+	d.fills[user] = fills
+
+	if len(places) < d.cfg.MinOrders {
+		return nil
+	}
+	denom := len(fills)
+	if denom == 0 {
+		denom = 1
+	}
+	ratio := float64(len(places)) / float64(denom)
+	if ratio > d.cfg.MaxRatio {
+		return []Alert{{
+			Kind:   "order_to_trade_ratio",
+			UserID: user,
+			Seq:    seq,
+			Detail: fmt.Sprintf("%d orders / %d fills = OTR %.1f within %d events (limit %.1f)",
+				len(places), len(fills), ratio, d.cfg.Window, d.cfg.MaxRatio),
+		}}
+	}
+	return nil
+}
+
+// pruneSeqs keeps only the sequence numbers at or after cutoff, reusing the
+// backing array.
+func pruneSeqs(seqs []uint64, cutoff uint64) []uint64 {
+	kept := seqs[:0]
+	for _, s := range seqs {
+		if s >= cutoff {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}
