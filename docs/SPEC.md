@@ -4,9 +4,14 @@
 > harness plus an animated, hosted explainer for market microstructure, market
 > making, and strategy backtesting.
 
-Status: **draft v0.1** · Author: Karthikeyan NG · Last updated: 2026-07-20
+Status: **implemented** (v0.5.0 released; market-integrity layer on `main`) ·
+Author: Karthikeyan NG · Last updated: 2026-07-23
 
 Companion documents:
+- [`THREAT-MODEL.md`](THREAT-MODEL.md) — order-book attacks & defenses, with real cases.
+- [`INTEGRATION.md`](INTEGRATION.md) — embedding & operating the engine.
+- [`CONFIG.md`](CONFIG.md) — every configuration knob.
+- [`EXCHANGE-ARCHITECTURE.md`](EXCHANGE-ARCHITECTURE.md) — how real venues implement matching.
 - [`research-roadmap.md`](research-roadmap.md) — the microstructure research agenda.
 - [`DEMO-SPEC.md`](DEMO-SPEC.md) — the animated web demo and hosting spec.
 

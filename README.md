@@ -187,6 +187,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [BENCHMARKS.md](docs/BENCHMARKS.md) | Performance results, methodology, and how to reproduce. |
 | [LEARN.md](docs/LEARN.md) | Order books and market making from first principles. |
 | [research-roadmap.md](docs/research-roadmap.md) | The microstructure research agenda: OFI, Kyle's λ, Avellaneda–Stoikov, delta/CVD. |
+| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → the unreleased market-integrity set) with breaking-change notes. |
 
 ---
 
