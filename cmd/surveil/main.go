@@ -63,7 +63,7 @@ func scenario() []surveillance.Event {
 
 	// 1. A genuine market maker: posts, gets filled, then cancels the rest.
 	placed("maker", 1, 80)
-	trade(1, 99, 80)     // fully filled → legitimate
+	trade(1, 99, 80)      // fully filled → legitimate
 	cancelled("maker", 1) // already filled; no alert
 
 	// 2. A spoofer layers three large bids and yanks them unfilled.
