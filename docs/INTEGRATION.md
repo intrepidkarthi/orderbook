@@ -176,8 +176,13 @@ The library provides the primitives:
   rebuild it. Recover by loading the newest snapshot and replaying the command log
   after its `Seq` — bounding replay to O(recent).
 
-The durable WAL storage backend (writing the event stream to disk/replication) is
-yours to provide; the engine emits the sequenced stream and the snapshots.
+**`pkg/wal`** is the durable backend: an append-only, fsync'd command log
+(`wal.Open`/`AppendSubmit`/`AppendCancel`/`Sync`, written write-ahead so no
+acknowledged order is lost), snapshot persistence (`WriteSnapshot`/`ReadSnapshot`,
+atomic), and replay-based recovery (`ReadAll` + `Restore` into a fresh engine).
+It stops cleanly at a torn tail from a crash mid-write. Recover by loading the
+newest snapshot then replaying the WAL entries after its `Seq`. Cross-datacenter
+replication of the log is the only piece left to the operator.
 
 ---
 
