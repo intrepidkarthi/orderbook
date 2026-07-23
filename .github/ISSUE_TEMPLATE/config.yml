@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Try the live demo
+    url: https://intrepidkarthi.github.io/orderbook/
+    about: The real engine, compiled to WebAssembly, running in your browser.
+  - name: API reference (pkg.go.dev)
+    url: https://pkg.go.dev/github.com/intrepidkarthi/orderbook
+    about: Generated docs for every package, with runnable examples.
+  - name: Threat model & security docs
+    url: https://github.com/intrepidkarthi/orderbook/blob/main/docs/THREAT-MODEL.md
+    about: How the engine defends against real order-book attacks.

@@ -5,7 +5,8 @@ demo scenes, or research write-ups.
 
 ## Ground rules
 
-- **Money is never a float.** Prices and quantities use `shopspring/decimal`.
+- **Money is never a float.** Prices are `int64` ticks and quantities `int64`
+  lots; a per-symbol `Instrument` converts decimals only at the API boundary.
 - **The core stays lean.** `pkg/{types,orderbook,matching}` must not import the
   research/sim/strategy/web layers (strict downward layering — see
   [docs/SPEC.md §3](docs/SPEC.md#3-architecture)).

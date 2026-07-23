@@ -215,11 +215,36 @@ go run ./cmd/l2capture          # live order-flow imbalance on Coinbase data
 
 ---
 
+## Contributing
+
+Contributions are welcome — bug fixes, order types, signals, strategies,
+surveillance detectors, protocol codecs, or research write-ups. Start with
+[CONTRIBUTING.md](CONTRIBUTING.md) (`make check` before a PR), and open an issue
+or discussion if you want to talk through an idea first.
+
+**Good places to start** (open an issue to claim one):
+
+- **Render the markdown docs to HTML** in the Pages build so the hosted docs stay
+  in sync with source automatically.
+- **Protocol codecs** — a FIX / OUCH / SBE adapter package translating the wire ↔
+  `types.Order` and the `EventSink` stream ↔ execution reports.
+- **New `EventSink` kinds** — emit the reserved `Triggered` / `BookDelta` events.
+- **A metrics exporter** — a Prometheus/`expvar` adapter off the event stream (the
+  `Metrics` seam), with an example.
+- **More surveillance** — a quote-fading detector, or a wash-trade detector keyed
+  on beneficial-ownership groups (the cross-account case the core can't see).
+- **More signals** — micro-price, VPIN, or a queue-position model in `pkg/signals`.
+- **GTD / DAY time-in-force** with expiry, and richer `Instrument` validation.
+
+If the library is useful to you, a ⭐ helps other developers find it.
+
 ## Status
 
 Actively developed. Releases follow semantic versioning; the public API uses
-integer ticks/lots and a single-writer engine as of `v0.3.0`. Breaking changes
-are gated behind minor-version bumps until a `v1.0.0` API freeze.
+integer ticks/lots and a single-writer engine as of `v0.3.0`, with a
+threat-model-driven market-integrity layer as of `v0.6.0`. Breaking changes are
+gated behind minor-version bumps until a `v1.0.0` API freeze. See the
+[CHANGELOG](CHANGELOG.md).
 
 ## Provenance
 

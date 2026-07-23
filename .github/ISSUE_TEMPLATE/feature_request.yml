@@ -1,0 +1,23 @@
+name: Feature request / idea
+description: Propose an order type, a signal, a surveillance detector, a protocol codec, or any enhancement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the use case?
+      description: What are you trying to do that the library doesn't support yet?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: Optional — an API sketch, a reference (a real venue's behaviour, a paper), or where it would live (which package, core vs. layer above).
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: Layer check
+      description: The matching core stays lean and deterministic (see docs/SPEC.md §3 and docs/THREAT-MODEL.md §6).
+      options:
+        - label: This belongs in the core (matching mechanics / its own arithmetic), or I've noted it should live in a layer above (credit, identity, oracle, gateway).

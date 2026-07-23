@@ -1,0 +1,36 @@
+name: Bug report
+description: Something in the engine, a package, or the demo behaves incorrectly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting! A small reproducer is worth a thousand words.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Tag or commit (e.g. v0.6.0, or `go list -m` output).
+      placeholder: v0.6.0
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you observe, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproducer
+      description: A minimal Go snippet or steps. Because the engine is deterministic, an ordered command sequence usually reproduces it exactly.
+      render: go
+    validations:
+      required: false
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: Go version, OS/arch.
+      placeholder: go1.23, darwin/arm64
