@@ -145,6 +145,18 @@ type Config struct {
 	// the price band with it (the Mango / Hyperliquid-JELLY lesson). Zero
 	// disables the guard. The first mark (from 0) is always accepted.
 	MaxMarkStep decimal.Decimal
+	// MinMarkDepth, when > 0, requires the resting book to hold at least this many
+	// lots within MarkDepthBand of a proposed mark before SetMarkPrice will move to
+	// it — the depth-backed complement to MaxMarkStep. Where MaxMarkStep bounds one
+	// jump, this bounds a *patient* drag: a mark can only track prices real
+	// liquidity supports, so a thin-book pump (even a slow, in-step one) cannot lead
+	// the mark. A move to an under-supported price is rejected with
+	// ErrMarkDepthTooThin. The first mark and clearing to 0 are always accepted.
+	MinMarkDepth int64
+	// MarkDepthBand is the fraction around a proposed mark within which MinMarkDepth
+	// resting depth is counted (e.g. 0.02 = ±2%). Zero falls back to MaxMarkStep,
+	// then PriceBand; if none is set the whole book counts.
+	MarkDepthBand decimal.Decimal
 	// MinOrderQty / MinOrderNotional reject dust: an order below the size or (for
 	// limits) notional floor is rejected with ErrOrderBelowMinQty /
 	// ErrOrderBelowMinNotional. Dust floods bloat the book and degrade latency
@@ -1046,8 +1058,43 @@ func (e *Engine) SetMarkPrice(price int64) error {
 			return types.ErrMarkStepTooLarge
 		}
 	}
+	// Depth-backed bound: a mark *move* must be supported by resting liquidity near
+	// the new price, so a thin-book pump cannot lead the mark even in small steps.
+	// Like the step guard, it applies only once a mark is established.
+	if e.config.MinMarkDepth > 0 && price > 0 && e.markPrice > 0 && price != e.markPrice {
+		band := e.markDepthBand()
+		lo, hi := price-band, price+band
+		if e.book.DepthWithin(lo, hi) < e.config.MinMarkDepth {
+			return types.ErrMarkDepthTooThin
+		}
+	}
 	e.markPrice = price
 	return nil
+}
+
+// markDepthBand is the half-width (in ticks) of the window around a proposed mark
+// within which resting depth is counted, from MarkDepthBand (else MaxMarkStep,
+// else PriceBand). A zero fraction widens the window to the whole book.
+func (e *Engine) markDepthBand() int64 {
+	frac := e.config.MarkDepthBand
+	if frac.IsZero() {
+		frac = e.config.MaxMarkStep
+	}
+	if frac.IsZero() {
+		frac = e.config.PriceBand
+	}
+	if frac.IsZero() {
+		return math.MaxInt64 // no fraction configured: count the whole book
+	}
+	// ticks = mark * frac, evaluated off the current mark (or the new price if unset).
+	ref := e.markPrice
+	if ref <= 0 {
+		ref = e.book.LastTradePrice()
+	}
+	if ref <= 0 {
+		return math.MaxInt64
+	}
+	return decimal.NewFromInt(ref).Mul(frac).IntPart()
 }
 
 // MarkPrice returns the current mark reference (0 if unset).

@@ -41,6 +41,7 @@ var (
 	ErrNotionalOverflow        = errors.New("order notional (price × quantity) overflows int64")
 	ErrCancelTooSoon           = errors.New("order has not met the minimum resting time")
 	ErrMarkStepTooLarge        = errors.New("mark-price update exceeds the maximum allowed step")
+	ErrMarkDepthTooThin        = errors.New("mark-price update is not backed by enough resting depth")
 	ErrOrderBelowMinQty        = errors.New("order quantity is below the configured minimum")
 	ErrOrderBelowMinNotional   = errors.New("order notional is below the configured minimum")
 	ErrTooManyOrders           = errors.New("account has too many resting orders")

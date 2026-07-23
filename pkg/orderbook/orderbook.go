@@ -428,6 +428,26 @@ func (ob *OrderBook) OrdersByUser(userID string) int {
 	return ob.perUser[userID]
 }
 
+// DepthWithin returns the total resting quantity (lots) across both sides at
+// prices in the inclusive tick range [lo, hi] — how much real liquidity backs a
+// price region. Used to reject a mark that no depth supports.
+func (ob *OrderBook) DepthWithin(lo, hi int64) int64 {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
+	var total int64
+	for price, lvl := range ob.bids {
+		if price >= lo && price <= hi {
+			total += lvl.TotalQty
+		}
+	}
+	for price, lvl := range ob.asks {
+		if price >= lo && price <= hi {
+			total += lvl.TotalQty
+		}
+	}
+	return total
+}
+
 // Orders returns every resting order in price-then-time order (bids best-first,
 // then asks best-first, FIFO within each level). Re-adding them to a fresh book
 // in this order reproduces the exact structure — the basis for a book snapshot.

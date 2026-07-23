@@ -128,6 +128,37 @@ func TestMarkStepGuard(t *testing.T) {
 	}
 }
 
+// TestMinMarkDepth: a mark move to a price the book does not back with enough
+// resting depth is rejected; once depth exists near the price it is accepted.
+func TestMinMarkDepth(t *testing.T) {
+	e := NewEngine(Config{
+		Symbol:        "BTC-USD",
+		MinMarkDepth:  10,
+		MarkDepthBand: decimal.RequireFromString("0.05"), // ±5%
+	})
+	// First mark is always accepted (no prior mark to protect).
+	if err := e.SetMarkPrice(100); err != nil {
+		t.Fatalf("first mark: %v", err)
+	}
+	// Moving the mark to 110 with an empty book near 110 is unbacked → rejected.
+	if err := e.SetMarkPrice(110); !errors.Is(err, types.ErrMarkDepthTooThin) {
+		t.Fatalf("unbacked mark move should be ErrMarkDepthTooThin, got %v", err)
+	}
+	if e.MarkPrice() != 100 {
+		t.Errorf("rejected move must not change the mark, got %d", e.MarkPrice())
+	}
+	// Rest real depth near 110 (window ±5 ticks of 110 = [105,115]).
+	e.Process(lim(t, "mm", types.SideSell, 110, 6))
+	e.Process(lim(t, "mm2", types.SideBuy, 109, 6))
+	if err := e.SetMarkPrice(110); err != nil {
+		t.Fatalf("mark move backed by depth should be accepted, got %v", err)
+	}
+	// Clearing the mark to 0 is always allowed regardless of depth.
+	if err := e.SetMarkPrice(0); err != nil {
+		t.Errorf("clearing the mark should be accepted, got %v", err)
+	}
+}
+
 func TestCheckedMul(t *testing.T) {
 	cases := []struct {
 		a, b   int64
