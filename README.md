@@ -1,7 +1,7 @@
 # orderbook
 
 <p align="center">
-  <a href="https://intrepidkarthi.github.io/orderbook/"><img src=".github/readme/hero.svg" alt="orderbook — a limit order book and matching engine in Go" width="860"></a>
+  <a href="https://intrepidkarthi.github.io/orderbook/"><img src=".github/readme/demo.gif" alt="orderbook — a limit order book and matching engine in Go: a market order crosses the spread and trades at the maker's price" width="820"></a>
 </p>
 
 <p align="center"><b><a href="https://intrepidkarthi.github.io/orderbook/">▶ Live demo</a></b> — the real engine, compiled to WebAssembly, running in your browser.</p>
