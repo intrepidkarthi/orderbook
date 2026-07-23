@@ -1,5 +1,11 @@
 # orderbook
 
+<p align="center">
+  <a href="https://intrepidkarthi.github.io/orderbook/"><img src=".github/readme/hero.svg" alt="orderbook — a limit order book and matching engine in Go" width="860"></a>
+</p>
+
+<p align="center"><b><a href="https://intrepidkarthi.github.io/orderbook/">▶ Live demo</a></b> — the real engine, compiled to WebAssembly, running in your browser.</p>
+
 A production-grade central limit order book (CLOB) and matching engine in Go:
 integer-exact pricing, a zero-allocation hot path, a lock-free single-writer
 core, and deterministic, replayable execution.
