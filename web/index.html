@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>orderbook — a fast, embeddable limit order book &amp; matching engine in Go</title>
-  <meta name="description" content="A production-grade central limit order book and matching engine written in Go. Exact-decimal, deterministic, every real-world order type — and it runs live in your browser via WebAssembly." />
+  <meta name="description" content="A production-grade central limit order book and matching engine written in Go. Integer-exact (int64), deterministic, every real-world order type, with pre-trade risk and anti-manipulation defenses — and it runs live in your browser via WebAssembly." />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -28,8 +28,9 @@
     <p class="lede">
       The piece of software at the heart of every exchange: it holds every buy and sell
       order and matches them, fairly and fast. This one is <strong>embeddable</strong>,
-      uses <strong>exact decimals</strong> (never floats) for money, is fully
-      <strong>deterministic</strong>, and ships <strong>every order type real venues use</strong>.
+      uses <strong>integer-exact pricing</strong> (int64 ticks, never floats), is fully
+      <strong>deterministic</strong>, ships <strong>every order type real venues use</strong>,
+      and defends against real market-manipulation attacks.
       The engine below is the real thing — compiled to WebAssembly, running in your browser.
     </p>
     <div class="hero-cta">
@@ -38,10 +39,10 @@
       <a class="btn ghost" href="https://github.com/intrepidkarthi/orderbook">View source</a>
     </div>
     <div class="stat-row">
-      <div><b>&lt;1&nbsp;µs</b><span>best bid/ask read</span></div>
-      <div><b>~1.8M/s</b><span>order inserts / core</span></div>
-      <div><b>121</b><span>tests, race-checked</span></div>
-      <div><b>exact</b><span>decimal money</span></div>
+      <div><b>6&nbsp;ns</b><span>best bid/ask read</span></div>
+      <div><b>~2.8M/s</b><span>match round-trip</span></div>
+      <div><b>0</b><span>alloc on the hot path</span></div>
+      <div><b>int64</b><span>exact pricing, no floats</span></div>
     </div>
   </header>
 
@@ -139,7 +140,7 @@
             <li>Price–time priority (FIFO)</li>
             <li>Pro-rata allocation mode</li>
             <li>Trades at the maker price</li>
-            <li>Self-trade prevention (4 modes)</li>
+            <li>Self-trade prevention (5 modes)</li>
             <li>Time-in-force: GTC · IOC · FOK</li>
             <li>Call-auction uncross (open/close)</li>
           </ul>
@@ -147,11 +148,12 @@
         <div class="feat">
           <h3>Market integrity</h3>
           <ul>
-            <li>Circuit breakers (price-band collar)</li>
-            <li>Trading halt / resume</li>
-            <li>Stop-cascade protection</li>
-            <li>Spoofing / layering detection</li>
-            <li>Order-rate (quote-stuffing) limits</li>
+            <li>Pre-trade risk caps (fat-finger, dust, per-account)</li>
+            <li>Anti-spoofing: min resting time, order-to-trade ratio</li>
+            <li>Mark-price step + depth bounds; self-output guardrail</li>
+            <li>Surveillance: marking-close, ramping, pinging, cross-book</li>
+            <li>Halt / cancel-only states; enforcing gateway</li>
+            <li><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/THREAT-MODEL.md">Grounded in a threat model ↗</a></li>
           </ul>
         </div>
         <div class="feat">
@@ -173,8 +175,10 @@
       <div class="prod-grid">
         <div class="prod">
           <h3>Money is never a float</h3>
-          <p>Prices and quantities are exact decimals (<code>shopspring/decimal</code>). No binary
-          rounding error creeping into balances — the single most important correctness decision.</p>
+          <p>Prices and quantities are <code>int64</code> ticks and lots — a per-symbol
+          <code>Instrument</code> converts decimals only at the boundary. No binary rounding
+          error creeping into balances, and an overflow guard rejects any order whose notional
+          would wrap.</p>
         </div>
         <div class="prod">
           <h3>Deterministic &amp; replayable</h3>
@@ -184,14 +188,16 @@
         </div>
         <div class="prod">
           <h3>Fast, with real numbers</h3>
-          <p>O(1) best bid/ask, O(log n) inserts via a map + binary-search price ladder.
-          Measured: <b>70&nbsp;ns</b> top-of-book reads, <b>~1.8M</b> inserts/s, <b>~646k</b>
-          match round-trips/s per core. Benchmarks run in CI.</p>
+          <p>O(1) best bid/ask, O(1) cancel, O(log n) inserts via a map + binary-search price
+          ladder. Measured: <b>6&nbsp;ns</b> top-of-book reads, <b>~2.8M</b> match round-trips/s
+          per core, and <b>0</b> allocations on the submit/cancel/match hot path. Benchmarks run
+          in CI on every push.</p>
         </div>
         <div class="prod">
           <h3>Tested hard</h3>
-          <p>121 tests under the race detector, plus invariant checks (the book never crosses,
-          quantity is conserved, FIFO holds). Green on every push.</p>
+          <p>Race, fuzz, soak, and replay-recovery suites under the race detector, plus
+          invariant checks (the book never crosses, quantity is conserved, FIFO holds). Green
+          on every push.</p>
         </div>
         <div class="prod">
           <h3>Embeddable &amp; layered</h3>
@@ -218,22 +224,22 @@
           <p class="sec-lede">Create an engine, submit orders, read the book:</p>
           <pre class="code"><code>eng := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
 
-// A resting sell (maker)
+// A resting sell (maker) — integer ticks &amp; lots
 ask, _ := types.NewOrder("alice", "BTC-USD", types.SideSell,
-    types.OrderTypeLimit, dec("30000"), dec("0.5"),
+    types.OrderTypeLimit, 30000, 5,
     types.TIFGoodTillCancel)
 eng.Process(ask)
 
 // A crossing buy (taker) — trades against it
 bid, _ := types.NewOrder("bob", "BTC-USD", types.SideBuy,
-    types.OrderTypeLimit, dec("30000"), dec("0.3"),
+    types.OrderTypeLimit, 30000, 3,
     types.TIFGoodTillCancel)
 res := eng.Process(bid)
 
 for _, t := range res.Trades {
-    fmt.Printf("%s @ %s\n", t.Quantity, t.Price) // 0.3 @ 30000
+    fmt.Printf("%d @ %d\n", t.Quantity, t.Price) // 3 @ 30000
 }
-best, qty, _ := eng.BestAsk()                     // 30000 x 0.2 left</code></pre>
+best, qty, _ := eng.BestAsk()                     // 30000 x 2 left</code></pre>
         </div>
         <div>
           <p class="sec-lede">Runnable examples:</p>

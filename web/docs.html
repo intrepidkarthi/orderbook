@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Documentation — orderbook</title>
-  <meta name="description" content="Design, architecture, internals, order types, matching, market data, integrity, and performance of the orderbook engine." />
+  <meta name="description" content="Architecture, internals, order types, matching, market data, security & market integrity, recovery, and performance of the orderbook matching engine." />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body class="docs-body">
@@ -12,6 +12,7 @@
     <a class="brand" href="./">orderbook</a>
     <nav class="docs-toplinks">
       <a href="./">Home</a>
+      <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/THREAT-MODEL.md">Threat model ↗</a>
       <a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">API reference ↗</a>
       <a href="https://github.com/intrepidkarthi/orderbook">GitHub</a>
     </nav>
@@ -27,8 +28,10 @@
         <a href="#order-types">Order types</a>
         <a href="#matching">Matching</a>
         <a href="#market-data">Market data</a>
-        <a href="#integrity">Market integrity</a>
+        <a href="#security">Security &amp; market integrity</a>
+        <a href="#recovery">Recovery &amp; persistence</a>
         <a href="#performance">Performance</a>
+        <a href="#docs-index">Full documentation</a>
         <a href="#start">Getting started</a>
       </nav>
     </aside>
@@ -36,64 +39,76 @@
     <main class="docs-main">
       <section id="overview">
         <h1>Documentation</h1>
-        <p><code>orderbook</code> is a Go library for running a central limit order book
-        (CLOB) and matching engine — the core of an exchange, a trading simulator, or any
-        system where buyers and sellers meet at a price. It is embeddable, uses exact
-        decimals for money (never floats), is deterministic, and ships the order types real
-        venues use.</p>
-        <pre class="code"><code>go get github.com/intrepidkarthi/orderbook/pkg/matching@v0.1.0</code></pre>
+        <p><code>orderbook</code> is a production-grade Go library for running a central
+        limit order book (CLOB) and matching engine — the core of an exchange, a trading
+        simulator, or any system where buyers and sellers meet at a price. It is embeddable,
+        uses <b>integer-exact</b> pricing (int64 ticks and lots, never floats), has a
+        zero-allocation hot path and a lock-free single-writer core, is deterministic and
+        replayable, and ships both the order types real venues use and an opt-in layer of
+        <a href="#security">pre-trade risk &amp; anti-manipulation controls</a>.</p>
+        <pre class="code"><code>go get github.com/intrepidkarthi/orderbook/pkg/matching</code></pre>
         <p>New to order books? Start with the <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">from-scratch guide</a>.
-        For the full API, see <a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">pkg.go.dev</a>.</p>
+        For the full API, see <a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">pkg.go.dev</a>;
+        for release history, the <a href="https://github.com/intrepidkarthi/orderbook/blob/main/CHANGELOG.md">changelog</a>
+        (latest: <b>v0.6.0</b>, the market-integrity release).</p>
       </section>
 
       <section id="architecture">
         <h2>Architecture</h2>
-        <p>The project follows one rule: <b>strict downward layering</b>. The core library
-        depends on nothing above it; research, simulation, strategy, surveillance, and the
-        web demo build on top of it. This keeps the core lean and importable on its own.</p>
-        <pre class="diagram"><code>apps / web / examples         (consume everything below)
-backtest · strategy · sim
-signals · marketdata
-surveillance · auction
-─────────── CORE ───────────
-matching   (engine)
-orderbook  (book + market data)
-types      (Order, Trade, errors)</code></pre>
-        <p>Dependencies flow one direction only — downward. You import just the layers you
-        need; most consumers use only <code>pkg/types</code>, <code>pkg/orderbook</code>, and
-        <code>pkg/matching</code>.</p>
+        <p>The project follows one rule: <b>strict downward layering</b>. The matching core
+        depends on nothing above it; persistence, surveillance, the gateway, auctions,
+        research, and the web demo build on top. This keeps the core lean and importable on
+        its own — most consumers use only <code>types</code>, <code>orderbook</code>, and
+        <code>matching</code>.</p>
+        <pre class="diagram"><code>apps / web / examples          (consume everything below)
+gateway     (enforcing edge: rate gate, speed bump, audit)
+surveillance · backtest · strategy · sim · signals
+wal · auction · marketdata     (persistence, call auctions, feeds)
+──────────────── CORE ────────────────
+matching   (engine · Runner · events · snapshots · pre-trade risk)
+orderbook  (book · price ladder · depth · L2/L3 · snapshot)
+types      (Order, Trade, iceberg, errors)</code></pre>
+        <p>Dependencies flow one direction only — downward. Credit, identity, fees, and wire
+        protocols stay <em>outside</em> the core, the same boundary production venues draw
+        (see <a href="#security">the core-vs-layer boundary</a>).</p>
       </section>
 
       <section id="internals">
         <h2>Order book internals</h2>
         <h3>Data structure</h3>
         <p>Each side of the book is a <code>map[price]→level</code> for O(1) level lookup,
-        plus a price-sorted slice maintained by binary-search insertion. Reading the best
-        price is O(1); inserting a brand-new price level is O(log n) to find its slot. Each
-        level is a FIFO queue of orders — which is what gives time priority.</p>
+        plus a price-sorted slice maintained by binary-search insertion. Each level is a FIFO
+        queue of orders (time priority). Cancels are O(1): an <code>orderID→node</code> index
+        into intrusive doubly-linked lists unlinks a resting order without a scan. Book nodes
+        and price levels are pooled, so steady-state add/cancel/match allocate nothing.</p>
 
         <h3>Price–time priority</h3>
         <p>An incoming order matches against the best price first; among orders at the same
-        price, first-come-first-served (the FIFO queue). Trades always print at the resting
-        (maker) order's price.</p>
+        price, first-come-first-served. Trades always print at the resting (maker) order's
+        price.</p>
 
-        <h3>Exact-decimal money</h3>
-        <p>Prices and quantities are <code>shopspring/decimal</code>, never floats. Binary
-        floating point silently accumulates rounding error on money; this engine does not.
-        It is the single most important correctness decision, and the main allocation cost on
-        the hot path — an <code>int64</code> fixed-point fast path behind the same interface
-        is a documented future optimization.</p>
+        <h3>Integer-exact pricing</h3>
+        <p>Prices are <code>int64</code> ticks and quantities <code>int64</code> lots — no
+        floating point on the money path, so there is no silent rounding drift. A per-symbol
+        <code>Instrument</code> converts decimals to ticks/lots only at the API boundary. This
+        is both a correctness decision and a performance one: the hot path is pure integer
+        arithmetic and allocation-free.</p>
 
         <h3>Determinism</h3>
         <p>Given the same ordered input stream, the engine produces byte-identical trades and
-        book state. There is no wall-clock or RNG in the matching path; anything that must be
-        reproducible (timestamps, ids) is injected. This is what makes record→replay and
-        golden-file tests possible — a recorded session replays to an identical trade digest.</p>
+        book state. There is no wall clock or RNG in the matching path; anything that must be
+        reproducible (timestamps, ids) is injected through <code>Config.Clock</code>. This is
+        what makes record→replay, WAL recovery, and golden-file tests possible — a recorded
+        session replays to an identical trade digest.</p>
 
-        <h3>Concurrency</h3>
-        <p>One writer per book, guarded by a mutex; readers take snapshots. A single book is
+        <h3>Concurrency — single writer, lock-free hot path</h3>
+        <p>One matching goroutine owns the book with no lock on the hot path (the LMAX model).
+        A <code>Runner</code> fronts it with an MPSC command queue so many producers submit
+        concurrently while the matcher stays sequential and deterministic. A single book is
         inherently sequential at the match point, so you scale out <em>across symbols</em>
-        (one book/goroutine per symbol), not by parallelizing one book.</p>
+        (one book per symbol, via a shard router), not by parallelizing one book. Overload is
+        handled by bounded backpressure: new orders are shed with <code>ErrQueueFull</code>
+        while cancels keep flowing.</p>
       </section>
 
       <section id="order-types">
@@ -104,7 +119,7 @@ types      (Order, Trade, errors)</code></pre>
             <tr><td>Market</td><td>Takes liquidity immediately; may sweep several levels.</td></tr>
             <tr><td>Limit</td><td>Rests at a price or better; can be a maker.</td></tr>
             <tr><td>Stop / Stop-limit</td><td>Dormant until the market reaches a trigger price, then fires as a market/limit order.</td></tr>
-            <tr><td>Iceberg</td><td>Shows only a display slice; the hidden reserve auto-refills as it fills.</td></tr>
+            <tr><td>Iceberg</td><td>Shows only a display slice; the hidden reserve auto-refills as it fills (with optional randomized peaks to defeat sniffing).</td></tr>
             <tr><td>Post-only</td><td>Maker-only — rejected if it would cross the spread and take.</td></tr>
             <tr><td>Pegged</td><td>Price derived from a reference (bid / ask / mid) plus a signed offset.</td></tr>
             <tr><td>OCO / bracket</td><td>Two linked orders; one completing cancels the other.</td></tr>
@@ -112,7 +127,9 @@ types      (Order, Trade, errors)</code></pre>
           </tbody>
         </table>
         <p><b>Time-in-force:</b> GTC (rest until cancelled), IOC (fill now, cancel the rest),
-        FOK (fill entirely now or cancel all).</p>
+        FOK (fill entirely now or cancel all). Any advanced family can be <b>feature-flagged
+        off</b> (<code>Config.DisabledClasses</code>) so one buggy exotic type is disabled
+        without downing the venue — the ASX / Binance lesson.</p>
       </section>
 
       <section id="matching">
@@ -123,8 +140,10 @@ types      (Order, Trade, errors)</code></pre>
         the book" and pays a worse average price (slippage).</p>
 
         <h3>Self-trade prevention</h3>
-        <p>When an order would match the same user's resting order, one of four modes applies:
-        cancel-newest (default), cancel-oldest, cancel-both, or allow.</p>
+        <p>When an order would match the same user's (or trade group's) resting order, one of
+        five modes applies: cancel-newest (default), cancel-oldest, cancel-both,
+        <b>decrement</b> (reduce both by the overlap, no trade — the modern default), or allow.
+        A privileged liquidation order can be exempted so it is not self-blocked.</p>
 
         <h3>Pro-rata</h3>
         <p>An optional per-engine mode. At each price level, an incoming order's quantity is
@@ -133,8 +152,10 @@ types      (Order, Trade, errors)</code></pre>
 
         <h3>Auctions</h3>
         <p>A call-auction uncross computes the single clearing price that maximizes matched
-        volume across resting bids and asks — the mechanism behind opening and closing
-        auctions, where orders accumulate and cross once at a common price.</p>
+        volume across resting bids and asks. <code>auction.AuctionSession</code> runs one for
+        the open, the close, or halt recovery; its <code>RandomizedClose</code> jitters the
+        uncross time deterministically (replay-safe) so nobody can aim aggression at the print
+        — the structural defense against <a href="#security">marking the close</a>.</p>
       </section>
 
       <section id="market-data">
@@ -146,58 +167,162 @@ types      (Order, Trade, errors)</code></pre>
           <li><b>L3 / MBO</b> — every resting order individually, price-then-time ordered.</li>
         </ul>
         <p>Snapshots carry a monotonic sequence number for gap detection, and executions are
-        available as a trade tape (time &amp; sales).</p>
+        available as a trade tape (time &amp; sales). A typed, sequence-numbered
+        <code>EventSink</code> stream (accepted / trade / canceled / rejected / halted) is the
+        seam every market-data, drop-copy, and audit adapter sits on.</p>
       </section>
 
-      <section id="integrity">
-        <h2>Market integrity</h2>
-        <p>Controls that keep a venue orderly, in the core and in a surveillance layer above it:</p>
+      <section id="security">
+        <h2>Security &amp; market integrity</h2>
+        <p>A first-class concern, not an afterthought. Every control here is grounded in a
+        real regulatory enforcement action or market incident — spoofing convictions, the
+        Knight Capital blow-up, oracle-manipulation hacks, integer-overflow exploits. The full
+        catalogue (27 attacks → detection signal → defense → whether it belongs in the core or
+        a layer above) is in
+        <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/THREAT-MODEL.md"><b>docs/THREAT-MODEL.md</b></a>;
+        every knob below is documented in
+        <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/CONFIG.md">docs/CONFIG.md</a>.</p>
+
+        <h3>In-core pre-trade risk controls</h3>
+        <p>Opt-in (zero value = off), enforced on the cold reject path so the zero-alloc hot
+        path is untouched; liquidation/ADL orders are exempt from the caps, and the time-based
+        checks are bypassed on deterministic replay.</p>
+        <table class="tbl">
+          <thead><tr><th>Control</th><th>Defends against</th><th>Grounded in</th></tr></thead>
+          <tbody>
+            <tr><td>MaxOrderQty / MaxOrderNotional</td><td>Fat-finger / fat-order blowups</td><td>Knight Capital ($440M)</td></tr>
+            <tr><td>MinOrderQty / MinOrderNotional</td><td>Dust that bloats the book</td><td>Resource exhaustion</td></tr>
+            <tr><td>MaxOrdersPerAccount</td><td>Per-account order-flooding</td><td>Quote stuffing</td></tr>
+            <tr><td>MinRestingTime</td><td>Spoofing (post size, pull before it fills)</td><td>JPMorgan ($920M), Coscia</td></tr>
+            <tr><td>DedupClientOrderIDs</td><td>Replayed / duplicated orders double-booking</td><td>FIX PossDup abuse</td></tr>
+            <tr><td>MaxMarkStep + MinMarkDepth</td><td>Oracle / mark-price manipulation (jump &amp; patient drag)</td><td>Mango ($110M), Hyperliquid JELLY</td></tr>
+            <tr><td>MaxForceTradeQty</td><td>Book-clearing liquidation cascades</td><td>BitMEX, Hyperliquid HLP</td></tr>
+            <tr><td>BandBreachPause</td><td>Volatility spikes (timed pause + auto-resume)</td><td>LULD / the 2010 Flash Crash</td></tr>
+            <tr><td>Guardrail (self-output)</td><td>Runaway / repurposed-path order spraying</td><td>Knight Capital</td></tr>
+            <tr><td>IcebergPeakJitter</td><td>Hidden-reserve sniffing / order anticipation</td><td>Iceberg detection research</td></tr>
+            <tr><td>int64 + notional overflow guard</td><td>Integer overflow / precision leaks</td><td>Bitcoin CVE-2010-5139 (184B BTC)</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Surveillance detectors <span style="color:var(--muted);font-weight:400">(pkg/surveillance)</span></h3>
+        <p>Fed off the event stream, these <em>detect and alert</em> (they never touch the
+        match path): spoofing / layering, <b>order-to-trade ratio</b> (the strongest standing
+        spoofing signal), <b>marking-the-close</b> aggressor dominance, <b>ramping</b> /
+        momentum ignition, <b>pinging</b> (tiny rapid-cancel bursts probing hidden liquidity),
+        and a <b>cross-book</b> correlator that flags a user manipulating several correlated
+        products at once.</p>
+
+        <h3>Circuit breakers &amp; degraded states</h3>
         <ul>
-          <li><b>Circuit breakers</b> — a price-band collar rejects limit orders priced beyond ±band from the last trade; trading can be halted and resumed.</li>
-          <li><b>Stop-cascade protection</b> — triggered stops chain in a bounded cascade rather than an unbounded loop.</li>
-          <li><b>Surveillance</b> — spoofing/layering detection (large orders cancelled unfilled soon after placement) and order-rate limits (quote-stuffing).</li>
+          <li><b>Price band</b> — a collar around a risk-clamped mark/index price (not just the
+          last trade) rejects limit orders priced beyond ±band; a breach can escalate to a
+          timed pause.</li>
+          <li><b>Degraded states</b> — <code>Open</code> / <code>CancelOnly</code> (accept
+          cancels, reject new liquidity — the venue wind-down path) / <code>Halted</code>, with
+          <code>HALTED</code> / <code>RESUMED</code> emitted on the event stream so operators
+          can page.</li>
+          <li><b>Stop-cascade protection</b> — triggered stops chain in a bounded cascade, never
+          an unbounded loop.</li>
         </ul>
+
+        <h3>Enforcing gateway <span style="color:var(--muted);font-weight:400">(pkg/gateway)</span></h3>
+        <p>At the edge, above the core: a per-account token-bucket rate gate that <b>rejects</b>
+        an over-quota order (cancels are never gated — keep-cancels-flowing under load) and an
+        asymmetric speed bump on liquidity-taking orders (the IEX latency-arbitrage defense),
+        plus a CAT-style audit export off the sequenced event stream.</p>
+
+        <h3>The core-vs-layer boundary</h3>
+        <p>A matching core earns trust by being small, deterministic, and neutral. It defends
+        market-microstructure mechanics and its own arithmetic; it deliberately does <em>not</em>
+        own beneficial-ownership clustering, credit / margin, oracle price <em>sourcing</em>,
+        ingress ordering / MEV, or authentication — those are identity / clearing / oracle /
+        gateway concerns by design. The core refuses to act on an unbacked mark; it cannot
+        manufacture a good one. See
+        <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/THREAT-MODEL.md#6-what-a-pure-matching-core-cannot-defend--and-why-the-boundary-is-correct">THREAT-MODEL §6</a>
+        for why that line is drawn where it is.</p>
+      </section>
+
+      <section id="recovery">
+        <h2>Recovery &amp; persistence</h2>
+        <p>Because matching is deterministic, durability is just a log of commands.
+        <code>pkg/wal</code> is an append-only, length-prefixed write-ahead log: submits and
+        cancels are recorded <em>write-ahead</em> (before the engine applies them) and
+        <code>Sync</code> is the group-commit durability point. A crash mid-write leaves a torn
+        tail that the reader stops at cleanly. Recovery replays the log into a fresh engine to
+        reach byte-identical book state — the same journal-plus-snapshot model LMAX and Binance
+        use.</p>
+        <p>Snapshots (<code>TakeSnapshot</code> / <code>RestoreEngine</code>) are keyed to the
+        engine sequence, so recovery is bounded to <em>O(recent)</em>: load a snapshot, replay
+        only the WAL tail after it. Operational guidance is in
+        <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/INTEGRATION.md">docs/INTEGRATION.md</a>.</p>
       </section>
 
       <section id="performance">
         <h2>Performance</h2>
-        <p>Core microbenchmarks (Apple M-series, Go 1.23, single-threaded). Reproduce with
-        <code>make bench</code>; CI runs them on every push.</p>
+        <p>Core microbenchmarks (Apple M-series, Go 1.23, single-threaded). CI runs them on
+        every push; full methodology in
+        <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a>.</p>
         <table class="tbl">
-          <thead><tr><th>Operation</th><th>ns/op</th><th>~ops/sec</th></tr></thead>
+          <thead><tr><th>Operation</th><th>ns/op</th><th>allocs/op</th></tr></thead>
           <tbody>
-            <tr><td>Best bid/ask read</td><td>70</td><td>~14 M</td></tr>
-            <tr><td>Book insert</td><td>401</td><td>~2.5 M</td></tr>
-            <tr><td>Full-engine insert</td><td>561</td><td>~1.8 M</td></tr>
-            <tr><td>Match round-trip</td><td>1548</td><td>~646 K</td></tr>
+            <tr><td>Best bid/ask read</td><td>6.3</td><td>0</td></tr>
+            <tr><td>Cancel (drain)</td><td>253</td><td>0</td></tr>
+            <tr><td>Cancel / replace (MM churn)</td><td>180</td><td>0</td></tr>
+            <tr><td>Match round-trip (<code>Match</code>)</td><td>352</td><td>0</td></tr>
+            <tr><td>Match round-trip (<code>Process</code> wrapper)</td><td>491</td><td>4</td></tr>
           </tbody>
         </table>
-        <p>Full methodology in <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a>.</p>
+        <p><b>Tail latency</b> — a ~90%-cancel / 10%-new mix against a warm book:
+        <b>p50 83 ns · p99 167 ns · p999 292 ns</b>, 0 allocs/op. The zero-alloc
+        <code>Match(order, buf)</code> path appends value trades into a caller buffer;
+        <code>Process</code> is the ergonomic wrapper (4 allocs) for when convenience beats the
+        last nanosecond.</p>
+      </section>
+
+      <section id="docs-index">
+        <h2>Full documentation</h2>
+        <p>The deep documentation lives as versioned markdown in the repository (and renders on
+        GitHub); the API reference is on pkg.go.dev.</p>
+        <table class="tbl">
+          <thead><tr><th>Document</th><th>What's inside</th></tr></thead>
+          <tbody>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/THREAT-MODEL.md">THREAT-MODEL.md</a></td><td>Order-book attacks &amp; defenses: 27-attack catalogue with real enforcement cases, top-ten deep dives, what the engine defends, and the core-vs-layer boundary.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/CONFIG.md">CONFIG.md</a></td><td>Every configuration knob — instrument grid, engine policy, and all pre-trade risk controls — with defaults and validation.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/INTEGRATION.md">INTEGRATION.md</a></td><td>Embedding &amp; operating the engine: reference architecture, WAL/recovery, market integrity, backpressure, scaling, and a production checklist.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/SPEC.md">SPEC.md</a></td><td>Architecture, the order model, and the core design decisions with their rationale.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/EXCHANGE-ARCHITECTURE.md">EXCHANGE-ARCHITECTURE.md</a></td><td>How real venues (MetaTrader, Binance, Coinbase, Nasdaq/LMAX/CME/IEX, dYdX/Hyperliquid) implement matching, and the incidents that shaped this design.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCHMARKS.md">BENCHMARKS.md</a></td><td>Performance results, methodology, and how to reproduce.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">LEARN.md</a></td><td>Order books and market making from first principles.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/CHANGELOG.md">CHANGELOG.md</a></td><td>Release history (v0.1.0 → v0.6.0) with breaking-change notes.</td></tr>
+            <tr><td><a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">pkg.go.dev</a></td><td>Generated API reference for every package, with runnable examples.</td></tr>
+          </tbody>
+        </table>
       </section>
 
       <section id="start">
         <h2>Getting started</h2>
-        <pre class="code"><code>go get github.com/intrepidkarthi/orderbook/pkg/matching@v0.1.0</code></pre>
+        <pre class="code"><code>go get github.com/intrepidkarthi/orderbook/pkg/matching</code></pre>
         <pre class="code"><code>eng := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
 
-// A resting sell (maker)
+// A resting sell (maker) — integer ticks &amp; lots
 ask, _ := types.NewOrder("alice", "BTC-USD", types.SideSell,
-    types.OrderTypeLimit, dec("30000"), dec("0.5"),
-    types.TIFGoodTillCancel)
+    types.OrderTypeLimit, 30000, 5, types.TIFGoodTillCancel)
 eng.Process(ask)
 
-// A crossing buy (taker) — trades against it
+// A crossing buy (taker) — trades against it at the maker price
 bid, _ := types.NewOrder("bob", "BTC-USD", types.SideBuy,
-    types.OrderTypeLimit, dec("30000"), dec("0.3"),
-    types.TIFGoodTillCancel)
+    types.OrderTypeLimit, 30000, 3, types.TIFGoodTillCancel)
 res := eng.Process(bid)
 
 for _, t := range res.Trades {
-    fmt.Printf("%s @ %s\n", t.Quantity, t.Price)   // 0.3 @ 30000
+    fmt.Printf("%d @ %d\n", t.Quantity, t.Price)   // 3 @ 30000
 }</code></pre>
-        <p>Runnable examples: <code>go run ./examples/basic</code>,
-        <code>./examples/signals</code>, <code>./cmd/obdemo</code>.
-        Full API on <a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">pkg.go.dev</a>.</p>
+        <p>Turn on the market-integrity controls that fit your venue via <code>matching.Config</code>
+        (see <a href="#security">Security</a>), wrap the engine in a <code>Runner</code> for
+        concurrency, and enable <code>pkg/wal</code> for durability. Runnable examples:
+        <code>go run ./examples/basic</code>, <code>./examples/eventfeed</code>,
+        <code>./examples/gateway</code>. Full API on
+        <a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">pkg.go.dev</a>.</p>
       </section>
     </main>
   </div>
