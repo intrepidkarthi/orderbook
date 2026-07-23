@@ -115,26 +115,37 @@ on the core. Nothing below it may depend on anything above it.
 orderbook/
 ├── go.mod                      module github.com/intrepidkarthi/orderbook
 ├── README.md
+├── CHANGELOG.md                release history
 ├── LICENSE                     MIT
 ├── docs/
 │   ├── SPEC.md                 this document
+│   ├── THREAT-MODEL.md         attacks & defenses (with real enforcement cases)
+│   ├── INTEGRATION.md          embedding & operating the engine
+│   ├── CONFIG.md               every configuration knob
+│   ├── EXCHANGE-ARCHITECTURE.md how real venues implement matching
+│   ├── BENCHMARKS.md           performance results & method
+│   ├── LEARN.md                order books from first principles
 │   ├── research-roadmap.md     microstructure research agenda
 │   └── DEMO-SPEC.md            animated demo + hosting spec
 ├── legacy/
 │   └── orderbook_v0.go         original float64 prototype (frozen, build-ignored)
 ├── pkg/
-│   ├── types/                  Order, Trade, Side, OrderType, TIF, errors
+│   ├── types/                  Order, Trade, Side, OrderType, TIF, iceberg, errors
 │   ├── orderbook/              CLOB: price levels, ladder, depth, L2/L3, snapshot
-│   ├── matching/               matching engine (price-time, pro-rata, auctions)
-│   ├── surveillance/           STP, spoofing/layering, cascade, rate/velocity limits
+│   ├── matching/               engine (price-time, pro-rata), Runner, events,
+│   │                          snapshots, pre-trade risk & anti-manipulation controls
+│   ├── wal/                    durable write-ahead log + snapshot persistence + recovery
+│   ├── auction/               uniform-price uncross + call-auction session (open/close)
+│   ├── surveillance/           spoofing, OTR, marking-the-close, ramping, pinging, cross-book
+│   ├── gateway/               enforcing edge controls: rate gate + taker speed bump
 │   ├── marketdata/             feed interfaces, L2/L3 replay, live capture
 │   ├── signals/                OFI, imbalance, delta, CVD, Kyle's lambda
 │   ├── strategy/               market-making strategies (AS, …)
+│   ├── study/                 microstructure studies over captured data
 │   ├── sim/                    exchange simulator + synthetic agents
 │   └── backtest/               harness + performance metrics
-├── cmd/
-│   ├── obdemo/                 minimal end-to-end matching demo (CLI)
-│   └── obwasm/                 Go→WASM entrypoint binding the core for web/
+├── cmd/                        obdemo, obwasm, surveil, l2capture, obmm, ofistudy
+├── examples/                   basic, eventfeed, gateway, marketmaker, signals
 └── web/                        React + TypeScript animated demo (see DEMO-SPEC.md)
 ```
 
@@ -176,18 +187,28 @@ but the core is designed so each slots in without redesign.
   breakers.
 
 ### 5.3 Market integrity & surveillance
-A first-class layer, because "how manipulation looks and gets caught" is part of
-what this project teaches.
-- **Spoofing / layering** detection: large orders placed away from the touch and
-  cancelled before execution; order-book pressure that evaporates.
-- **Stop-hunt / liquidity-pocket** dynamics: clustered stops swept in a cascade
-  then snapping back, plus **stop-cascade protection** (halt when triggers
-  chain past a threshold).
-- **Quote stuffing, momentum ignition, wash trading** heuristics.
-- **Rate & ratio limits:** message rate, **order-to-trade / cancel ratio**,
-  velocity limits, position limits.
-- **Controls:** kill switch / mass-cancel, cancel-on-disconnect, trading halts,
-  fat-finger / price-collar checks.
+A first-class concern: every control is grounded in a real enforcement case or
+incident, catalogued in **[THREAT-MODEL.md](THREAT-MODEL.md)** (attack → detection
+signal → defense → core-or-layer). It splits four ways:
+
+- **In-core pre-trade controls** (`matching.Config`, cold path, `Privileged`-exempt,
+  replay-safe): fat-finger & dust size/notional caps, per-account order cap,
+  minimum resting time (anti-spoofing), `ClientOrderID` idempotency, mark-price
+  **step + depth** bounds (anti oracle-pump), per-call `ForceTrade` cap (chunked
+  liquidation), timed band-breach pause, self-output `Guardrail` (the Knight
+  tripwire), STP, feature-flagged order types, degraded states (halt / cancel-only),
+  and randomized iceberg peaks. Full knob list in [CONFIG.md](CONFIG.md).
+- **Surveillance** (`pkg/surveillance`, alert-only): spoofing/layering,
+  order-to-trade ratio, marking-the-close, ramping, pinging, and a `CrossBookMonitor`
+  for cross-product abuse — fed off the engine's sequenced event stream.
+- **Gateway** (`pkg/gateway`, enforcing at the edge): a token-bucket rate gate that
+  *rejects* (cancels never gated) and an asymmetric taker speed bump.
+- **Auction** (`pkg/auction`): uniform-price open/close/recovery call auction with a
+  replay-safe randomized close (defeats marking-the-close).
+
+Stop-cascade protection (halt when triggers chain past a threshold) is built into
+the matcher; kill-switch / mass-cancel and cancel-on-disconnect are gateway
+concerns.
 
 ### 5.4 Market data
 - **L1** (top of book), **L2** (aggregated per price), **L3 / MBO** (full

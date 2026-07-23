@@ -272,24 +272,80 @@ Thread a `context.Context` through your stages for clean cancellation.
 
 1. `go get`; build an `Instrument` (tick/lot) and one engine per symbol.
 2. Wire producers through a `Runner`; bound `QueueSize`; define a shed policy.
-3. Enable a WAL (downstream stage); verify snapshot + replay rebuilds identical
-   state (`marketdata.Replay` + a book digest).
-4. Bound every subscriber ring; conflate for slow consumers.
-5. Add a `/metrics` endpoint (atomics only) + latency histogram off the hot path.
-6. Seed idempotency on `ClientOrderID`; test duplicate/redelivery.
-7. Golden-tape regression: capture a command log + trades, replay in CI, diff the
+3. Enable the durable WAL (`pkg/wal`: `AppendSubmit`/`AppendCancel` write-ahead,
+   `Sync` at the durability point); verify snapshot + `Restore` rebuilds identical
+   state (a book digest).
+4. Turn on the pre-trade risk controls that fit your market (see *Market integrity
+   & pre-trade risk* above) and wire a surveillance `Monitor`.
+5. Bound every subscriber ring; conflate for slow consumers.
+6. Add a `/metrics` endpoint (atomics only) + latency histogram off the hot path.
+7. Seed idempotency: set `Config.DedupClientOrderIDs` (and/or dedup in your
+   gateway); test duplicate/redelivery.
+8. Golden-tape regression: capture a command log + trades, replay in CI, diff the
    `ValueDigest`.
-8. Property/fuzz tests (quantity conservation, price-time priority) + soak/chaos
+9. Property/fuzz tests (quantity conservation, price-time priority) + soak/chaos
    (kill mid-run, recover, compare).
-9. Load-test to worst-case burst; check p999 and queue depth under backpressure.
-10. Graceful-drain shutdown wired to `SIGTERM`.
+10. Load-test to worst-case burst; check p999 and queue depth under backpressure.
+11. Graceful-drain shutdown wired to `SIGTERM`.
+
+---
+
+## Market integrity & pre-trade risk
+
+The engine ships a set of **opt-in, zero-cost-when-off** defences against the
+attacks real venues face — spoofing, quote stuffing, oracle-mark manipulation,
+fat-finger blowups, liquidation cascades, and more. Each is grounded in a named
+enforcement case in [THREAT-MODEL.md](THREAT-MODEL.md); each knob is documented in
+[CONFIG.md](CONFIG.md). They split across four layers, matching where a real
+venue puts them.
+
+**1. In-core pre-trade controls (`matching.Config`).** Enforced on the cold reject
+path, so the zero-alloc hot path is untouched; `Privileged` (liquidation/ADL)
+orders are exempt from the caps; the time-based checks are bypassed on
+deterministic replay.
+
+```go
+cfg := matching.DefaultConfig("BTC-USD")
+cfg.MaxOrderQty = 10_000            // fat-finger size cap (ErrOrderExceedsMaxQty)
+cfg.MaxOrderNotional = 50_000_000   // fat-finger notional cap; int64 overflow always rejected
+cfg.MinOrderQty = 1                 // dust floor
+cfg.MaxOrdersPerAccount = 500       // per-account resting-order cap (anti-stuffing)
+cfg.MinRestingTime = 20 * time.Millisecond // anti-spoofing: no instant cancel
+cfg.DedupClientOrderIDs = 4096      // reject a replayed (user, ClientOrderID)
+cfg.MaxMarkStep = decimal.RequireFromString("0.10")   // mark can't jump >10%…
+cfg.MinMarkDepth = 50               // …nor move to a price the book doesn't back
+cfg.MaxForceTradeQty = 100          // liquidations must be chunked
+cfg.BandBreachPause = 30 * time.Second // band breach → timed halt + auto-resume
+cfg.Guardrail = matching.Guardrail{MaxTrades: 10_000, Window: time.Second} // Knight tripwire
+eng := matching.NewEngine(cfg)
+```
+
+**2. Surveillance (`pkg/surveillance`) — detect, alert.** Feed the engine's
+`EventSink` stream (translated to `surveillance.Event`) into a `Monitor` of
+detectors: `SpoofDetector`, `RateLimiter`, `OTRDetector` (order-to-trade ratio),
+`CloseMarkingDetector`, `RampingDetector`, `PingingDetector`. For a multi-symbol
+venue, a `CrossBookMonitor` correlates manipulation across books (cross-product
+abuse). Detectors *alert*; they never touch the match path.
+
+**3. Gateway (`pkg/gateway`) — enforce at the edge.** `gateway.New(runner, cfg)`
+wraps a `Runner` with an enforcing token-bucket `RateGate` (rejects an over-quota
+account with `ErrThrottled` — cancels are never gated) and an asymmetric speed
+bump on liquidity-taking orders (latency-arbitrage defence). `examples/gateway`
+also shows a CAT-style audit export off the event stream.
+
+**4. Auction (`pkg/auction`) — open, close, recover.** `auction.AuctionSession`
+runs a uniform-price call auction for the open, the close, or halt recovery
+(cancel-only → auction → continuous). `RandomizedClose` jitters the uncross time
+deterministically (replay-safe) to defeat marking-the-close.
 
 ---
 
 ## What to build around the core
 
-The engine is the matcher; a full venue needs these layers (intentionally *not* in
-the core — see [CONFIG.md → what the core does not configure](CONFIG.md#what-the-core-deliberately-does-not-configure)):
+Beyond the controls above, a full venue still needs these layers — intentionally
+*not* in the core (see [CONFIG.md → what the core does not
+configure](CONFIG.md#what-the-core-deliberately-does-not-configure) and
+THREAT-MODEL.md §6 for why the boundary is drawn here):
 
 - **Protocol adapters** — FIX/OUCH/SBE/WebSocket codecs translating the wire to
   `types.Order`, and translating the `EventSink` stream back to execution reports /
@@ -297,10 +353,17 @@ the core — see [CONFIG.md → what the core does not configure](CONFIG.md#what
   stream into an exec-report feed and an order→deal→position projection (the
   MetaTrader-style lineage). A common deployment is as the **internal ECN behind an
   MT5 Gateway** — the real price-time crossing venue a B-book broker lacks.
-- **Pre-trade risk** — credit, margin, buying power, position/notional caps, rate
-  limits (in the gateway, before the sequencer).
-- **Persistence** — durable WAL + snapshot store + replication.
+- **Credit & margin** — buying power, position/notional limits, collateral,
+  liquidation selection. The core supplies the *primitives* (`ForceTrade`,
+  `MaxForceTradeQty`, degraded states, the mark band); credit decisions live above.
+- **Identity & beneficial ownership** — STP enforces the `TradeGroupID`s it is
+  told; mapping accounts to an owner (for wash-trade surveillance) is a layer job.
+- **Persistence** — `pkg/wal` provides the durable WAL + snapshot store; add
+  replication / object-store archival around it.
 - **Fees/clearing/settlement** — the core emits maker/taker + fill price; pricing
   and settlement live above.
+- **Oracle sourcing** — the core refuses an unbacked mark (`MaxMarkStep`,
+  `MinMarkDepth`) but does not *compute* one; a manipulation-resistant index / TWAP
+  is an oracle service above.
 - **Session/auction orchestration** — a controller driving halts, opens, and
-  closing auctions.
+  closing auctions on top of `AuctionSession` and the degraded states.

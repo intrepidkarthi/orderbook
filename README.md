@@ -13,11 +13,17 @@ core, and deterministic, replayable execution.
 
 `orderbook` is an embeddable Go library — `go get` it into an exchange, a
 simulator, or a trading tool. The matching core owns the order book, the matching
-algorithm, order lifecycle, deterministic sequencing, and market-data snapshots;
-protocol, risk, fees, and persistence are left to the layers around it, the same
-boundary production venues draw. The repository also ships a reproducible
-market-microstructure research harness and an interactive WebAssembly demo that
-runs the real engine in the browser.
+algorithm, order lifecycle, deterministic sequencing, and market-data snapshots,
+plus a set of opt-in **pre-trade risk & anti-manipulation controls**; credit,
+identity, fees, and wire protocols stay in the layers around it, the same
+boundary production venues draw. Companion packages cover the rest of that
+boundary — durable WAL persistence (`pkg/wal`), market-abuse surveillance
+(`pkg/surveillance`), an enforcing edge gateway (`pkg/gateway`), and a
+uniform-price call auction (`pkg/auction`). Every defensive control is grounded
+in a real enforcement case or incident, catalogued in
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md). The repository also ships a
+reproducible market-microstructure research harness and an interactive
+WebAssembly demo that runs the real engine in the browser.
 
 ---
 
@@ -34,12 +40,20 @@ runs the real engine in the browser.
   the hot path (the LMAX model). A `Runner` fronts it with an MPSC command queue
   so many producers can submit concurrently.
 - **Deterministic and recoverable.** The same ordered command stream produces
-  byte-identical trades and book state — enabling command-log replay, WAL-based
-  crash recovery, and reproducible backtests.
+  byte-identical trades and book state — enabling command-log replay, durable
+  WAL crash recovery (`pkg/wal`: write-ahead log + snapshots), and reproducible
+  backtests.
 - **Full order surface.** Limit, market, stop / stop-limit, iceberg (hidden),
   post-only, pegged, OCO / bracket, and trailing-stop orders; GTC / IOC / FOK
   time-in-force; self-trade prevention; a price-band circuit breaker; FIFO or
   pro-rata allocation.
+- **Market integrity & safety.** Opt-in pre-trade risk controls — fat-finger and
+  dust caps, per-account order limits, minimum resting time, client-order-id
+  idempotency, mark-price step **and** depth bounds, a self-output guardrail, and
+  timed band-breach pauses — plus a market-abuse surveillance suite (spoofing,
+  order-to-trade ratio, marking-the-close, ramping, pinging, cross-book), an
+  enforcing gateway (rate limit + speed bump), and a uniform-price call auction.
+  Each maps to a real case in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 - **Market data.** L1 / L2 / L3 (market-by-order) snapshots with sequence
   numbers.
 - **Tested and benchmarked.** Race, fuzz, soak, and replay-recovery suites;
