@@ -154,6 +154,7 @@ type Engine struct {
 	tradeSeq      int64
 	clock         func() time.Time
 	disabled      map[OrderClass]bool
+	markPrice     int64 // external mark/index reference for the band (0 => use last trade)
 
 	// self-output guardrail window accounting
 	guard          Guardrail
@@ -754,7 +755,13 @@ func (e *Engine) outsideBand(price int64) bool {
 	if !e.bandEnabled {
 		return false
 	}
-	ref := e.book.LastTradePrice()
+	// Prefer an externally-supplied, risk-clamped mark/index reference over the raw
+	// last trade, so a thin-book wick can't move the collar (the Hyperliquid JELLY
+	// lesson). Falls back to last trade when no mark is set.
+	ref := e.markPrice
+	if ref <= 0 {
+		ref = e.book.LastTradePrice()
+	}
 	if ref <= 0 {
 		return false
 	}
@@ -784,6 +791,15 @@ func (e *Engine) Resume() {
 
 // State reports the current trading state.
 func (e *Engine) State() EngineState { return e.state }
+
+// SetMarkPrice sets the external mark/index reference (in ticks) the price band is
+// evaluated against. The risk layer computes it (e.g. index + clamped basis) and
+// feeds it here; a value <= 0 clears it and the band falls back to the last trade
+// price. Call from the single writer (or via Runner.SetMarkPrice).
+func (e *Engine) SetMarkPrice(price int64) { e.markPrice = price }
+
+// MarkPrice returns the current mark reference (0 if unset).
+func (e *Engine) MarkPrice() int64 { return e.markPrice }
 
 // IsHalted reports whether trading is fully halted.
 func (e *Engine) IsHalted() bool {
@@ -957,6 +973,29 @@ func (e *Engine) executeTrade(taker, maker *types.Order, price, qty int64, dst [
 	tr.SequenceNum = e.tradeSeq
 	tr.CreatedAt = now
 	return append(dst, tr)
+}
+
+// ForceTrade injects a trade between two orders at price for qty — a privileged
+// forced match for the risk layer's liquidation / auto-deleveraging (ADL) logic,
+// used after it has selected a counterparty (e.g. ranked by profit × leverage) and
+// a fillable/bankruptcy price. It bypasses price-time matching, STP, and the band,
+// and does not touch the book (positions are off-book risk state). Both orders are
+// filled, the trade is sequenced and emitted on the event stream, and returned.
+// qty must be positive and within each order's remaining quantity.
+func (e *Engine) ForceTrade(taker, maker *types.Order, price, qty int64) (*types.Trade, error) {
+	if qty <= 0 || qty > taker.RemainingQty || qty > maker.RemainingQty {
+		return nil, types.ErrInvalidQuantity
+	}
+	e.nextID(taker)
+	e.nextID(maker)
+	dst := e.executeTrade(taker, maker, price, qty, nil)
+	tr := dst[0]
+	if e.sink != nil {
+		e.eventSeq++
+		e.eventBuf = append(e.eventBuf[:0], Event{Seq: e.eventSeq, Kind: EventTrade, OrderID: tr.TakerOrderID, Trade: &tr})
+		e.sink.OnEvents(e.eventBuf)
+	}
+	return &tr, nil
 }
 
 // reverseTrade unwinds a single trade against a maker (FOK failure path),

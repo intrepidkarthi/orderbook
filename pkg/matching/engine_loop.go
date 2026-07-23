@@ -88,6 +88,8 @@ func (r *Runner) dispatch(cmd command) {
 		r.engine.Resume()
 	case cmdCancelOnly:
 		r.engine.SetCancelOnly()
+	case cmdSetMark:
+		r.engine.SetMarkPrice(cmd.cancelID) // cancelID reused as the int64 payload
 	}
 	if cmd.reply != nil {
 		cmd.reply <- rep
@@ -149,6 +151,9 @@ func (r *Runner) SetCancelOnly() { r.send(command{kind: cmdCancelOnly}) }
 
 // Resume returns the engine to normal trading.
 func (r *Runner) Resume() { r.send(command{kind: cmdResume}) }
+
+// SetMarkPrice sets the external mark/index reference (ticks) the price band uses.
+func (r *Runner) SetMarkPrice(price int64) { r.send(command{kind: cmdSetMark, cancelID: price}) }
 
 // --- asynchronous submit ---
 
