@@ -156,3 +156,196 @@ func TestSaturatingAdd(t *testing.T) {
 		t.Errorf("saturatingAdd overflow should clamp to MaxInt64, got %d", got)
 	}
 }
+
+// TestDustFloors: orders below the min size / notional floor are rejected.
+func TestDustFloors(t *testing.T) {
+	e := NewEngine(Config{Symbol: "BTC-USD", MinOrderQty: 5, MinOrderNotional: 1000})
+
+	if r := e.Process(lim(t, "a", types.SideBuy, 100, 4)); !errors.Is(r.RejectionReason, types.ErrOrderBelowMinQty) {
+		t.Errorf("qty 4 < min 5 should be ErrOrderBelowMinQty, got %v", r.RejectionReason)
+	}
+	// qty 5 clears the size floor but 100*5=500 < 1000 notional floor.
+	if r := e.Process(lim(t, "b", types.SideBuy, 100, 5)); !errors.Is(r.RejectionReason, types.ErrOrderBelowMinNotional) {
+		t.Errorf("notional 500 < min 1000 should be ErrOrderBelowMinNotional, got %v", r.RejectionReason)
+	}
+	if r := e.Process(lim(t, "c", types.SideBuy, 100, 10)); r.Status == types.OrderStatusRejected {
+		t.Errorf("qty 10 (notional 1000) should be accepted, got %v", r.RejectionReason)
+	}
+}
+
+// TestMaxOrdersPerAccount: the per-account resting cap rejects the overflow order,
+// and the count is released when an order leaves the book (cancel or fill) so the
+// user can post again.
+func TestMaxOrdersPerAccount(t *testing.T) {
+	e := NewEngine(Config{Symbol: "BTC-USD", MaxOrdersPerAccount: 2})
+
+	o1 := lim(t, "u", types.SideBuy, 90, 1)
+	o2 := lim(t, "u", types.SideBuy, 91, 1)
+	e.Process(o1)
+	e.Process(o2)
+	// Third resting order for the same user is rejected.
+	if r := e.Process(lim(t, "u", types.SideBuy, 92, 1)); !errors.Is(r.RejectionReason, types.ErrTooManyOrders) {
+		t.Fatalf("3rd resting order should be ErrTooManyOrders, got %v", r.RejectionReason)
+	}
+	// A different user is unaffected.
+	if r := e.Process(lim(t, "v", types.SideBuy, 89, 1)); r.Status == types.OrderStatusRejected {
+		t.Errorf("other user should not be capped, got %v", r.RejectionReason)
+	}
+	// Cancelling frees a slot; the user can post again.
+	e.Cancel(o1.ID, "u")
+	if r := e.Process(lim(t, "u", types.SideBuy, 92, 1)); r.Status == types.OrderStatusRejected {
+		t.Errorf("after a cancel the user should be under the cap, got %v", r.RejectionReason)
+	}
+	// A fill also frees a slot: u now rests o2@91 and the new @92 (2 orders); a
+	// seller consuming o2 removes it from the book, dropping u back to 1.
+	e.Process(lim(t, "s", types.SideSell, 91, 1)) // fills o2 fully → leaves the book
+	if got := e.Book().OrdersByUser("u"); got != 1 {
+		t.Errorf("a fill should release a slot: user u should have 1 resting, got %d", got)
+	}
+	// ...so u can post again without hitting the cap.
+	if r := e.Process(lim(t, "u", types.SideBuy, 88, 1)); r.Status == types.OrderStatusRejected {
+		t.Errorf("after a fill freed a slot the user should be able to post, got %v", r.RejectionReason)
+	}
+}
+
+// TestClientOrderIDDedup: a duplicate (user, client-id) submit is rejected; a
+// rejected order stays resubmittable; the ring evicts old keys; empty ids skip.
+func TestClientOrderIDDedup(t *testing.T) {
+	e := NewEngine(Config{Symbol: "BTC-USD", DedupClientOrderIDs: 2})
+
+	withCID := func(user, cid string, price, qty int64) *types.Order {
+		o := lim(t, user, types.SideBuy, price, qty)
+		o.ClientOrderID = cid
+		return o
+	}
+
+	if r := e.Process(withCID("u", "c1", 90, 1)); r.Status == types.OrderStatusRejected {
+		t.Fatalf("first submit should be accepted, got %v", r.RejectionReason)
+	}
+	// Same (user, client-id) → duplicate.
+	if r := e.Process(withCID("u", "c1", 90, 1)); !errors.Is(r.RejectionReason, types.ErrDuplicateClientOrderID) {
+		t.Fatalf("duplicate client id should be rejected, got %v", r.RejectionReason)
+	}
+	// Same client-id, different user → not a duplicate.
+	if r := e.Process(withCID("v", "c1", 90, 1)); r.Status == types.OrderStatusRejected {
+		t.Errorf("same client id under a different user should be allowed, got %v", r.RejectionReason)
+	}
+	// Empty client id is never deduped.
+	e.Process(lim(t, "u", types.SideBuy, 90, 1))
+	if r := e.Process(lim(t, "u", types.SideBuy, 90, 1)); r.Status == types.OrderStatusRejected {
+		t.Errorf("empty client id must not be deduped, got %v", r.RejectionReason)
+	}
+
+	// Ring holds only the last 2 keys. Insert c2, c3 (for user "w") to evict c1's
+	// nothing for w; then c-old should be resubmittable after eviction.
+	e2 := NewEngine(Config{Symbol: "BTC-USD", DedupClientOrderIDs: 2})
+	e2.Process(withCID("w", "a", 90, 1)) // ring: [a]
+	e2.Process(withCID("w", "b", 90, 1)) // ring: [a,b]
+	e2.Process(withCID("w", "c", 90, 1)) // evicts a → ring: [c,b]
+	if r := e2.Process(withCID("w", "a", 90, 1)); r.Status == types.OrderStatusRejected {
+		t.Errorf("client id 'a' should be resubmittable after eviction, got %v", r.RejectionReason)
+	}
+
+	// A rejected order (band) must stay resubmittable under the same id.
+	e3 := NewEngine(Config{Symbol: "BTC-USD", DedupClientOrderIDs: 4, PriceBand: decimal.RequireFromString("0.1")})
+	e3.Process(lim(t, "mmA", types.SideSell, 100, 1))
+	e3.Process(lim(t, "mmB", types.SideBuy, 100, 1)) // trades → last=100, band ±10%
+	rej := withCID("z", "k", 200, 1)                 // 200 is outside the band
+	if r := e3.Process(rej); !errors.Is(r.RejectionReason, types.ErrPriceOutsideBand) {
+		t.Fatalf("setup: expected band rejection, got %v", r.RejectionReason)
+	}
+	ok := withCID("z", "k", 105, 1) // same client id, now in-band
+	if r := e3.Process(ok); errors.Is(r.RejectionReason, types.ErrDuplicateClientOrderID) {
+		t.Error("a band-rejected order's client id must remain resubmittable")
+	}
+}
+
+// TestForceTradeSizeCap: a forced print larger than the per-call cap is rejected,
+// so liquidation must be chunked.
+func TestForceTradeSizeCap(t *testing.T) {
+	e := NewEngine(Config{Symbol: "BTC-USD", MaxForceTradeQty: 3})
+	liq, _ := types.NewOrder("under", "BTC-USD", types.SideSell, types.OrderTypeMarket, 0, 10, types.TIFImmediateOrCancel)
+	win, _ := types.NewOrder("winner", "BTC-USD", types.SideBuy, types.OrderTypeLimit, 90, 10, types.TIFGoodTillCancel)
+
+	if _, err := e.ForceTrade(liq, win, 90, 4); !errors.Is(err, types.ErrForceTradeTooLarge) {
+		t.Fatalf("forced qty 4 > cap 3 should be ErrForceTradeTooLarge, got %v", err)
+	}
+	// A chunk within the cap goes through.
+	if _, err := e.ForceTrade(liq, win, 90, 3); err != nil {
+		t.Fatalf("forced qty 3 (== cap) should be accepted, got %v", err)
+	}
+}
+
+// TestBandBreachPause: a band breach halts trading for the configured duration and
+// auto-resumes on the injected clock, emitting HALTED then RESUMED.
+func TestBandBreachPause(t *testing.T) {
+	now := time.Unix(0, 0).UTC()
+	sink := &recSink{}
+	e := NewEngine(Config{
+		Symbol:          "BTC-USD",
+		Clock:           func() time.Time { return now },
+		PriceBand:       decimal.RequireFromString("0.1"), // ±10%
+		BandBreachPause: 30 * time.Second,
+		EventSink:       sink,
+	})
+	// Establish a reference price of 100.
+	e.Process(lim(t, "mm", types.SideSell, 100, 1))
+	e.Process(lim(t, "mm2", types.SideBuy, 100, 1)) // trades → last=100
+
+	// A breach (200 ≫ +10%) is rejected AND arms the pause.
+	if r := e.Process(lim(t, "x", types.SideBuy, 200, 1)); !errors.Is(r.RejectionReason, types.ErrPriceOutsideBand) {
+		t.Fatalf("breach should be rejected, got %v", r.RejectionReason)
+	}
+	if e.State() != StateHalted {
+		t.Fatalf("band breach should halt trading, state=%v", e.State())
+	}
+	// During the pause even an in-band order is rejected as halted.
+	if r := e.Process(lim(t, "y", types.SideBuy, 101, 1)); !errors.Is(r.RejectionReason, types.ErrTradingHalted) {
+		t.Errorf("during the pause orders should be ErrTradingHalted, got %v", r.RejectionReason)
+	}
+	// Advance past the pause; the next order auto-resumes trading.
+	now = time.Unix(31, 0).UTC()
+	if r := e.Process(lim(t, "z", types.SideBuy, 101, 1)); r.Status == types.OrderStatusRejected {
+		t.Errorf("after the pause elapses trading should resume, got %v", r.RejectionReason)
+	}
+	if e.State() != StateOpen {
+		t.Errorf("engine should have auto-resumed to Open, state=%v", e.State())
+	}
+	if countKind(sink.got, EventHalted) != 1 || countKind(sink.got, EventResumed) != 1 {
+		t.Errorf("expected one HALTED and one RESUMED event, got %d/%d",
+			countKind(sink.got, EventHalted), countKind(sink.got, EventResumed))
+	}
+}
+
+// TestGuardrailEmitsHalted: the self-output guardrail trip publishes a HALTED
+// event so operators can page on it.
+func TestGuardrailEmitsHalted(t *testing.T) {
+	fixed := time.Unix(0, 0).UTC()
+	sink := &recSink{}
+	e := NewEngine(Config{
+		Symbol:    "BTC-USD",
+		Clock:     func() time.Time { return fixed },
+		Guardrail: Guardrail{MaxTrades: 2, Window: time.Minute},
+		EventSink: sink,
+	})
+	for i := range 5 {
+		e.Process(ord(t, "mm", types.SideSell, types.OrderTypeLimit, int64(100+i), 1, types.TIFGoodTillCancel))
+	}
+	for range 5 {
+		e.Process(ord(t, "t", types.SideBuy, types.OrderTypeMarket, 0, 1, types.TIFImmediateOrCancel))
+	}
+	if countKind(sink.got, EventHalted) != 1 {
+		t.Errorf("guardrail trip should emit exactly one HALTED event, got %d", countKind(sink.got, EventHalted))
+	}
+}
+
+// countKind counts recorded events of a kind (recEvent/recSink live in event_test.go).
+func countKind(got []recEvent, k EventKind) int {
+	n := 0
+	for _, e := range got {
+		if e.kind == k {
+			n++
+		}
+	}
+	return n
+}

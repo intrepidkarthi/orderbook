@@ -145,6 +145,36 @@ type Config struct {
 	// the price band with it (the Mango / Hyperliquid-JELLY lesson). Zero
 	// disables the guard. The first mark (from 0) is always accepted.
 	MaxMarkStep decimal.Decimal
+	// MinOrderQty / MinOrderNotional reject dust: an order below the size or (for
+	// limits) notional floor is rejected with ErrOrderBelowMinQty /
+	// ErrOrderBelowMinNotional. Dust floods bloat the book and degrade latency
+	// (the resource-exhaustion vector). Zero disables each.
+	MinOrderQty      int64
+	MinOrderNotional int64
+	// MaxOrdersPerAccount caps how many resting orders one UserID may hold at
+	// once; a submit that would exceed it is rejected with ErrTooManyOrders. This
+	// bounds per-account book footprint against a dust/quote-stuffing flood. Zero
+	// disables it. Privileged orders are exempt.
+	MaxOrdersPerAccount int
+	// DedupClientOrderIDs, when > 0, rejects a submit whose (UserID, ClientOrderID)
+	// was seen among the last DedupClientOrderIDs distinct such keys, with
+	// ErrDuplicateClientOrderID — near-term protection against a replayed or
+	// duplicated NewOrder double-booking (the FIX PossDup class). Orders with an
+	// empty ClientOrderID are never deduped. Bounded memory (a ring of the most
+	// recent keys); full session idempotency is a gateway concern. Bypassed on
+	// replay.
+	DedupClientOrderIDs int
+	// MaxForceTradeQty caps the quantity of a single ForceTrade call (liquidation
+	// / ADL print); a larger forced trade is rejected with ErrForceTradeTooLarge,
+	// so the risk layer must liquidate in chunks rather than sweep the book in one
+	// print (the incremental-liquidation lesson). Zero disables the cap.
+	MaxForceTradeQty int64
+	// BandBreachPause, when > 0, turns a price-band breach into a timed trading
+	// pause: the breaching order is still rejected, and the engine moves to Halted
+	// until the injected clock advances BandBreachPause, then auto-resumes to Open
+	// on the next order (LULD-style pause-and-reopen instead of a bare reject).
+	// Zero keeps the plain reject behaviour.
+	BandBreachPause time.Duration
 }
 
 // DefaultConfig returns a sensible configuration for a symbol.
@@ -198,6 +228,16 @@ type Engine struct {
 	sink     EventSink
 	eventSeq int64
 	eventBuf []Event
+
+	// client-order-id dedup (near-term replay guard): a ring of the most recent
+	// (user,clientID) keys plus a set for O(1) lookup.
+	dedupSeen map[string]struct{}
+	dedupRing []string
+	dedupPos  int
+
+	// timed band-breach pause: the engine auto-resumes to Open once the clock
+	// reaches pausedUntil (zero => no pending auto-resume).
+	pausedUntil time.Time
 }
 
 // maxStopCascade bounds how many rounds of stop triggering a single order may
@@ -282,7 +322,11 @@ func (e *Engine) checkOrderCaps(order *types.Order) error {
 	if e.replaying {
 		return nil
 	}
-	if e.config.MaxOrderQty > 0 && !order.Privileged && order.Quantity > e.config.MaxOrderQty {
+	priv := order.Privileged
+	if !priv && e.config.MinOrderQty > 0 && order.Quantity < e.config.MinOrderQty {
+		return types.ErrOrderBelowMinQty
+	}
+	if !priv && e.config.MaxOrderQty > 0 && order.Quantity > e.config.MaxOrderQty {
 		return types.ErrOrderExceedsMaxQty
 	}
 	if order.Type == types.OrderTypeLimit {
@@ -290,11 +334,67 @@ func (e *Engine) checkOrderCaps(order *types.Order) error {
 		if !ok {
 			return types.ErrNotionalOverflow
 		}
-		if e.config.MaxOrderNotional > 0 && !order.Privileged && notional > e.config.MaxOrderNotional {
+		if !priv && e.config.MinOrderNotional > 0 && notional < e.config.MinOrderNotional {
+			return types.ErrOrderBelowMinNotional
+		}
+		if !priv && e.config.MaxOrderNotional > 0 && notional > e.config.MaxOrderNotional {
 			return types.ErrOrderExceedsMaxNotional
 		}
 	}
+	if !priv && e.config.MaxOrdersPerAccount > 0 &&
+		e.book.OrdersByUser(order.UserID) >= e.config.MaxOrdersPerAccount {
+		return types.ErrTooManyOrders
+	}
+	if e.isDuplicate(order) {
+		return types.ErrDuplicateClientOrderID
+	}
 	return nil
+}
+
+// dedupKey builds the dedup key for an order, or "" if it has no client id.
+func dedupKey(order *types.Order) string {
+	if order.ClientOrderID == "" {
+		return ""
+	}
+	return order.UserID + "\x00" + order.ClientOrderID
+}
+
+// isDuplicate reports whether the order's (user, client-order-id) is among the
+// most recent DedupClientOrderIDs accepted keys. Check-only: the key is not
+// recorded until the order is actually accepted (see recordClientOrderID), so a
+// rejected order stays resubmittable under the same client id.
+func (e *Engine) isDuplicate(order *types.Order) bool {
+	if e.config.DedupClientOrderIDs <= 0 {
+		return false
+	}
+	key := dedupKey(order)
+	if key == "" {
+		return false
+	}
+	_, ok := e.dedupSeen[key]
+	return ok
+}
+
+// recordClientOrderID remembers an accepted order's client-order-id key, evicting
+// the oldest when the bounded ring is full.
+func (e *Engine) recordClientOrderID(order *types.Order) {
+	if e.config.DedupClientOrderIDs <= 0 || e.replaying {
+		return
+	}
+	key := dedupKey(order)
+	if key == "" {
+		return
+	}
+	if e.dedupRing == nil {
+		e.dedupRing = make([]string, e.config.DedupClientOrderIDs)
+		e.dedupSeen = make(map[string]struct{}, e.config.DedupClientOrderIDs)
+	}
+	if old := e.dedupRing[e.dedupPos]; old != "" {
+		delete(e.dedupSeen, old)
+	}
+	e.dedupRing[e.dedupPos] = key
+	e.dedupSeen[key] = struct{}{}
+	e.dedupPos = (e.dedupPos + 1) % len(e.dedupRing)
 }
 
 // nextID assigns the order a monotonic engine id if it does not already carry
@@ -326,6 +426,9 @@ func (e *Engine) Match(order *types.Order, dst []types.Trade) ([]types.Trade, ty
 	start := len(dst)
 	e.nextID(order)
 	dst, status, reason := e.settleInto(order, dst)
+	if reason == nil {
+		e.recordClientOrderID(order) // remember only accepted orders
+	}
 	dst = e.cascadeStops(dst)
 	e.emitResult(order, dst[start:], status, reason)
 	return dst, status, reason
@@ -386,6 +489,32 @@ func (e *Engine) emitCancel(order *types.Order) {
 	e.sink.OnEvents(e.eventBuf)
 }
 
+// emitStateChange publishes a Halted/Resumed event (guardrail trip, band-breach
+// pause, or auto-resume) so operators can page on it. UserID, when set, is the
+// order whose processing triggered the change.
+func (e *Engine) emitStateChange(kind EventKind, userID string) {
+	if e.sink == nil {
+		return
+	}
+	e.eventSeq++
+	e.eventBuf = append(e.eventBuf[:0], Event{Seq: e.eventSeq, Kind: kind, UserID: userID})
+	e.sink.OnEvents(e.eventBuf)
+}
+
+// maybeAutoResume lifts a timed band-breach pause once the clock reaches
+// pausedUntil, returning the engine to Open and emitting a Resumed event. Manual
+// halts (pausedUntil zero) are never auto-resumed.
+func (e *Engine) maybeAutoResume() {
+	if e.pausedUntil.IsZero() || e.state != StateHalted {
+		return
+	}
+	if !e.clock().Before(e.pausedUntil) {
+		e.state = StateOpen
+		e.pausedUntil = time.Time{}
+		e.emitStateChange(EventResumed, "")
+	}
+}
+
 // rejectDisabled builds a rejection for an order whose class is feature-flagged
 // off (Config.DisabledClasses), without touching the book, and emits it.
 func (e *Engine) rejectDisabled(order *types.Order) *MatchResult {
@@ -398,7 +527,9 @@ func (e *Engine) rejectDisabled(order *types.Order) *MatchResult {
 // to dst. It assumes the engine lock is held and the order's id is assigned, and
 // returns the extended buffer, the order's final status, and any rejection reason.
 func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
-	// Circuit breakers: engine state, then a limit price outside the collar.
+	// Lift a timed band-breach pause whose clock has elapsed, then apply circuit
+	// breakers: engine state, then a limit price outside the collar.
+	e.maybeAutoResume()
 	switch e.state {
 	case StateHalted:
 		order.Status = types.OrderStatusRejected
@@ -414,6 +545,14 @@ func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trad
 	}
 	if order.Type == types.OrderTypeLimit && !order.Privileged && e.outsideBand(order.Price) {
 		order.Status = types.OrderStatusRejected
+		// Optionally escalate a breach into a timed trading pause (LULD-style):
+		// the breaching order is still rejected, and trading halts until the clock
+		// advances BandBreachPause, then auto-resumes.
+		if e.config.BandBreachPause > 0 && !e.replaying {
+			e.state = StateHalted
+			e.pausedUntil = e.clock().Add(e.config.BandBreachPause)
+			e.emitStateChange(EventHalted, order.UserID)
+		}
 		return dst, types.OrderStatusRejected, types.ErrPriceOutsideBand
 	}
 	// Post-only orders must rest as makers; reject if they would take.
@@ -1073,9 +1212,11 @@ func (e *Engine) executeTrade(taker, maker *types.Order, price, qty int64, dst [
 			prod = math.MaxInt64
 		}
 		e.windowNotional = saturatingAdd(e.windowNotional, prod)
-		if (e.guard.MaxTrades > 0 && e.windowTrades > e.guard.MaxTrades) ||
-			(e.guard.MaxNotional > 0 && e.windowNotional > e.guard.MaxNotional) {
+		tripped := (e.guard.MaxTrades > 0 && e.windowTrades > e.guard.MaxTrades) ||
+			(e.guard.MaxNotional > 0 && e.windowNotional > e.guard.MaxNotional)
+		if tripped && e.state != StateHalted {
 			e.state = StateHalted
+			e.emitStateChange(EventHalted, "") // page operators on the Knight tripwire
 		}
 	}
 
@@ -1102,6 +1243,11 @@ func (e *Engine) executeTrade(taker, maker *types.Order, price, qty int64, dst [
 func (e *Engine) ForceTrade(taker, maker *types.Order, price, qty int64) (*types.Trade, error) {
 	if qty <= 0 || qty > taker.RemainingQty || qty > maker.RemainingQty {
 		return nil, types.ErrInvalidQuantity
+	}
+	// Bound a single forced print so a liquidation must be chunked rather than
+	// sweep the book in one trade (the incremental-liquidation lesson).
+	if e.config.MaxForceTradeQty > 0 && qty > e.config.MaxForceTradeQty {
+		return nil, types.ErrForceTradeTooLarge
 	}
 	e.nextID(taker)
 	e.nextID(maker)

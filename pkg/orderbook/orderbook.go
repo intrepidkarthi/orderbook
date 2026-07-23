@@ -78,6 +78,7 @@ type OrderBook struct {
 	bids           map[int64]*PriceLevel // price ticks -> level
 	asks           map[int64]*PriceLevel
 	nodes          map[int64]*node // orderID -> node, for O(1) cancel
+	perUser        map[string]int  // resting-order count per user, for admission caps
 	bidPrices      []int64         // sorted descending (best first)
 	askPrices      []int64         // sorted ascending (best first)
 	lastTradePrice int64
@@ -153,6 +154,7 @@ func New(config Config) *OrderBook {
 		bids:      make(map[int64]*PriceLevel),
 		asks:      make(map[int64]*PriceLevel),
 		nodes:     make(map[int64]*node),
+		perUser:   make(map[string]int),
 		bidPrices: make([]int64, 0),
 		askPrices: make([]int64, 0),
 		maxOrders: config.MaxOrders,
@@ -206,6 +208,7 @@ func (ob *OrderBook) Add(order *types.Order) error {
 	n := ob.getNode(order, level)
 	level.push(n)
 	ob.nodes[order.ID] = n
+	ob.perUser[order.UserID]++
 	return nil
 }
 
@@ -224,6 +227,11 @@ func (ob *OrderBook) Remove(orderID int64) (*types.Order, error) {
 	level.unlink(n)
 	delete(ob.nodes, orderID)
 	ob.putNode(n)
+	if c := ob.perUser[order.UserID]; c <= 1 {
+		delete(ob.perUser, order.UserID)
+	} else {
+		ob.perUser[order.UserID] = c - 1
+	}
 
 	if level.isEmpty() {
 		price := order.Price
@@ -408,6 +416,16 @@ func (ob *OrderBook) Count() int {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
 	return len(ob.nodes)
+}
+
+// OrdersByUser returns how many resting orders belong to userID — the basis for a
+// per-account open-order cap. Maintained in O(1) on Add/Remove, so it survives
+// fills (which remove through Remove) and rebuilds correctly on snapshot restore
+// (which re-Adds each order).
+func (ob *OrderBook) OrdersByUser(userID string) int {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
+	return ob.perUser[userID]
 }
 
 // Orders returns every resting order in price-then-time order (bids best-first,

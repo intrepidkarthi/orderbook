@@ -16,6 +16,8 @@ const (
 	EventTriggered                  // reserved: a stop/trailing fired
 	EventReplaced                   // reserved: an order was modified in place
 	EventBookDelta                  // reserved: an aggregated L2 level change
+	EventHalted                     // engine entered Halted (guardrail trip or band-breach pause)
+	EventResumed                    // engine returned to Open (e.g. band-breach pause elapsed)
 )
 
 func (k EventKind) String() string {
@@ -34,6 +36,10 @@ func (k EventKind) String() string {
 		return "REPLACED"
 	case EventBookDelta:
 		return "BOOK_DELTA"
+	case EventHalted:
+		return "HALTED"
+	case EventResumed:
+		return "RESUMED"
 	default:
 		return "UNKNOWN"
 	}

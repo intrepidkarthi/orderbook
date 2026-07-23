@@ -2,6 +2,7 @@ package matching
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
@@ -29,6 +30,7 @@ type EngineSnapshot struct {
 	EventSeq       int64
 	LastTradePrice int64
 	State          EngineState
+	PausedUntil    time.Time          // active band-breach pause deadline (zero if none)
 	Orders         []*types.Order     // resting book, price-then-time order
 	Stops          []*types.StopOrder // pending stops
 }
@@ -48,6 +50,7 @@ func (e *Engine) TakeSnapshot() *EngineSnapshot {
 		EventSeq:       e.eventSeq,
 		LastTradePrice: e.book.LastTradePrice(),
 		State:          e.state,
+		PausedUntil:    e.pausedUntil,
 	}
 	for _, o := range e.book.Orders() {
 		snap.Orders = append(snap.Orders, copyOrder(o))
@@ -95,6 +98,7 @@ func (e *Engine) LoadSnapshot(snap *EngineSnapshot) error {
 	e.tradeSeq = snap.TradeSeq
 	e.eventSeq = snap.EventSeq
 	e.state = snap.State
+	e.pausedUntil = snap.PausedUntil
 	return nil
 }
 
