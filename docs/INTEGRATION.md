@@ -349,21 +349,9 @@ THREAT-MODEL.md §6 for why the boundary is drawn here):
 
 - **Protocol adapters** — FIX/OUCH/SBE/WebSocket codecs translating the wire to
   `types.Order`, and translating the `EventSink` stream back to execution reports /
-  market data. `examples/eventfeed` shows the pattern: consume the sequenced event
-  stream into an exec-report feed and an order→deal→position projection (the
-  MetaTrader-style lineage). A common deployment is as the **internal ECN behind an
-  MT5 Gateway** — the real price-time crossing venue a B-book broker lacks.
-- **Credit & margin** — buying power, position/notional limits, collateral,
-  liquidation selection. The core supplies the *primitives* (`ForceTrade`,
-  `MaxForceTradeQty`, degraded states, the mark band); credit decisions live above.
-- **Identity & beneficial ownership** — STP enforces the `TradeGroupID`s it is
-  told; mapping accounts to an owner (for wash-trade surveillance) is a layer job.
-- **Persistence** — `pkg/wal` provides the durable WAL + snapshot store; add
-  replication / object-store archival around it.
-- **Fees/clearing/settlement** — the core emits maker/taker + fill price; pricing
-  and settlement live above.
-- **Oracle sourcing** — the core refuses an unbacked mark (`MaxMarkStep`,
-  `MinMarkDepth`) but does not *compute* one; a manipulation-resistant index / TWAP
-  is an oracle service above.
-- **Session/auction orchestration** — a controller driving halts, opens, and
-  closing auctions on top of `AuctionSession` and the degraded states.
+  market data. The `pkg/fix` example demonstrates this boundary with FIX
+  NewOrderSingle decoding, cancel handling, and execution-report encoding.
+  `examples/eventfeed` shows the event translation pattern: consume the sequenced
+  event stream into an exec-report feed and an order→deal→position projection.
+  A common deployment is as the **internal ECN behind an MT5 Gateway** — the real
+  price-time crossing venue a B-book broker lacks.
