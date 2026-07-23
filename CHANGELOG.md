@@ -7,6 +7,8 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-23
+
 The market-integrity release: a research-grounded threat model
 ([docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)) and the defenses it prioritized,
 plus durable persistence.
@@ -88,7 +90,8 @@ trailing), GTC/IOC/FOK, self-trade prevention, a price-band circuit breaker, FIF
 and pro-rata allocation, L1/L2/L3 market data, a surveillance starter kit, and a
 market-microstructure research harness with a WebAssembly demo.
 
-[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.2.0...v0.3.0
