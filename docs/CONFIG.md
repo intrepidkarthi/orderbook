@@ -71,6 +71,12 @@ defaults.
 | `MaxOrderNotional` | `int64` | Reject any single **limit** order with `price×qty` over this (`ErrOrderExceedsMaxNotional`) | `0` (disabled) | fat-finger cap; overflowing notional always rejected (`ErrNotionalOverflow`) |
 | `MinRestingTime` | `time.Duration` | A resting book order cannot be cancelled until it has rested this long (`ErrCancelTooSoon`) | `0` (disabled) | anti-spoofing; `Privileged` exempt; bypassed on replay |
 | `MaxMarkStep` | `decimal.Decimal` | Reject a `SetMarkPrice` update jumping more than this fraction from the current mark (`ErrMarkStepTooLarge`) | `0` (disabled) | anti oracle-pump; first mark and clearing to 0 always accepted |
+| `MinOrderQty` | `int64` | Reject an order below this many lots (`ErrOrderBelowMinQty`) | `0` (disabled) | dust floor; `Privileged` exempt |
+| `MinOrderNotional` | `int64` | Reject a **limit** order with `price×qty` below this (`ErrOrderBelowMinNotional`) | `0` (disabled) | dust floor; `Privileged` exempt |
+| `MaxOrdersPerAccount` | `int` | Cap resting orders per `UserID`; a submit over the cap is rejected (`ErrTooManyOrders`) | `0` (disabled) | resource-exhaustion guard; `Privileged` exempt |
+| `DedupClientOrderIDs` | `int` | Reject a duplicate `(UserID, ClientOrderID)` among the last N accepted keys (`ErrDuplicateClientOrderID`) | `0` (disabled) | near-term replay guard; empty ids skip; recorded on accept; bypassed on replay |
+| `MaxForceTradeQty` | `int64` | Cap a single `ForceTrade` (liquidation/ADL) print (`ErrForceTradeTooLarge`) | `0` (disabled) | forces chunked liquidation |
+| `BandBreachPause` | `time.Duration` | A price-band breach escalates to a timed `Halted` pause that auto-resumes after this long | `0` (bare reject) | LULD-style pause-and-reopen; emits `HALTED`/`RESUMED` |
 
 See [THREAT-MODEL.md](THREAT-MODEL.md) for the attacks these controls address
 and the real enforcement cases behind each.
@@ -100,20 +106,40 @@ untouched, and `Privileged` (liquidation/ADL) orders are exempt from the caps an
 the resting-time floor. Each maps to a named enforcement case in
 [THREAT-MODEL.md](THREAT-MODEL.md):
 
-- **Per-order caps** (`MaxOrderQty`, `MaxOrderNotional`) — fat-finger guards on a
-  *single* order, complementing `Guardrail` (which bounds *aggregate* output). An
-  order whose `price×qty` overflows int64 is always rejected, and the guardrail's
-  windowed notional accumulates with a saturating add so no wrap can hide a
-  runaway.
+- **Per-order caps** (`MaxOrderQty`, `MaxOrderNotional`) and **dust floors**
+  (`MinOrderQty`, `MinOrderNotional`) — bound a *single* order from both ends,
+  complementing `Guardrail` (which bounds *aggregate* output). An order whose
+  `price×qty` overflows int64 is always rejected, and the guardrail's windowed
+  notional accumulates with a saturating add so no wrap can hide a runaway.
+- **Per-account cap** (`MaxOrdersPerAccount`) — bounds how many resting orders one
+  user holds, against a dust/quote-stuffing flood. The count is maintained O(1) in
+  the order book, so it tracks fills and rebuilds on snapshot restore.
+- **Idempotency dedup** (`DedupClientOrderIDs`) — rejects a duplicate
+  `(UserID, ClientOrderID)` within a bounded recent window; the key is recorded
+  only on acceptance, so a rejected order stays resubmittable.
 - **Minimum resting time** (`MinRestingTime`) — defeats the post-size-then-pull
   spoofing pattern by refusing a too-soon cancel.
 - **Mark-step guard** (`MaxMarkStep`) — `SetMarkPrice` returns an error and rejects
   an outsized jump, so a thin-book oracle pump cannot drag the price band with it.
+- **Force-trade cap** (`MaxForceTradeQty`) — bounds a single liquidation/ADL
+  print, forcing incremental liquidation instead of one book-clearing sweep.
+- **Band-breach pause** (`BandBreachPause`) — escalates a band breach into a timed
+  `Halted` pause that auto-resumes on the injected clock (LULD-style), emitting
+  `HALTED`/`RESUMED` on the event stream. Guardrail trips emit `HALTED` too.
 
-These live-ingress checks (the time-based ones) are **bypassed during
-deterministic replay** — the engine has a replay mode that `pkg/wal` `Restore`
-wraps recovery in, so an already-accepted cancel is never re-litigated against
-replay-time timestamps and the recovered book stays byte-identical.
+These live-ingress checks (the time-based ones and the caps/dedup) are **bypassed
+during deterministic replay** — the engine has a replay mode that `pkg/wal`
+`Restore` wraps recovery in, so an already-accepted cancel is never re-litigated
+against replay-time timestamps and the recovered book stays byte-identical.
+
+**Beyond the core**, three companion pieces address the same threat catalogue:
+`auction.AuctionSession` (a call auction for open/close/halt-recovery with a
+replay-safe `RandomizedClose` that defeats marking-the-close); the
+`pkg/surveillance` detectors (`OTRDetector`, `CloseMarkingDetector`,
+`RampingDetector`, `PingingDetector` alongside the spoof and rate detectors); and
+`examples/gateway` (an *enforcing* rate gate, a taker speed bump, and a CAT-style
+audit export) — the controls that correctly live in the layer above a neutral,
+deterministic matcher.
 
 ### Self-trade prevention (STP)
 
