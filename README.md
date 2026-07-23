@@ -12,6 +12,7 @@ core, and deterministic, replayable execution.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/intrepidkarthi/orderbook.svg)](https://pkg.go.dev/github.com/intrepidkarthi/orderbook)
 [![CI](https://github.com/intrepidkarthi/orderbook/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/intrepidkarthi/orderbook/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/intrepidkarthi/orderbook/branch/main/graph/badge.svg)](https://codecov.io/gh/intrepidkarthi/orderbook)
 [![Go Report Card](https://goreportcard.com/badge/github.com/intrepidkarthi/orderbook)](https://goreportcard.com/report/github.com/intrepidkarthi/orderbook)
 ![Go 1.23+](https://img.shields.io/badge/go-1.23%2B-00ADD8?logo=go&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
