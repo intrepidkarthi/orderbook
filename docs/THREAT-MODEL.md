@@ -264,17 +264,18 @@ defeating this at the source.
 
 Effort: **S** ≤ a day · **M** a few days · **L** a week+. Ranked by
 real-world enforcement frequency × impact × matching-engine relevance.
+**Status** tracks what has shipped: ✅ done · ◻ open.
 
 ### MUST — enforcement-backed, high-leverage
 
-| # | Build | Why (a real attack it stops) | Effort | Layer |
-|---|---|---|---|---|
-| 1 | **Minimum resting time** — reject a cancel arriving too soon after placement, using single-writer placement timestamps | Spoofing / quote-fading / JIT-flicker. JPMorgan $920M; Coscia. Four analyses converge here. | M | **Core** |
-| 2 | **Enforcing admission gate** — per-account msg/sec + OTR / cancel-ratio that *rejects* (promote `RateLimiter` from alert-only) | Quote stuffing / flood DoS. Citadel $800K; Trillium $1M. | M | **Gateway** |
-| 3 | **OTR / cancel-ratio metric** — count cancels-per-fill, not just placements (the strongest spoofing signal) | Spoofing / layering. Unanimous gap across analyses. | S | **Surveillance** |
-| 4 | **Minimum-liquidity mark bounds + mark-step guard** — reject `SetMarkPrice` unbacked by depth or moving more than a per-window cap | Oracle / mark manipulation. **Mango $110M; Hyperliquid JELLY $13.5M.** The honest crypto gap. | M | **Core** |
-| 5 | **Checked / saturating notional arithmetic + ingress magnitude bounds** on price / qty / notional | Integer overflow. Bitcoin CVE-2010-5139. int64 alone isn't enough — `price×qty` still wraps. | S | **Core** |
-| 6 | **Per-order max size / notional (fat-finger) reject** in the cold path | Runaway / fat-finger. Complements `Guardrail` (which caps aggregate, not per-order). | S | **Core** |
+| # | Build | Why (a real attack it stops) | Effort | Layer | Status |
+|---|---|---|---|---|---|
+| 1 | **Minimum resting time** — reject a cancel arriving too soon after placement, using single-writer placement timestamps | Spoofing / quote-fading / JIT-flicker. JPMorgan $920M; Coscia. Four analyses converge here. | M | **Core** | ✅ `Config.MinRestingTime` |
+| 2 | **Enforcing admission gate** — per-account msg/sec + OTR / cancel-ratio that *rejects* (promote `RateLimiter` from alert-only) | Quote stuffing / flood DoS. Citadel $800K; Trillium $1M. | M | **Gateway** | ◻ |
+| 3 | **OTR / cancel-ratio metric** — count cancels-per-fill, not just placements (the strongest spoofing signal) | Spoofing / layering. Unanimous gap across analyses. | S | **Surveillance** | ✅ `surveillance.OTRDetector` |
+| 4 | **Minimum-liquidity mark bounds + mark-step guard** — reject `SetMarkPrice` unbacked by depth or moving more than a per-window cap | Oracle / mark manipulation. **Mango $110M; Hyperliquid JELLY $13.5M.** The honest crypto gap. | M | **Core** | ✅ mark-step (`Config.MaxMarkStep`); ◻ depth-backed bound |
+| 5 | **Checked / saturating notional arithmetic + ingress magnitude bounds** on price / qty / notional | Integer overflow. Bitcoin CVE-2010-5139. int64 alone isn't enough — `price×qty` still wraps. | S | **Core** | ✅ overflow-reject + saturating guardrail |
+| 6 | **Per-order max size / notional (fat-finger) reject** in the cold path | Runaway / fat-finger. Complements `Guardrail` (which caps aggregate, not per-order). | S | **Core** | ✅ `Config.MaxOrderQty` / `MaxOrderNotional` |
 
 ### SHOULD — real gaps, clear defense
 

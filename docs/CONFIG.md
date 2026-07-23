@@ -67,6 +67,13 @@ defaults.
 | `DisabledClasses` | `[]OrderClass` | Advanced order families to reject with `ErrOrderTypeDisabled` (`ClassStop`/`Iceberg`/`Pegged`/`OCO`/`Trailing`) | `nil` (all enabled) | feature-flag off a risky exotic type without a redeploy |
 | `Guardrail` | `Guardrail` | Self-output tripwire: trip to `Halted` when trades/notional in `Window` exceed `MaxTrades`/`MaxNotional` | zero (disabled) | guards the engine's *own* output (the Knight lesson) |
 | `EventSink` | `EventSink` | Receives the ordered, sequence-numbered event stream (`Accepted`/`Rejected`/`Trade`/`Canceled`) | `nil` (no events) | non-blocking; the seam for market-data/drop-copy/recovery adapters |
+| `MaxOrderQty` | `int64` | Reject any single order larger than this many lots (`ErrOrderExceedsMaxQty`) | `0` (disabled) | fat-finger cap; `Privileged` exempt |
+| `MaxOrderNotional` | `int64` | Reject any single **limit** order with `price×qty` over this (`ErrOrderExceedsMaxNotional`) | `0` (disabled) | fat-finger cap; overflowing notional always rejected (`ErrNotionalOverflow`) |
+| `MinRestingTime` | `time.Duration` | A resting book order cannot be cancelled until it has rested this long (`ErrCancelTooSoon`) | `0` (disabled) | anti-spoofing; `Privileged` exempt; bypassed on replay |
+| `MaxMarkStep` | `decimal.Decimal` | Reject a `SetMarkPrice` update jumping more than this fraction from the current mark (`ErrMarkStepTooLarge`) | `0` (disabled) | anti oracle-pump; first mark and clearing to 0 always accepted |
+
+See [THREAT-MODEL.md](THREAT-MODEL.md) for the attacks these controls address
+and the real enforcement cases behind each.
 
 ### Operational states & determinism (Phase A)
 
@@ -84,6 +91,29 @@ defaults.
   the venue.
 - **Self-output guardrail.** An optional cap on the engine's own trade/notional
   output per window that trips it to `Halted`.
+
+### Pre-trade risk & anti-manipulation controls
+
+Opt-in admission controls (all default to disabled) that gate the **live ingress
+path** — enforced on the cold reject path, so the zero-alloc hot path is
+untouched, and `Privileged` (liquidation/ADL) orders are exempt from the caps and
+the resting-time floor. Each maps to a named enforcement case in
+[THREAT-MODEL.md](THREAT-MODEL.md):
+
+- **Per-order caps** (`MaxOrderQty`, `MaxOrderNotional`) — fat-finger guards on a
+  *single* order, complementing `Guardrail` (which bounds *aggregate* output). An
+  order whose `price×qty` overflows int64 is always rejected, and the guardrail's
+  windowed notional accumulates with a saturating add so no wrap can hide a
+  runaway.
+- **Minimum resting time** (`MinRestingTime`) — defeats the post-size-then-pull
+  spoofing pattern by refusing a too-soon cancel.
+- **Mark-step guard** (`MaxMarkStep`) — `SetMarkPrice` returns an error and rejects
+  an outsized jump, so a thin-book oracle pump cannot drag the price band with it.
+
+These live-ingress checks (the time-based ones) are **bypassed during
+deterministic replay** — the engine has a replay mode that `pkg/wal` `Restore`
+wraps recovery in, so an already-accepted cancel is never re-litigated against
+replay-time timestamps and the recovered book stays byte-identical.
 
 ### Self-trade prevention (STP)
 
