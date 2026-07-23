@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
+	"github.com/shopspring/decimal"
 )
 
 func iceberg(t *testing.T, user string, side types.Side, price, total, display int64) *types.IcebergOrder {
@@ -13,6 +14,31 @@ func iceberg(t *testing.T, user string, side types.Side, price, total, display i
 		t.Fatalf("NewIcebergOrder: %v", err)
 	}
 	return ib
+}
+
+// TestIceberg_JitterConfigConserves: with Config.IcebergPeakJitter set, the reload
+// sizes vary but the full hidden quantity still trades — jitter changes the peak
+// size, never the total.
+func TestIceberg_JitterConfigConserves(t *testing.T) {
+	cfg := DefaultConfig("BTC-USD")
+	cfg.IcebergPeakJitter = decimal.RequireFromString("0.3") // ±30%
+	e := NewEngine(cfg)
+	e.ProcessIceberg(iceberg(t, "whale", types.SideBuy, 99, 100, 10))
+
+	var traded int64
+	// Drain the whole iceberg with small sell orders; count everything that fills.
+	for range 200 {
+		r := e.Process(marketOrder(t, "taker", types.SideSell, 1))
+		for _, tr := range r.Trades {
+			traded += tr.Quantity
+		}
+		if _, _, ok := e.BestBid(); !ok {
+			break
+		}
+	}
+	if traded != 100 {
+		t.Errorf("jittered iceberg should still trade its full size: traded %d want 100", traded)
+	}
 }
 
 func TestIceberg_ShowsOnlyDisplaySlice(t *testing.T) {

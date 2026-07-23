@@ -187,6 +187,12 @@ type Config struct {
 	// on the next order (LULD-style pause-and-reopen instead of a bare reject).
 	// Zero keeps the plain reject behaviour.
 	BandBreachPause time.Duration
+	// IcebergPeakJitter, when > 0, varies each refilled iceberg slice by up to this
+	// fraction around its display size (e.g. 0.3 = ±30%), so a watcher cannot
+	// fingerprint a hidden reserve by its fixed reload size (iceberg detection /
+	// pinging). The variation is deterministic in the order id and refill count, so
+	// replay stays exact. Zero shows a fixed display size.
+	IcebergPeakJitter decimal.Decimal
 }
 
 // DefaultConfig returns a sensible configuration for a symbol.
@@ -221,9 +227,10 @@ type Engine struct {
 	ocoByOrderID  map[int64]*types.OCOOrder // both legs' ids map to the pair
 	trailingStops map[int64]*types.TrailingStop
 	state         EngineState
-	bandEnabled   bool // config.PriceBand > 0, precomputed to keep decimal off the hot path
-	markStepEnab  bool // config.MaxMarkStep > 0, precomputed
-	replaying     bool // replay/bootstrap mode: bypass live-ingress admission controls
+	bandEnabled   bool  // config.PriceBand > 0, precomputed to keep decimal off the hot path
+	markStepEnab  bool  // config.MaxMarkStep > 0, precomputed
+	icebergJitBps int64 // config.IcebergPeakJitter in basis points, precomputed
+	replaying     bool  // replay/bootstrap mode: bypass live-ingress admission controls
 	orderSeq      int64
 	tradeSeq      int64
 	clock         func() time.Time
@@ -284,12 +291,13 @@ func NewEngine(config Config) *Engine {
 		trailingStops: make(map[int64]*types.TrailingStop),
 		// Resolve the band-enabled flag once (a decimal compare) so the per-order
 		// hot path never touches decimal for the common band-disabled case.
-		bandEnabled:  config.PriceBand.GreaterThan(decimal.Zero),
-		markStepEnab: config.MaxMarkStep.GreaterThan(decimal.Zero),
-		clock:        config.Clock,
-		disabled:     disabled,
-		guard:        config.Guardrail,
-		sink:         config.EventSink,
+		bandEnabled:   config.PriceBand.GreaterThan(decimal.Zero),
+		markStepEnab:  config.MaxMarkStep.GreaterThan(decimal.Zero),
+		icebergJitBps: config.IcebergPeakJitter.Mul(decimal.NewFromInt(10000)).IntPart(),
+		clock:         config.Clock,
+		disabled:      disabled,
+		guard:         config.Guardrail,
+		sink:          config.EventSink,
 	}
 }
 
@@ -843,6 +851,7 @@ func (e *Engine) ProcessIceberg(ib *types.IcebergOrder) *MatchResult {
 		return e.rejectDisabled(ib.Order)
 	}
 	e.nextID(ib.Order)
+	ib.JitterBps = e.icebergJitBps // deterministic reload-size jitter (anti-sniffing)
 	e.icebergOrders[ib.Order.ID] = ib
 
 	dst, status, reason := e.settleInto(ib.Order, nil)
