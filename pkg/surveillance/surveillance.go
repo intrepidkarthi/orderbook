@@ -291,6 +291,105 @@ func windowCutoff(now, width uint64) uint64 {
 	return 0
 }
 
+// --- Cross-book correlation (cross-product / cross-venue manipulation) ---
+
+// CrossBookConfig configures the cross-book correlator.
+type CrossBookConfig struct {
+	Window     uint64 // rolling window of events by the correlator's global sequence
+	MinSymbols int    // flag a user tripping manipulation alerts in at least this many distinct books
+}
+
+// CrossBookMonitor fans events from several books into their own per-symbol
+// Monitors and correlates the *manipulation* alerts across books per user. A user
+// tripping manipulation-type alerts (spoofing, ramping, aggressor dominance,
+// pinging, high OTR) in several correlated books at once is the cross-product /
+// cross-venue signature — spoof one product to profit in another (Oystacher /
+// 3Red, CFTC $2.5M). Single-book detectors miss it by construction; this is the
+// SMARTS-style layer a venue adds on top of them.
+type CrossBookMonitor struct {
+	cfg      CrossBookConfig
+	build    func() []Detector   // detector factory, one set per new book
+	monitors map[string]*Monitor // per symbol
+	hits     map[string][]crossHit
+	seq      uint64 // global event counter across all books
+}
+
+type crossHit struct {
+	seq    uint64
+	symbol string
+}
+
+// NewCrossBookMonitor builds a cross-book correlator. build is called once per
+// distinct symbol to create that book's detector set (e.g. a spoof + ramping
+// detector), so each book is scored independently before correlation.
+func NewCrossBookMonitor(cfg CrossBookConfig, build func() []Detector) *CrossBookMonitor {
+	return &CrossBookMonitor{
+		cfg:      cfg,
+		build:    build,
+		monitors: make(map[string]*Monitor),
+		hits:     make(map[string][]crossHit),
+	}
+}
+
+// Observe feeds an event tagged with its book symbol to that book's monitor and
+// correlates any manipulation alert across books. It returns cross-book alerts;
+// the underlying per-symbol alerts are recorded on each book's Monitor (reachable
+// via MonitorFor).
+func (c *CrossBookMonitor) Observe(symbol string, e Event) []Alert {
+	c.seq++
+	m := c.monitors[symbol]
+	if m == nil {
+		m = NewMonitor(c.build()...)
+		c.monitors[symbol] = m
+	}
+	var out []Alert
+	for _, a := range m.Observe(e) {
+		if isManipulation(a.Kind) {
+			out = append(out, c.record(symbol, a.UserID)...)
+		}
+	}
+	return out
+}
+
+// MonitorFor returns the per-book Monitor for a symbol (nil if none seen yet).
+func (c *CrossBookMonitor) MonitorFor(symbol string) *Monitor { return c.monitors[symbol] }
+
+func (c *CrossBookMonitor) record(symbol, user string) []Alert {
+	cutoff := windowCutoff(c.seq, c.cfg.Window)
+	kept := c.hits[user][:0]
+	for _, h := range c.hits[user] {
+		if h.seq >= cutoff {
+			kept = append(kept, h)
+		}
+	}
+	kept = append(kept, crossHit{seq: c.seq, symbol: symbol})
+	c.hits[user] = kept
+
+	syms := make(map[string]struct{}, len(kept))
+	for _, h := range kept {
+		syms[h.symbol] = struct{}{}
+	}
+	if len(syms) >= c.cfg.MinSymbols {
+		return []Alert{{
+			Kind:   "cross_book_manipulation",
+			UserID: user,
+			Seq:    c.seq,
+			Detail: fmt.Sprintf("manipulation alerts across %d books within %d events", len(syms), c.cfg.Window),
+		}}
+	}
+	return nil
+}
+
+// isManipulation reports whether an alert kind is a manipulation signal worth
+// correlating across books (vs a pure operational one).
+func isManipulation(kind string) bool {
+	switch kind {
+	case "spoofing", "ramping", "aggressor_dominance", "pinging", "order_to_trade_ratio":
+		return true
+	}
+	return false
+}
+
 // --- Aggressor dominance (marking / banging the close) ---
 
 // CloseMarkingConfig configures the aggressor-dominance detector.

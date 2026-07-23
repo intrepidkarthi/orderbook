@@ -175,6 +175,38 @@ func TestPinging_IgnoresLargeAndFilled(t *testing.T) {
 	}
 }
 
+func TestCrossBook_FlagsMultiSymbolManipulator(t *testing.T) {
+	build := func() []Detector {
+		return []Detector{NewSpoofDetector(SpoofConfig{MinSize: 50, MaxLifetime: 5})}
+	}
+	c := NewCrossBookMonitor(CrossBookConfig{Window: 100, MinSymbols: 2}, build)
+
+	// Spoof in book BTC — one book, not yet cross-book.
+	c.Observe("BTC", placed(1, "boss", 1, 100))
+	if a := c.Observe("BTC", cancelled(3, "boss", 1)); len(a) != 0 {
+		t.Fatalf("a single book should not trip the cross-book alert, got %+v", a)
+	}
+	// Spoof again in book ETH — now two distinct books → cross-book alert.
+	c.Observe("ETH", placed(4, "boss", 2, 100))
+	last := c.Observe("ETH", cancelled(6, "boss", 2))
+	if len(last) != 1 || last[0].Kind != "cross_book_manipulation" || last[0].UserID != "boss" {
+		t.Fatalf("expected cross_book_manipulation for boss, got %+v", last)
+	}
+}
+
+func TestCrossBook_QuietOnSingleBook(t *testing.T) {
+	build := func() []Detector {
+		return []Detector{NewSpoofDetector(SpoofConfig{MinSize: 50, MaxLifetime: 5})}
+	}
+	c := NewCrossBookMonitor(CrossBookConfig{Window: 100, MinSymbols: 2}, build)
+	c.Observe("BTC", placed(1, "u", 1, 100))
+	c.Observe("BTC", cancelled(3, "u", 1))
+	c.Observe("BTC", placed(4, "u", 2, 100))
+	if a := c.Observe("BTC", cancelled(6, "u", 2)); len(a) != 0 {
+		t.Errorf("repeated spoofing in ONE book is not cross-book, got %+v", a)
+	}
+}
+
 func TestRate_FlagsBurst(t *testing.T) {
 	d := NewRateLimiter(RateConfig{MaxOrders: 3, Window: 10})
 	var last []Alert
