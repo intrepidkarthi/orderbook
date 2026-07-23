@@ -59,16 +59,21 @@ three highest-leverage findings has shipped (see §5 for the full status):
    (`OTRDetector`) plus a rejecting token-bucket admission gate at the gateway
    layer (`examples/gateway`), so the venue can throttle, not merely alert.
 
-**The remaining honest gaps** (§5): a *depth-backed* minimum-liquidity mark bound
-(the mark-step guard `MaxMarkStep` ships, but a bound keyed to resting book depth
-does not — so a slow, in-step oracle drag is still possible), randomized iceberg
-peaks (#13), and a cross-book correlator (#17).
+**The roadmap is now fully implemented** (§5): the depth-backed mark bound
+(`MinMarkDepth`), randomized iceberg peaks (`IcebergPeakJitter`), and the
+cross-book correlator (`CrossBookMonitor`) that were the last open items have all
+shipped, alongside a reusable `pkg/gateway` (enforcing rate gate + taker speed
+bump). Every MUST/SHOULD/COULD row carries a ✅.
 
-**One caveat, stated up front (the skeptic's dissent):** the crypto posture
-(oracle / mark manipulation) is improved but not closed. The band plus the
-mark-step guard bound a single-jump pump, but with **no depth-backed mark bound**,
-a patient attacker moving the mark within the step each update could still drag
-it. Treat that as a partial win, not a complete one.
+**What remains genuinely out of scope** is not a gap but the boundary of §6: a
+matching core cannot know beneficial ownership, credit, off-venue conduct, oracle
+sourcing, or ingress ordering — those are identity / clearing / oracle / gateway
+concerns by design. On the **oracle / mark** posture specifically: `MaxMarkStep`
+now bounds a single-jump pump *and* `MinMarkDepth` bounds a patient in-step drag
+(a mark can only move to prices real resting depth supports), but the ultimate
+trust in the mark's *source* (a manipulation-resistant index / TWAP) still lives
+in the oracle layer above. The core refuses to act on an unbacked mark; it cannot
+manufacture a good one.
 
 ### Attacker taxonomy
 
@@ -265,9 +270,9 @@ defeating this at the source.
 | **pkg/auction (uniform-price uncross + `AuctionSession`)** — open/close/recovery call auction with a deterministic `RandomizedClose` | Marking-the-close, latency arb, MEV/JIT, momentum ignition | Athena (2014); Flash Boys; Injective / CoW model |
 | **ProRata allocation** (`Config.ProRata`) | Alternative to strict time-priority allocation | — |
 | **Iceberg / static peg** | Hides parent-order size (partial) | Order anticipation (mechanics present) |
-| **Pre-trade risk caps** — `MinRestingTime`, `MaxOrderQty`/`MaxOrderNotional`, `MinOrderQty`/`MinOrderNotional`, `MaxOrdersPerAccount`, `DedupClientOrderIDs`, `MaxMarkStep`, `MaxForceTradeQty`, `BandBreachPause` + notional-overflow guard | Spoofing, dust/stuffing, replay double-book, oracle pump, liquidation cascade, integer overflow | JPMorgan $920M; Binance `-1008`; FIX PossDup; Mango/JELLY; Bitcoin CVE-2010-5139 |
-| **Surveillance detectors** (`pkg/surveillance`) — `SpoofDetector`, `RateLimiter`, `OTRDetector`, `CloseMarkingDetector`, `RampingDetector`, `PingingDetector` | Spoofing/layering, stuffing, OTR abuse, marking-the-close, ramping, pinging | JPMorgan; Trillium; Athena; MiFID II RTS 9 |
-| **Gateway layer** (`examples/gateway`) — enforcing token-bucket rate gate, taker speed bump, CAT-style audit export | Flood DoS, latency arb, audit trail | Citadel/Trillium; IEX; Rule 613 |
+| **Pre-trade risk caps** — `MinRestingTime`, `MaxOrderQty`/`MaxOrderNotional`, `MinOrderQty`/`MinOrderNotional`, `MaxOrdersPerAccount`, `DedupClientOrderIDs`, `MaxMarkStep` + `MinMarkDepth`, `MaxForceTradeQty`, `BandBreachPause`, `IcebergPeakJitter` + notional-overflow guard | Spoofing, dust/stuffing, replay double-book, oracle pump (jump + patient drag), liquidation cascade, iceberg sniffing, integer overflow | JPMorgan $920M; Binance `-1008`; FIX PossDup; Mango/JELLY; Bitcoin CVE-2010-5139 |
+| **Surveillance detectors** (`pkg/surveillance`) — `SpoofDetector`, `RateLimiter`, `OTRDetector`, `CloseMarkingDetector`, `RampingDetector`, `PingingDetector`, `CrossBookMonitor` | Spoofing/layering, stuffing, OTR abuse, marking-the-close, ramping, pinging, cross-book manipulation | JPMorgan; Trillium; Athena; Oystacher $2.5M; MiFID II RTS 9 |
+| **Gateway layer** (`pkg/gateway` + `examples/gateway`) — enforcing token-bucket `RateGate`, taker speed bump, CAT-style audit export | Flood DoS, latency arb, audit trail | Citadel/Trillium; IEX; Rule 613 |
 
 ---
 
@@ -282,9 +287,9 @@ real-world enforcement frequency × impact × matching-engine relevance.
 | # | Build | Why (a real attack it stops) | Effort | Layer | Status |
 |---|---|---|---|---|---|
 | 1 | **Minimum resting time** — reject a cancel arriving too soon after placement, using single-writer placement timestamps | Spoofing / quote-fading / JIT-flicker. JPMorgan $920M; Coscia. Four analyses converge here. | M | **Core** | ✅ `Config.MinRestingTime` |
-| 2 | **Enforcing admission gate** — per-account msg/sec + OTR / cancel-ratio that *rejects* (promote `RateLimiter` from alert-only) | Quote stuffing / flood DoS. Citadel $800K; Trillium $1M. | M | **Gateway** | ◻ |
+| 2 | **Enforcing admission gate** — per-account msg/sec + OTR / cancel-ratio that *rejects* (promote `RateLimiter` from alert-only) | Quote stuffing / flood DoS. Citadel $800K; Trillium $1M. | M | **Gateway** | ✅ `gateway.RateGate` (+ `examples/gateway`) |
 | 3 | **OTR / cancel-ratio metric** — count cancels-per-fill, not just placements (the strongest spoofing signal) | Spoofing / layering. Unanimous gap across analyses. | S | **Surveillance** | ✅ `surveillance.OTRDetector` |
-| 4 | **Minimum-liquidity mark bounds + mark-step guard** — reject `SetMarkPrice` unbacked by depth or moving more than a per-window cap | Oracle / mark manipulation. **Mango $110M; Hyperliquid JELLY $13.5M.** The honest crypto gap. | M | **Core** | ✅ mark-step (`Config.MaxMarkStep`); ◻ depth-backed bound |
+| 4 | **Minimum-liquidity mark bounds + mark-step guard** — reject `SetMarkPrice` unbacked by depth or moving more than a per-window cap | Oracle / mark manipulation. **Mango $110M; Hyperliquid JELLY $13.5M.** The honest crypto gap. | M | **Core** | ✅ mark-step (`Config.MaxMarkStep`) + depth-backed bound (`Config.MinMarkDepth`) |
 | 5 | **Checked / saturating notional arithmetic + ingress magnitude bounds** on price / qty / notional | Integer overflow. Bitcoin CVE-2010-5139. int64 alone isn't enough — `price×qty` still wraps. | S | **Core** | ✅ overflow-reject + saturating guardrail |
 | 6 | **Per-order max size / notional (fat-finger) reject** in the cold path | Runaway / fat-finger. Complements `Guardrail` (which caps aggregate, not per-order). | S | **Core** | ✅ `Config.MaxOrderQty` / `MaxOrderNotional` |
 
@@ -303,11 +308,11 @@ real-world enforcement frequency × impact × matching-engine relevance.
 
 | # | Build | Why | Effort | Layer | Status |
 |---|---|---|---|---|---|
-| 13 | **Randomized iceberg peaks + true non-display** (deterministic refill is sniffable) | Order anticipation / pinging. Softer evidence. | M | **Core** | ◻ |
+| 13 | **Randomized iceberg peaks + true non-display** (deterministic refill is sniffable) | Order anticipation / pinging. Softer evidence. | M | **Core** | ✅ `Config.IcebergPeakJitter` |
 | 14 | **Momentum-ignition / ramping detector** — impact-then-reversal | Usually charged bundled with spoofing. | M | **Surveillance** | ✅ `surveillance.RampingDetector` (directional push; reversal out of scope) |
 | 15 | **Pinging detector** — bursts of tiny IOC / immediately-cancelled orders | Surgical pinging escapes `RateLimiter`. | M | **Surveillance** | ✅ `surveillance.PingingDetector` |
-| 16 | **Asymmetric ingress speed bump on takers** | Latency arb (Flash Boys / IEX). Auction wiring (#7) covers it structurally. | L | **Gateway** | ✅ `examples/gateway` |
-| 17 | **Cross-book `Monitor`** — fan multiple engines for cross-venue OTR / imbalance correlation | Cross-product manipulation (Oystacher $2.5M). | L | **Surveillance** | ◻ (a single `Monitor` already fans many books; a cross-book correlator is the open piece) |
+| 16 | **Asymmetric ingress speed bump on takers** | Latency arb (Flash Boys / IEX). Auction wiring (#7) covers it structurally. | L | **Gateway** | ✅ `gateway.Gateway` speed bump (+ `examples/gateway`) |
+| 17 | **Cross-book `Monitor`** — fan multiple engines for cross-venue OTR / imbalance correlation | Cross-product manipulation (Oystacher $2.5M). | L | **Surveillance** | ✅ `surveillance.CrossBookMonitor` |
 | 18 | **CAT-style export adapter** off the WAL event spine | Post-trade audit (Rule 613). WAL already gives the spine for free. | M | **Layer** | ✅ `examples/gateway` audit sink |
 | 19 | **Guardrail-trip → `EventSink` alert** | Operator paging on the Knight tripwire. | S | **Core** | ✅ `EventHalted` / `EventResumed` |
 
