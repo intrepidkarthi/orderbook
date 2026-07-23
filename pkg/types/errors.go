@@ -31,3 +31,14 @@ var (
 	ErrOrderTypeDisabled       = errors.New("order type is disabled")
 	ErrNewOrdersHalted         = errors.New("engine is cancel-only: new liquidity is not accepted")
 )
+
+// Pre-trade risk / anti-manipulation admission errors. These gate the live
+// ingress path; they are enforced before an order matches (or before a cancel
+// applies), never on the deterministic replay path.
+var (
+	ErrOrderExceedsMaxQty      = errors.New("order quantity exceeds the configured maximum")
+	ErrOrderExceedsMaxNotional = errors.New("order notional exceeds the configured maximum")
+	ErrNotionalOverflow        = errors.New("order notional (price × quantity) overflows int64")
+	ErrCancelTooSoon           = errors.New("order has not met the minimum resting time")
+	ErrMarkStepTooLarge        = errors.New("mark-price update exceeds the maximum allowed step")
+)

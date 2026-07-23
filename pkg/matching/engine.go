@@ -16,6 +16,7 @@
 package matching
 
 import (
+	"math"
 	"sort"
 	"time"
 
@@ -115,6 +116,35 @@ type Config struct {
 	// EventSink, if set, receives the engine's ordered event stream (see
 	// EventSink). nil => no events, zero hot-path overhead.
 	EventSink EventSink
+
+	// --- Pre-trade risk & anti-manipulation admission controls ---
+	// These gate the live ingress path only (they are bypassed on deterministic
+	// replay, which trusts the already-accepted command log). All default to
+	// zero = disabled, and Privileged (liquidation/ADL) orders are exempt from
+	// the size caps and the minimum resting time. See docs/THREAT-MODEL.md.
+
+	// MaxOrderQty rejects any single order larger than this many lots — a
+	// fat-finger / fat-order guard that complements the aggregate Guardrail.
+	// Zero disables it.
+	MaxOrderQty int64
+	// MaxOrderNotional rejects any single limit order whose price × quantity (in
+	// tick·lot units) exceeds this. Market orders carry no ex-ante price and are
+	// bounded by MaxOrderQty only. Zero disables it. Regardless of this cap, an
+	// order whose notional overflows int64 is always rejected.
+	MaxOrderNotional int64
+	// MinRestingTime is an anti-spoofing / anti-flicker control: a resting book
+	// order cannot be cancelled until it has rested at least this long (measured
+	// by the engine clock from placement). A cancel arriving sooner is rejected
+	// with ErrCancelTooSoon; the order stays live and is cancellable once the
+	// minimum elapses. Zero disables it. This targets the JPMorgan/Coscia
+	// spoofing pattern (post size, pull it before it can fill).
+	MinRestingTime time.Duration
+	// MaxMarkStep bounds how far a single SetMarkPrice update may move the mark
+	// from its current value, as a fraction (e.g. 0.20 = ±20%). A larger jump is
+	// rejected with ErrMarkStepTooLarge, so a thin-book oracle pump cannot drag
+	// the price band with it (the Mango / Hyperliquid-JELLY lesson). Zero
+	// disables the guard. The first mark (from 0) is always accepted.
+	MaxMarkStep decimal.Decimal
 }
 
 // DefaultConfig returns a sensible configuration for a symbol.
@@ -150,6 +180,8 @@ type Engine struct {
 	trailingStops map[int64]*types.TrailingStop
 	state         EngineState
 	bandEnabled   bool // config.PriceBand > 0, precomputed to keep decimal off the hot path
+	markStepEnab  bool // config.MaxMarkStep > 0, precomputed
+	replaying     bool // replay/bootstrap mode: bypass live-ingress admission controls
 	orderSeq      int64
 	tradeSeq      int64
 	clock         func() time.Time
@@ -200,12 +232,69 @@ func NewEngine(config Config) *Engine {
 		trailingStops: make(map[int64]*types.TrailingStop),
 		// Resolve the band-enabled flag once (a decimal compare) so the per-order
 		// hot path never touches decimal for the common band-disabled case.
-		bandEnabled: config.PriceBand.GreaterThan(decimal.Zero),
-		clock:       config.Clock,
-		disabled:    disabled,
-		guard:       config.Guardrail,
-		sink:        config.EventSink,
+		bandEnabled:  config.PriceBand.GreaterThan(decimal.Zero),
+		markStepEnab: config.MaxMarkStep.GreaterThan(decimal.Zero),
+		clock:        config.Clock,
+		disabled:     disabled,
+		guard:        config.Guardrail,
+		sink:         config.EventSink,
 	}
+}
+
+// SetReplaying toggles replay/bootstrap mode. In replay mode the engine bypasses
+// the live-ingress admission controls (minimum resting time and the per-order
+// size caps) because the command log it is replaying already reflects commands
+// that passed those checks live — re-litigating them against replay-time
+// timestamps would wrongly reject an accepted cancel and diverge the recovered
+// book. Recovery paths (see pkg/wal Restore) wrap replay in SetReplaying(true) /
+// SetReplaying(false). The deterministic matching itself is unaffected.
+func (e *Engine) SetReplaying(v bool) { e.replaying = v }
+
+// checkedMul multiplies two non-negative int64 values, reporting ok=false on
+// overflow. Used to bound order notional before it can wrap.
+func checkedMul(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	p := a * b
+	if p/b != a || p < 0 {
+		return 0, false
+	}
+	return p, true
+}
+
+// saturatingAdd adds two non-negative int64 values, clamping to MaxInt64 on
+// overflow instead of wrapping — so the guardrail's windowed notional can only
+// ever over-count (trip sooner), never wrap to a small value and miss a trip.
+func saturatingAdd(a, b int64) int64 {
+	s := a + b
+	if s < a { // overflow of two non-negatives
+		return math.MaxInt64
+	}
+	return s
+}
+
+// checkOrderCaps enforces the optional per-order size/notional limits and always
+// rejects an order whose notional overflows int64. Privileged (liquidation/ADL)
+// orders bypass the configured caps but are still overflow-checked. Bypassed in
+// replay mode.
+func (e *Engine) checkOrderCaps(order *types.Order) error {
+	if e.replaying {
+		return nil
+	}
+	if e.config.MaxOrderQty > 0 && !order.Privileged && order.Quantity > e.config.MaxOrderQty {
+		return types.ErrOrderExceedsMaxQty
+	}
+	if order.Type == types.OrderTypeLimit {
+		notional, ok := checkedMul(order.Price, order.Quantity)
+		if !ok {
+			return types.ErrNotionalOverflow
+		}
+		if e.config.MaxOrderNotional > 0 && !order.Privileged && notional > e.config.MaxOrderNotional {
+			return types.ErrOrderExceedsMaxNotional
+		}
+	}
+	return nil
 }
 
 // nextID assigns the order a monotonic engine id if it does not already carry
@@ -317,6 +406,11 @@ func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trad
 	case StateCancelOnly:
 		order.Status = types.OrderStatusRejected
 		return dst, types.OrderStatusRejected, types.ErrNewOrdersHalted
+	}
+	// Pre-trade risk caps (fat-finger size/notional + int64 overflow guard).
+	if err := e.checkOrderCaps(order); err != nil {
+		order.Status = types.OrderStatusRejected
+		return dst, types.OrderStatusRejected, err
 	}
 	if order.Type == types.OrderTypeLimit && !order.Privileged && e.outsideBand(order.Price) {
 		order.Status = types.OrderStatusRejected
@@ -796,7 +890,26 @@ func (e *Engine) State() EngineState { return e.state }
 // evaluated against. The risk layer computes it (e.g. index + clamped basis) and
 // feeds it here; a value <= 0 clears it and the band falls back to the last trade
 // price. Call from the single writer (or via Runner.SetMarkPrice).
-func (e *Engine) SetMarkPrice(price int64) { e.markPrice = price }
+//
+// If Config.MaxMarkStep is set, an update that would move the mark more than that
+// fraction away from its current value is rejected with ErrMarkStepTooLarge and
+// the mark is left unchanged — a thin-book oracle pump then cannot drag the price
+// band with it (the Mango / Hyperliquid-JELLY lesson). The first mark (from an
+// unset 0) and clearing the mark (to 0) are always accepted. A negative price is
+// rejected with ErrInvalidPrice.
+func (e *Engine) SetMarkPrice(price int64) error {
+	if price < 0 {
+		return types.ErrInvalidPrice
+	}
+	if e.markStepEnab && e.markPrice > 0 && price > 0 {
+		cur := decimal.NewFromInt(e.markPrice)
+		if decimal.NewFromInt(price).Sub(cur).Abs().GreaterThan(cur.Mul(e.config.MaxMarkStep)) {
+			return types.ErrMarkStepTooLarge
+		}
+	}
+	e.markPrice = price
+	return nil
+}
 
 // MarkPrice returns the current mark reference (0 if unset).
 func (e *Engine) MarkPrice() int64 { return e.markPrice }
@@ -955,7 +1068,11 @@ func (e *Engine) executeTrade(taker, maker *types.Order, price, qty int64, dst [
 			e.windowStart, e.windowTrades, e.windowNotional = now, 0, 0
 		}
 		e.windowTrades++
-		e.windowNotional += price * qty
+		prod, ok := checkedMul(price, qty)
+		if !ok {
+			prod = math.MaxInt64
+		}
+		e.windowNotional = saturatingAdd(e.windowNotional, prod)
 		if (e.guard.MaxTrades > 0 && e.windowTrades > e.guard.MaxTrades) ||
 			(e.guard.MaxNotional > 0 && e.windowNotional > e.guard.MaxNotional) {
 			e.state = StateHalted
@@ -1042,6 +1159,14 @@ func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
 		}
 		if !order.IsActive() {
 			return nil, types.ErrOrderNotActive
+		}
+		// Minimum resting time: a live cancel arriving before the order has
+		// rested long enough is rejected (anti-spoofing). Bypassed in replay
+		// (the log already reflects an accepted cancel) and for privileged orders.
+		if e.config.MinRestingTime > 0 && !e.replaying && !order.Privileged {
+			if now.Sub(order.CreatedAt) < e.config.MinRestingTime {
+				return nil, types.ErrCancelTooSoon
+			}
 		}
 		if err := order.Cancel(); err != nil {
 			return nil, err

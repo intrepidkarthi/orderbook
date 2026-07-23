@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -118,6 +119,66 @@ func TestWAL_SnapshotThenTail(t *testing.T) {
 
 	if d1, d2 := digest(live), digest(recovered); d1 != d2 {
 		t.Errorf("snapshot+tail recovery != live\n live=%q\n rec =%q", d1, d2)
+	}
+}
+
+// TestWAL_ReplayBypassesAdmissionControls: recovery must reproduce the exact book
+// even when the engine has live-ingress admission controls (minimum resting time,
+// per-order caps) enabled. A cancel accepted live after the order rested long
+// enough would be wrongly rejected on a fast replay if the check re-ran; Restore
+// runs in replay mode so it doesn't, and the recovered book matches live.
+func TestWAL_ReplayBypassesAdmissionControls(t *testing.T) {
+	walPath := filepath.Join(t.TempDir(), "wal.log")
+	now := time.Unix(0, 0).UTC()
+	cfg := func() matching.Config {
+		c := matching.DefaultConfig("X")
+		c.Clock = func() time.Time { return now }
+		c.MinRestingTime = time.Second
+		c.MaxOrderQty = 1000
+		return c
+	}
+
+	w, err := Open(walPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	live := matching.NewEngine(cfg())
+
+	// Two resting asks placed at t=0, logged write-ahead.
+	a1 := newOrder(t, "mm", types.SideSell, 100, 5)
+	_, _ = w.AppendSubmit(a1)
+	_ = w.Sync()
+	live.Process(a1)
+	a2 := newOrder(t, "mm", types.SideSell, 101, 5)
+	_, _ = w.AppendSubmit(a2)
+	_ = w.Sync()
+	live.Process(a2)
+
+	// Advance the clock past the minimum resting time, then cancel a2 — accepted
+	// live because it has rested 2s (> 1s).
+	now = time.Unix(2, 0).UTC()
+	if _, err := live.Cancel(a2.ID, "mm"); err != nil {
+		t.Fatalf("live cancel after min-rest should succeed: %v", err)
+	}
+	_, _ = w.AppendCancel(a2.ID, "mm")
+	_ = w.Sync()
+	_ = w.Close()
+
+	// Recover into a fresh engine with the SAME controls enabled. Restore replays
+	// fast (near-zero elapsed) but in replay mode, so the cancel still applies.
+	entries, err := ReadAll(walPath)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	recovered := matching.NewEngine(cfg())
+	Restore(recovered, entries)
+
+	if d1, d2 := digest(live), digest(recovered); d1 != d2 {
+		t.Errorf("recovery with admission controls diverged\n live=%q\n rec =%q", d1, d2)
+	}
+	// Sanity: only the 100 ask should remain.
+	if got := digest(recovered); got != "1|SELL|100|5\n" {
+		t.Errorf("recovered book = %q, want the single 100 ask", got)
 	}
 }
 

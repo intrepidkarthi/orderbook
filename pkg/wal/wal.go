@@ -169,7 +169,15 @@ func lastSeq(path string) (int64, error) {
 // command stream. Orders are replayed fresh so the engine reassigns ids
 // deterministically — a cancel's recorded id therefore matches the replayed
 // order. Cancels for already-gone orders are ignored (idempotent under redelivery).
+//
+// Replay runs with the engine in replay mode (SetReplaying) so its live-ingress
+// admission controls — minimum resting time and the per-order size caps — do not
+// re-litigate commands the log already recorded as accepted; re-checking them
+// against replay-time timestamps would wrongly reject an accepted cancel and
+// diverge the recovered book. The deterministic matching itself is unchanged.
 func Restore(eng *matching.Engine, entries []Entry) {
+	eng.SetReplaying(true)
+	defer eng.SetReplaying(false)
 	for _, e := range entries {
 		switch e.Kind {
 		case KindSubmit:

@@ -89,7 +89,9 @@ func (r *Runner) dispatch(cmd command) {
 	case cmdCancelOnly:
 		r.engine.SetCancelOnly()
 	case cmdSetMark:
-		r.engine.SetMarkPrice(cmd.cancelID) // cancelID reused as the int64 payload
+		// cancelID reused as the int64 payload; a rejected step (ErrMarkStepTooLarge)
+		// simply leaves the mark unchanged on this async path.
+		_ = r.engine.SetMarkPrice(cmd.cancelID)
 	}
 	if cmd.reply != nil {
 		cmd.reply <- rep

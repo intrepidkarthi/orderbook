@@ -15,7 +15,9 @@ func TestMarkPriceBand(t *testing.T) {
 	e.Process(lim(t, "a", types.SideBuy, 200, 1))
 	e.Process(lim(t, "b", types.SideSell, 200, 1)) // trades → last=200
 	// ...but the risk layer marks fair value at 100.
-	e.SetMarkPrice(100)
+	if err := e.SetMarkPrice(100); err != nil {
+		t.Fatalf("SetMarkPrice(100): %v", err)
+	}
 
 	// 105 is within ±10% of the *mark* (100) even though last=200.
 	if r := e.Process(lim(t, "c", types.SideBuy, 105, 1)); r.Status == types.OrderStatusRejected {
@@ -26,7 +28,9 @@ func TestMarkPriceBand(t *testing.T) {
 		t.Errorf("130 outside band of mark 100 should be rejected, got %q", r.Status)
 	}
 	// Clearing the mark falls back to last trade (200), so 130 is now fine.
-	e.SetMarkPrice(0)
+	if err := e.SetMarkPrice(0); err != nil {
+		t.Fatalf("SetMarkPrice(0): %v", err)
+	}
 	if r := e.Process(lim(t, "e", types.SideBuy, 190, 1)); r.Status == types.OrderStatusRejected {
 		t.Errorf("190 within band of last 200 should be accepted after clearing mark, got %v", r.RejectionReason)
 	}
