@@ -189,6 +189,7 @@ The same core powers two additional layers, kept strictly above the library:
 
 ```sh
 go run ./examples/basic         # place two orders and watch them match
+go run ./examples/eventfeed     # consume the event stream as an exec-report + position feed
 go run ./examples/marketmaker   # backtest an Avellaneda–Stoikov maker
 go run ./cmd/obdemo             # end-to-end matching demonstration
 go run ./cmd/l2capture          # live order-flow imbalance on Coinbase data

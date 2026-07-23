@@ -287,7 +287,11 @@ The engine is the matcher; a full venue needs these layers (intentionally *not* 
 the core — see [CONFIG.md → what the core does not configure](CONFIG.md#what-the-core-deliberately-does-not-configure)):
 
 - **Protocol adapters** — FIX/OUCH/SBE/WebSocket codecs translating the wire to
-  `types.Order`.
+  `types.Order`, and translating the `EventSink` stream back to execution reports /
+  market data. `examples/eventfeed` shows the pattern: consume the sequenced event
+  stream into an exec-report feed and an order→deal→position projection (the
+  MetaTrader-style lineage). A common deployment is as the **internal ECN behind an
+  MT5 Gateway** — the real price-time crossing venue a B-book broker lacks.
 - **Pre-trade risk** — credit, margin, buying power, position/notional caps, rate
   limits (in the gateway, before the sequencer).
 - **Persistence** — durable WAL + snapshot store + replication.
