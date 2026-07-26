@@ -19,6 +19,52 @@ A guiding principle throughout:
 
 ---
 
+## 0. Data and scope
+
+A standing objection to any microstructure work is "your data isn't deep enough."
+It deserves a precise answer, because the answer here is unusual: this repository
+does not *consume* order-book data, it *produces* it.
+
+**What the engine emits.** Every order carries a persistent `int64` id for its
+entire life. `matching.EventSink` streams the per-order lifecycle — `Accepted`,
+`Rejected`, `Trade`, `Canceled`, `Triggered`, `Halted`, `Resumed` — each stamped
+with a monotonic `Event.Seq`, and `OrderBook.SnapshotL3(depth)` returns the
+order-by-order (market-by-order) book. That is L3/MBO granularity *at the
+source*, with no inference and no gaps: the event sequence is the matching
+engine's own history, not a reconstruction of it.
+
+**What the simulator adds.** Experiments run in `pkg/sim` against something no
+commercial feed can sell: **ground truth**. We know the true aggressor of every
+trade, the λ we configured, and the informed-flow fraction. On real data the
+aggressor side is *inferred* — the Lee-Ready / tick rule — and that inference is
+noisy. Measuring how noisy is itself an experiment here (§4), and it is only
+possible because there is a ground truth to check the inference against.
+
+**What we do not have.** Real-market capture is thin. `cmd/l2capture` pulls live
+**L2** from Coinbase, and the one study that has touched real data (§1) ran on
+replayed L2. Redoing OFI on real market-by-order data is not possible with what
+ships today. That is a genuine gap rather than a considered choice, and a
+real-MBO capture path is a welcome contribution.
+
+**On "L4".** Some crypto vendors market a *Level 4* tier: per-order events with
+persistent ids, tracked from submission until the order leaves the matching
+engine. Traditional venues have no such tier — both
+[CME](https://www.cmegroup.com/articles/faqs/market-by-order-mbo.html) and
+[Databento](https://databento.com/microstructure/mbo) treat market-by-order as
+the most granular product that exists, and an ITCH-style MBO feed already carries
+per-order add / modify / cancel / execute under stable ids. The label is newer
+than the capability it describes.
+
+**Why granularity is not the crux.** Deeper data raises *contemporaneous* R²: it
+resolves the mechanism by which a move happened. It does not manufacture forecast
+power, which is the claim §1 exists to test. The point cuts both ways, and the
+honest version is this — at sub-second horizons, queue position from MBO carries
+real edge, and serious market making depends on it. But that is latency-sensitive
+execution, a different question from whether a book-imbalance number predicts the
+next bar. No feed upgrade converts one into the other.
+
+---
+
 ## 1. Order-Flow Imbalance (OFI)
 
 **Source.** Cont, Kukanov & Stoikov, *The Price Impact of Order Book Events*

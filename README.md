@@ -205,7 +205,10 @@ The same core powers two additional layers, kept strictly above the library:
   deterministic exchange simulator, an Avellaneda–Stoikov market-making backtest,
   and a reproducible study of OFI's contemporaneous-versus-predictive power.
   Market-abuse surveillance (spoofing/layering and rate limits) and call-auction
-  uncrossing are included.
+  uncrossing are included. The engine is its own data source — per-order (L3 /
+  market-by-order) event streams plus simulator ground truth; see
+  [data and scope](docs/research-roadmap.md#0-data-and-scope) for what that does
+  and doesn't cover.
 - **Interactive demo** — the engine compiled to WebAssembly, running live in the
   [browser](https://intrepidkarthi.github.io/orderbook/) to visualize matching
   and market making.
