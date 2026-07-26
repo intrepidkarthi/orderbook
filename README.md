@@ -195,6 +195,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [research-roadmap.md](docs/research-roadmap.md) | The microstructure research agenda: OFI, Kyle's λ, Avellaneda–Stoikov, delta/CVD — and [what data it runs on](docs/research-roadmap.md#0-data-and-scope). |
 | [research/ofi.md](docs/research/ofi.md) | Does order-flow imbalance predict the next move? Contemporaneous R² ≈ 0.17, predictive R² ≈ 0.0003 — a ~540× gap, and the little that remains points the other way. |
 | [research/kyle-lambda.md](docs/research/kyle-lambda.md) | Price impact measured end to end: the λ a real book produces, why it scales as 1/depth, and what a block order costs against working the same quantity. |
+| [research/order-flow.md](docs/research/order-flow.md) | Delta, CVD, and absorption against ground truth: a 94.5%-accurate aggressor rule builds a CVD wrong by 169%, and CVD divergence loses to a price-only control. |
 | [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.7.0) with breaking-change notes. |
 
 ---
@@ -203,9 +204,11 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 
 The same core powers two additional layers, kept strictly above the library:
 
-- **Research harness** — order-flow-imbalance and book-imbalance signals, a
-  deterministic exchange simulator, an Avellaneda–Stoikov market-making backtest,
-  and a reproducible study of OFI's contemporaneous-versus-predictive power.
+- **Research harness** — order-flow-imbalance, price-impact, and delta/CVD
+  signals, a deterministic exchange simulator, an Avellaneda–Stoikov
+  market-making backtest, and three reproducible studies in
+  [docs/research/](docs/research) that test the popular claims against ground
+  truth — and mostly refute them.
   Market-abuse surveillance (spoofing/layering and rate limits) and call-auction
   uncrossing are included. The engine is its own data source — per-order (L3 /
   market-by-order) event streams plus simulator ground truth; see
@@ -223,6 +226,7 @@ go run ./examples/marketmaker   # backtest an Avellaneda–Stoikov maker
 go run ./cmd/obdemo             # end-to-end matching demonstration
 go run ./cmd/ofistudy           # is order-flow imbalance predictive, or just contemporaneous?
 go run ./cmd/lambdastudy        # Kyle's λ: price impact, depth, and the cost of a block order
+go run ./cmd/flowstudy          # delta/CVD/absorption vs ground truth: what survives a control
 go run ./cmd/l2capture          # live order-flow imbalance on Coinbase data
 ```
 

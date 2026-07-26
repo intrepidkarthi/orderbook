@@ -7,6 +7,21 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- **Order-flow study** (research-roadmap.md §4), completing the research agenda:
+  `signals.CVD`, `signals.TickRuleSide` / `signals.LeeReadySide` (aggressor
+  inference, there to be measured against ground truth rather than used in place
+  of it), `signals.AbsorptionConfig`, `signals.Divergence`, and
+  `signals.WilsonInterval`; `study.RunInference`, `study.RunDivergence` (with a
+  price-only control arm), `study.RunAbsorption`, `study.RunSqueezeDemo`, and
+  `study.PoolSignals`; `cmd/flowstudy` runs them all. Write-up:
+  [order-flow.md](docs/research/order-flow.md) — a 94.5%-accurate tick rule
+  builds a CVD wrong by 169% (sometimes with the opposite sign); CVD divergence
+  beats its base rate but loses to a price-only control, so the CVD half adds
+  nothing; absorption predicts nothing, though the mechanism is demonstrably
+  real.
+
 ## [0.7.0] - 2026-07-26
 
 The research release: the microstructure agenda's first two items measured,

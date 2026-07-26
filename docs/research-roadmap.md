@@ -210,6 +210,12 @@ rather than assert.
 
 ## 4. Retail Order Flow — Delta, CVD, Absorption
 
+> **Status: done.** Results in [research/order-flow.md](research/order-flow.md);
+> reproduce with `go run ./cmd/flowstudy`. Headline: the tick rule is 94.5%
+> accurate per trade and still builds a CVD wrong by 169%; CVD divergence beats
+> its base rate but loses to a price-only control, so the CVD half adds nothing;
+> absorption predicts nothing, though the mechanism itself is real.
+
 **The claim in the wild.** Volume + delta + open interest reveal "trapped
 traders" who are forced to exit, and that forced exit drives price; CVD
 divergences mark reversals.
