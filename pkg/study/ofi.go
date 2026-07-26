@@ -1,11 +1,20 @@
 // Package study contains reproducible microstructure experiments that put the
 // popular trading claims to the test on controllable, deterministic data.
 //
-// The first experiment tackles the headline claim from the order-flow-imbalance
-// literature and its retail retelling ("the order book predicts the next move").
-// It reproduces the distinction the research plan insists on (docs/research-
-// roadmap.md §1): OFI's relationship to price is strong *contemporaneously* (over
-// the same interval) but far weaker as a *forecast* of the next interval.
+// RunOFI tackles the headline claim from the order-flow-imbalance literature and
+// its retail retelling ("the order book predicts the next move"). It reproduces
+// the distinction the research plan insists on (docs/research-roadmap.md §1):
+// OFI's relationship to price is strong *contemporaneously* (over the same
+// interval) but far weaker as a *forecast* of the next interval.
+//
+// RunKyleLambda, RunKyleDepth, and RunExecution cover price impact per Kyle
+// (1985) (§2): the λ that emerges from a real book, its inverse relationship to
+// depth, and the block-versus-sliced execution comparison that shows why
+// execution algorithms exist. RunLambdaCalibration validates the estimator
+// itself against a known λ.
+//
+// Every experiment is seeded and deterministic: the same Config reproduces the
+// same numbers, which is what makes the write-ups in docs/research checkable.
 package study
 
 import (
