@@ -19,7 +19,7 @@ func main() {
 	fmt.Println(line)
 	fmt.Printf("  %-6s %-10s %-22s %-22s\n", "seed", "N", "contemporaneous R²", "predictive R²")
 
-	for _, seed := range []int64{1, 2, 7} {
+	for seed := int64(1); seed <= 10; seed++ {
 		r := study.RunOFI(study.OFIConfig{
 			Steps:        5000,
 			Seed:         seed,
@@ -30,8 +30,9 @@ func main() {
 	}
 
 	fmt.Println(line)
-	fmt.Println("  Verdict: OFI explains ~a third of the SAME-interval move but")
-	fmt.Println("  ~nothing of the NEXT one. The order book describes the move as")
-	fmt.Println("  it happens; it does not forecast it. Contemporaneous ≠ predictive.")
+	fmt.Println("  Verdict: OFI explains ~17% of the SAME-interval move but ~0.03%")
+	fmt.Println("  of the NEXT one — a ~540x gap. The order book describes the move")
+	fmt.Println("  as it happens; it does not forecast it. Contemporaneous ≠ predictive.")
+	fmt.Println("  Full write-up: docs/research/ofi.md")
 	fmt.Println(line)
 }

@@ -156,9 +156,9 @@ Two things the internet usually skips:
   imbalance (OFI) has a *strong* relationship to price — but **contemporaneously**
   (over the *same* instant), which is nearly mechanical. As a *forecast* of the
   *next* move it's close to nothing. We tested exactly this in
-  [`pkg/study`](../pkg/study): contemporaneous R² ≈ **0.33**, predictive R² ≈
-  **0.00**. Run it: `go run ./cmd/ofistudy`. See
-  [research-roadmap.md](research-roadmap.md).
+  [`pkg/study`](../pkg/study): contemporaneous R² ≈ **0.17**, predictive R² ≈
+  **0.0003** — a ~540× gap. Run it: `go run ./cmd/ofistudy`. Full write-up:
+  [research/ofi.md](research/ofi.md).
 
 ---
 
