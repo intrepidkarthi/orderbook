@@ -7,6 +7,12 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-26
+
+The research release: the microstructure agenda's first two items measured,
+written up, and checked in — plus an honest account of what data the harness
+runs on.
+
 ### Added
 
 - **Kyle's λ price-impact study** (research-roadmap.md §2): `signals.SignedFlow`
@@ -121,7 +127,8 @@ trailing), GTC/IOC/FOK, self-trade prevention, a price-band circuit breaker, FIF
 and pro-rata allocation, L1/L2/L3 market data, a surveillance starter kit, and a
 market-microstructure research harness with a WebAssembly demo.
 
-[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.3.0...v0.4.0
