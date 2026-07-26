@@ -7,6 +7,12 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-26
+
+Completes the microstructure research agenda. All four roadmap items are now
+implemented, measured, and written up in [docs/research/](docs/research) — and
+most of the popular claims they test do not survive contact with ground truth.
+
 ### Added
 
 - **Order-flow study** (research-roadmap.md §4), completing the research agenda:
@@ -117,7 +123,7 @@ primitive; a per-symbol `Shards` router; an event-stream adapter example
 Determinism & integration seam. **Phase A:** an injectable `Clock` (byte-identical
 replay), replay-equivalence and zero-allocation CI gates, feature-flagged exotic
 order types (`DisabledClasses`), degraded states (`Open` / `CancelOnly` / `Halted`),
-and a self-output `Guardrail`. **Phase B:** a monotonic `EngineSeq` + typed
+and a self-output `Guardrail`. **Phase B:** a monotonic `Event.Seq` + typed
 `EventSink` event stream, `TakeSnapshot` / `RestoreEngine`, and bounded
 backpressure (`TrySubmit` → `ErrQueueFull`).
 
@@ -142,7 +148,8 @@ trailing), GTC/IOC/FOK, self-trade prevention, a price-band circuit breaker, FIF
 and pro-rata allocation, L1/L2/L3 market data, a surveillance starter kit, and a
 market-microstructure research harness with a WebAssembly demo.
 
-[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.4.0...v0.5.0

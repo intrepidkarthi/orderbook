@@ -196,7 +196,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [research/ofi.md](docs/research/ofi.md) | Does order-flow imbalance predict the next move? Contemporaneous R² ≈ 0.17, predictive R² ≈ 0.0003 — a ~540× gap, and the little that remains points the other way. |
 | [research/kyle-lambda.md](docs/research/kyle-lambda.md) | Price impact measured end to end: the λ a real book produces, why it scales as 1/depth, and what a block order costs against working the same quantity. |
 | [research/order-flow.md](docs/research/order-flow.md) | Delta, CVD, and absorption against ground truth: a 94.5%-accurate aggressor rule builds a CVD wrong by 169%, and CVD divergence loses to a price-only control. |
-| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.7.0) with breaking-change notes. |
+| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.8.0) with breaking-change notes. |
 
 ---
 
