@@ -67,6 +67,11 @@ next bar. No feed upgrade converts one into the other.
 
 ## 1. Order-Flow Imbalance (OFI)
 
+> **Status: done.** Results in [research/ofi.md](research/ofi.md); reproduce with
+> `go run ./cmd/ofistudy`. Headline: contemporaneous R² ≈ 0.17 against predictive
+> R² ≈ 0.0003 — a ~540× gap, and the predictive slope is negative in nine seeds
+> out of ten.
+
 **Source.** Cont, Kukanov & Stoikov, *The Price Impact of Order Book Events*
 (Journal of Financial Econometrics, 2014).
 
@@ -159,8 +164,7 @@ unrealistically generous).
 
 **Write-up.** [research/kyle-lambda.md](research/kyle-lambda.md), establishing
 the `docs/research/` results directory the methodology section (§5) has always
-required. The OFI write-up (§1) still needs backfilling into it — its verdict
-currently survives only as a line in [LEARN.md](LEARN.md).
+required.
 
 ---
 

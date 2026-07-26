@@ -17,15 +17,26 @@ versions may include breaking changes).
   and permanent impact), and `study.RunLambdaCalibration` (estimator validation);
   `cmd/lambdastudy` runs them all.
 - **`docs/research/`**, the results directory the methodology has always
-  required, opening with
+  required, with two write-ups.
   [kyle-lambda.md](docs/research/kyle-lambda.md): λ ∝ 1/depth holds, slicing is
   ~8% cheaper per lot and completes where a block leaves ~8% unfilled, and
   permanent impact is unchanged either way — slicing buys back the temporary
-  component, not the permanent one.
+  component, not the permanent one. [ofi.md](docs/research/ofi.md): the §1
+  result written up properly over ten seeds, including that the predictive slope
+  is negative in nine of them.
 - **`docs/research-roadmap.md` §0 "Data and scope"**: what the engine emits
   (per-order L3/MBO event streams), what simulator ground truth adds, what is
   missing (real capture is L2-only), and why "L4" is a vendor label rather than
   an exchange tier.
+
+### Fixed
+
+- **Overstated OFI figure in the docs.** `LEARN.md` claimed a contemporaneous
+  R² ≈ 0.33 and `cmd/ofistudy` called it "~a third" of the same-interval move.
+  The measured mean across ten seeds is **0.1685** (range 0.0704–0.2397); the
+  three seeds the CLI printed were the joint highest of the first ten. Both
+  numbers corrected and the CLI widened to ten seeds. The verdict is unchanged —
+  predictive R² was always ~0.0003.
 
 ## [0.6.0] - 2026-07-23
 
