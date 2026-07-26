@@ -4,8 +4,8 @@
 > harness plus an animated, hosted explainer for market microstructure, market
 > making, and strategy backtesting.
 
-Status: **implemented** (v0.5.0 released; market-integrity layer on `main`) ·
-Author: Karthikeyan NG · Last updated: 2026-07-23
+Status: **implemented** (v0.6.0 released — the market-integrity layer shipped in
+it) · Author: Karthikeyan NG · Last updated: 2026-07-26
 
 Companion documents:
 - [`THREAT-MODEL.md`](THREAT-MODEL.md) — order-book attacks & defenses, with real cases.
