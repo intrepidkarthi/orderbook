@@ -7,10 +7,33 @@ import (
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
 
-// testSeeds is the fixed seed set the comparative claims are averaged over.
-// Averaging matters: single seeds are noisy, and a test that happened to pick a
-// favourable one would be measuring luck.
+// testSeeds drives the per-seed invariants — accounting, determinism, sign
+// conventions — which must hold on every single run.
 var testSeeds = []int64{1, 2, 3, 4, 5}
+
+// comparativeSeeds drives the mean-based claims, which are statistical rather
+// than per-run. Five seeds is not enough for them: the realized-impact gap is
+// carried by the runs where a block exhausts the book, so a narrow window can
+// land entirely between such events and reverse the comparison. Twenty is stable
+// across every window checked.
+var comparativeSeeds = func() []int64 {
+	s := make([]int64, 20)
+	for i := range s {
+		s[i] = int64(i + 1)
+	}
+	return s
+}()
+
+func meanOver(seeds []int64, pick func(ExecutionResult) (block, sliced float64)) (float64, float64) {
+	var b, s float64
+	for _, seed := range seeds {
+		bi, si := pick(execFor(seed))
+		b += bi
+		s += si
+	}
+	n := float64(len(seeds))
+	return b / n, s / n
+}
 
 func execFor(seed int64) ExecutionResult {
 	return RunExecution(ExecutionConfig{Seed: seed, Quantity: 400, Slices: 10, SliceGap: 20})
@@ -55,34 +78,26 @@ func TestRunExecution_Deterministic(t *testing.T) {
 // The headline result: releasing the same quantity gradually costs less per lot
 // than dumping it in one marketable order.
 func TestRunExecution_SlicingCostsLessPerLot(t *testing.T) {
-	var block, sliced float64
-	for _, seed := range testSeeds {
-		r := execFor(seed)
-		block += r.Block.SlipPerLot
-		sliced += r.Sliced.SlipPerLot
-	}
-	n := float64(len(testSeeds))
-	block, sliced = block/n, sliced/n
-
+	block, sliced := meanOver(comparativeSeeds, func(r ExecutionResult) (float64, float64) {
+		return r.Block.SlipPerLot, r.Sliced.SlipPerLot
+	})
 	if !(sliced < block) {
 		t.Errorf("mean slip per lot: sliced %.3f, block %.3f — expected slicing to be cheaper",
 			sliced, block)
 	}
 }
 
-// A block order shoves the price further at the moment it lands. This is the
-// temporary impact that slicing exists to avoid.
+// A block order shoves the price further at the moment it lands — the temporary
+// impact slicing exists to avoid. This is a claim about the mean, not about
+// every run: per seed the comparison is close to a coin flip, and the gap comes
+// from the runs where the block chews through the resting book.
 func TestRunExecution_BlockCausesLargerImmediateImpact(t *testing.T) {
-	var block, sliced float64
-	for _, seed := range testSeeds {
-		r := execFor(seed)
-		block += r.Block.RealizedImpact
-		sliced += r.Sliced.RealizedImpact
-	}
-	n := float64(len(testSeeds))
-	if block/n <= sliced/n {
+	block, sliced := meanOver(comparativeSeeds, func(r ExecutionResult) (float64, float64) {
+		return r.Block.RealizedImpact, r.Sliced.RealizedImpact
+	})
+	if block <= sliced {
 		t.Errorf("mean realized impact: block %.3f, sliced %.3f — expected the block to move price more",
-			block/n, sliced/n)
+			block, sliced)
 	}
 }
 
