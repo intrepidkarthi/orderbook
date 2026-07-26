@@ -222,16 +222,58 @@ aggressor volume), **CVD** (cumulative delta), open-interest mechanics
 and measurement-dependent (aggressor side is usually *inferred*, e.g. via the
 tick / Lee-Ready rule, which is noisy).
 
-**Implementation** (`pkg/signals`): delta, CVD, absorption detector (high delta,
-little price movement), and a "CVD divergence" flag.
+**Why this one matters most.** Every retail order-flow tool is built on *inferred*
+aggressor side, because no public feed publishes it. Here the engine assigns it
+(`Trade.TakerSide`), so we can measure the inference error itself — the one
+experiment on this agenda that cannot be run on purchased data at any
+granularity, no matter how deep (§0).
 
-**Experiments.**
-1. In `pkg/sim`, where we *know* the true aggressor, quantify how badly the
-   inferred-aggressor tick rule mislabels flow.
-2. **Base-rate test:** does a "CVD divergence" precede a reversal more often than
-   chance? Report the hit-rate with confidence intervals and after costs.
-3. Reproduce an absorption → squeeze episode in simulation to show the mechanism
-   is *possible*, while separating "possible" from "reliably tradable".
+**Signals** (`pkg/signals/flow.go`):
+
+- Delta is already implemented: it *is* `SignedFlow` from the Kyle work. Reuse
+  it; do not add a second name for the same quantity.
+- `CVD` — a streaming cumulative-delta accumulator shaped like the existing `OFI`
+  type (`Observe`/`Value`/`Reset`).
+- `TickRuleSide(price, prevPrice, prevSide)` — the classic tick test: uptick is a
+  buy, downtick a sell, zero-tick repeats the previous classification.
+- `LeeReadySide(price, mid, prevPrice, prevSide)` — the quote rule (above the mid
+  is a buy, below a sell), falling back to the tick test exactly at the mid.
+- `AbsorptionDetector` — flags a window carrying large |delta| with little price
+  movement: aggressive flow being eaten by passive size.
+- `CVDDivergence` — flags price making a higher high while CVD makes a lower
+  high, and the mirror case.
+
+**Stats** (`pkg/signals/stats.go`): `WilsonInterval(successes, n, z)`. Any
+hit-rate claim below is reported with it — a bare percentage over a few hundred
+episodes is not a result.
+
+**Experiments** (`pkg/study/flow.go`, runnable via `cmd/flowstudy`):
+
+1. **How wrong is the inferred aggressor?** Classify every simulated trade with
+   the tick rule and with Lee-Ready, compare against the engine's truth, and
+   report per-trade accuracy. Then report what practitioners actually care about:
+   the error in the *derived* series — inferred CVD versus true CVD, as terminal
+   drift and as correlation over the path. Per-trade accuracy can look
+   respectable while the cumulative series walks away, because misclassifications
+   do not cancel; that gap is the finding.
+2. **Do CVD divergences precede reversals?** Detect divergences, then measure how
+   often a reversal follows within a fixed horizon. Report the hit-rate **beside
+   the unconditional base rate** with Wilson intervals on both. A 55% hit-rate
+   against a 54% base rate is nothing, and reporting it without the base rate is
+   the single most common way this genre oversells itself. Then subtract costs.
+3. **Absorption → squeeze.** Construct the episode deliberately in `pkg/sim`: a
+   large passive wall eats aggressive flow, then pulls, and price gaps. This
+   shows the mechanism is *real*. Separately, measure how often absorption is
+   followed by a directional move across ordinary runs — the gap between "this
+   can happen" and "this is tradable" is the entire point, and both numbers must
+   appear together.
+
+**Honest verdict criterion.** Report the base rate next to every hit-rate, and
+the inference error next to every inferred-aggressor result. If divergences do
+not beat their base rate, publish that — §5 says a rigorous null is a result, and
+this is the item most likely to produce one.
+
+**Write-up.** `docs/research/order-flow.md`.
 
 ---
 
