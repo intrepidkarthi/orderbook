@@ -110,13 +110,50 @@ thin books → large λ.
 experiences as bad luck: stop-losses hit then reversing (a liquidity pocket with
 known λ), and why large players slice orders (minimizing total λ × flow).
 
-**Experiments** (best done in `pkg/sim`, where we know ground truth):
-1. Estimate λ by regressing price change on signed flow across controlled
-   simulated sessions; recover the λ we configured.
-2. Show λ scales inversely with book depth.
-3. **Execution study:** one large marketable order vs the same quantity sliced —
-   measure realized impact and implementation shortfall. Reproduces why
-   execution algos exist.
+**Ground truth.** `types.Trade.TakerSide` records which side crossed the spread,
+assigned by the matching engine itself. Signed order flow is therefore *exact*
+here — no Lee-Ready inference, no tick rule, no misclassification to correct for.
+That is the whole reason λ is worth measuring in `pkg/sim` first (§0).
+
+**Estimator** (`pkg/signals`):
+
+- `SignedFlow(trades []*types.Trade) int64` — Σ `+qty` for buyer-initiated and
+  `−qty` for seller-initiated trades, read off `TakerSide`.
+- `EstimateLambda(flow, dMid []float64) LambdaFit` — OLS fit of `ΔP = λ·y + c`,
+  returning `LambdaFit{Lambda, Intercept, R2, N}`. Thin Kyle-semantics wrapper
+  over the existing `LinReg`; λ is in ticks per lot.
+
+**Experiments** (`pkg/study`, runnable via `cmd/lambdastudy`):
+
+1. **Estimator validation.** Generate a synthetic path `ΔP = λ·y + ε` with a
+   *known* λ and confirm the estimator recovers it, with R² degrading as ε grows.
+   This is a unit test of the instrument, not a claim about markets — recovering
+   a λ you injected is circular by construction, and the write-up must say so
+   rather than present it as a finding. It earns its place only because every
+   number below depends on the estimator being right.
+2. **Emergent λ.** Run the real engine with no λ parameter anywhere: λ is not
+   configured, it *falls out* of the book's depth and the matching rules.
+   Regress Δmid on signed flow per interval and report λ with its R².
+3. **λ versus depth.** Sweep resting depth and re-estimate. Kyle predicts
+   λ ∝ 1/depth; report the fitted relationship and whether it actually holds on
+   an integer-tick book, where quantization bites at thin depths.
+4. **Execution study.** One block marketable order of size *Q* against the same
+   *Q* sliced into *n* children released over time, from an identical book and
+   seed. Report, in ticks: arrival mid, execution VWAP, **implementation
+   shortfall** (`(VWAP − arrival) × Q`, signed by side), **realized impact**
+   (mid immediately after completion − arrival), and **permanent impact** (mid
+   after a recovery window − arrival). The block-versus-slice gap, and the
+   temporary component that decays once the pressure stops, is the mechanical
+   reason execution algorithms exist.
+
+**Honest verdict criterion.** Report λ with R² and interval count, never λ alone
+— a slope fitted through noise is still a slope. If slicing does not beat the
+block in this simulator, say so and explain what the simulator is missing
+(most likely: noise traders that replenish too fast, making liquidity recovery
+unrealistically generous).
+
+**Write-up.** `docs/research/kyle-lambda.md`, establishing the results directory
+the methodology section (§5) has always required.
 
 ---
 
