@@ -100,6 +100,11 @@ edge does not survive costs, say so plainly.
 
 ## 2. Price Impact — Kyle's Lambda
 
+> **Status: done.** Results in [research/kyle-lambda.md](research/kyle-lambda.md);
+> reproduce with `go run ./cmd/lambdastudy`. Headline: λ ∝ 1/depth holds, and
+> slicing a large order buys back the *temporary* impact but not the permanent
+> one.
+
 **Source.** Kyle, *Continuous Auctions and Insider Trading* (Econometrica, 1985).
 
 **Idea.** `ΔP = λ × (signed order flow)`. λ is price impact per unit of volume —
@@ -152,8 +157,10 @@ block in this simulator, say so and explain what the simulator is missing
 (most likely: noise traders that replenish too fast, making liquidity recovery
 unrealistically generous).
 
-**Write-up.** `docs/research/kyle-lambda.md`, establishing the results directory
-the methodology section (§5) has always required.
+**Write-up.** [research/kyle-lambda.md](research/kyle-lambda.md), establishing
+the `docs/research/` results directory the methodology section (§5) has always
+required. The OFI write-up (§1) still needs backfilling into it — its verdict
+currently survives only as a line in [LEARN.md](LEARN.md).
 
 ---
 

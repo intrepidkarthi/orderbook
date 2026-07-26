@@ -7,6 +7,26 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- **Kyle's λ price-impact study** (research-roadmap.md §2): `signals.SignedFlow`
+  and `signals.EstimateLambda` (fits `ΔP = λ·y`, reporting λ with R² and N);
+  `study.RunKyleLambda` (the λ that emerges from a real book, with none
+  configured), `study.RunKyleDepth` (λ ∝ 1/depth sweep), `study.RunExecution`
+  (block vs sliced execution, scored on implementation shortfall plus realized
+  and permanent impact), and `study.RunLambdaCalibration` (estimator validation);
+  `cmd/lambdastudy` runs them all.
+- **`docs/research/`**, the results directory the methodology has always
+  required, opening with
+  [kyle-lambda.md](docs/research/kyle-lambda.md): λ ∝ 1/depth holds, slicing is
+  ~8% cheaper per lot and completes where a block leaves ~8% unfilled, and
+  permanent impact is unchanged either way — slicing buys back the temporary
+  component, not the permanent one.
+- **`docs/research-roadmap.md` §0 "Data and scope"**: what the engine emits
+  (per-order L3/MBO event streams), what simulator ground truth adds, what is
+  missing (real capture is L2-only), and why "L4" is a vendor label rather than
+  an exchange tier.
+
 ## [0.6.0] - 2026-07-23
 
 The market-integrity release: a research-grounded threat model

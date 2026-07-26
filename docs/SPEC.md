@@ -149,7 +149,7 @@ orderbook/
 │   ├── study/                 microstructure studies over captured data
 │   ├── sim/                    exchange simulator + synthetic agents
 │   └── backtest/               harness + performance metrics
-├── cmd/                        obdemo, obwasm, surveil, l2capture, obmm, ofistudy
+├── cmd/                        obdemo, obwasm, surveil, l2capture, obmm, ofistudy, lambdastudy
 ├── examples/                   basic, eventfeed, gateway, marketmaker, signals
 └── web/                        React + TypeScript animated demo (see DEMO-SPEC.md)
 ```

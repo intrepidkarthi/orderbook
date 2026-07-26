@@ -192,7 +192,8 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [SPEC.md](docs/SPEC.md) | Architecture, the order model, core design decisions, and performance targets. |
 | [BENCHMARKS.md](docs/BENCHMARKS.md) | Performance results, methodology, and how to reproduce. |
 | [LEARN.md](docs/LEARN.md) | Order books and market making from first principles. |
-| [research-roadmap.md](docs/research-roadmap.md) | The microstructure research agenda: OFI, Kyle's λ, Avellaneda–Stoikov, delta/CVD. |
+| [research-roadmap.md](docs/research-roadmap.md) | The microstructure research agenda: OFI, Kyle's λ, Avellaneda–Stoikov, delta/CVD — and [what data it runs on](docs/research-roadmap.md#0-data-and-scope). |
+| [research/kyle-lambda.md](docs/research/kyle-lambda.md) | Price impact measured end to end: the λ a real book produces, why it scales as 1/depth, and what a block order costs against working the same quantity. |
 | [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → the unreleased market-integrity set) with breaking-change notes. |
 
 ---
@@ -219,6 +220,8 @@ go run ./examples/eventfeed     # consume the event stream as an exec-report + p
 go run ./examples/gateway       # edge controls: enforcing rate gate, speed bump, audit trail
 go run ./examples/marketmaker   # backtest an Avellaneda–Stoikov maker
 go run ./cmd/obdemo             # end-to-end matching demonstration
+go run ./cmd/ofistudy           # is order-flow imbalance predictive, or just contemporaneous?
+go run ./cmd/lambdastudy        # Kyle's λ: price impact, depth, and the cost of a block order
 go run ./cmd/l2capture          # live order-flow imbalance on Coinbase data
 ```
 
