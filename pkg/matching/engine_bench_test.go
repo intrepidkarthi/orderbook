@@ -28,8 +28,10 @@ func BenchmarkEngine_RestingInsert(b *testing.B) {
 	}
 }
 
-// BenchmarkEngine_Match measures a full match round-trip: a resting sell followed
-// by a crossing buy that trades against it.
+// BenchmarkEngine_Match measures one maker/taker pair through the matching core:
+// a resting sell followed by a crossing buy that trades against it. Orders are
+// constructed before ResetTimer, so the figure excludes order allocation and
+// covers the matching path only — not decoding, validation, or any I/O.
 func BenchmarkEngine_Match(b *testing.B) {
 	makers := make([]*types.Order, b.N)
 	takers := make([]*types.Order, b.N)
@@ -72,8 +74,8 @@ func BenchmarkEngine_CancelReplace(b *testing.B) {
 
 // --- P4: zero-allocation hot path via Match(order, buf) ---
 
-// BenchmarkEngine_MatchInto is the full match round-trip through the zero-alloc
-// path: a resting sell then a crossing buy, matched into a reused trade buffer.
+// BenchmarkEngine_MatchInto is one maker/taker pair through the zero-alloc path:
+// a resting sell then a crossing buy, matched into a reused trade buffer.
 // Steady state, the consumed maker's node recycles for the next insert.
 func BenchmarkEngine_MatchInto(b *testing.B) {
 	makers := make([]*types.Order, b.N)

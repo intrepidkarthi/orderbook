@@ -6,7 +6,7 @@
 
 <p align="center"><b><a href="https://intrepidkarthi.github.io/orderbook/">▶ Live demo</a></b> — the real engine, compiled to WebAssembly, running in your browser.</p>
 
-A production-grade central limit order book (CLOB) and matching engine in Go:
+An embeddable central limit order book (CLOB) and matching engine in Go:
 integer-exact pricing, a zero-allocation hot path, a lock-free single-writer
 core, and deterministic, replayable execution.
 
@@ -24,12 +24,19 @@ plus a set of opt-in **pre-trade risk & anti-manipulation controls**; credit,
 identity, fees, and wire protocols stay in the layers around it, the same
 boundary production venues draw. Companion packages cover the rest of that
 boundary — durable WAL persistence (`pkg/wal`), market-abuse surveillance
-(`pkg/surveillance`), an enforcing edge gateway (`pkg/gateway`), and a
-uniform-price call auction (`pkg/auction`). Every defensive control is grounded
-in a real enforcement case or incident, catalogued in
+(`pkg/surveillance`), in-process pre-trade admission control (`pkg/gateway`),
+and a uniform-price call auction (`pkg/auction`). Every defensive control is
+grounded in a real enforcement case or incident, catalogued in
 [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md). The repository also ships a
 reproducible market-microstructure research harness and an interactive
 WebAssembly demo that runs the real engine in the browser.
+
+**Scope.** This is a library, not a venue. There is no order-entry protocol,
+session layer, client message sequencing, or network listener in this
+repository — `pkg/gateway` applies admission control in-process and expects you
+to own the network edge. FIX/OUCH codecs and execution-report encoding are not
+implemented. The engine has never run a live market; it is used here to drive a
+simulator, a backtester, and a microstructure research harness.
 
 ---
 
@@ -144,8 +151,17 @@ Core-library microbenchmarks (Apple M-series, Go 1.23, single-threaded):
 | Cancel (drain) | 253 | 0 | ~4 M |
 | Cancel / replace (book) | 180 | 0 | ~5.5 M |
 | New price level (churn) | 292 | 0 | ~3.4 M |
-| Match round-trip — `Match` (maker + taker + trade) | 352 | **0** | ~2.8 M |
-| Match round-trip — `Process` (convenience wrapper) | 491 | 4 | ~2 M |
+| Maker + taker match — `Match` (into caller buffer) | 352 | **0** | ~2.8 M |
+| Maker + taker match — `Process` (convenience wrapper) | 491 | 4 | ~2 M |
+
+**What these numbers measure.** In-process calls into the matching core, and
+nothing else. `*types.Order` values are constructed before `b.ResetTimer()` and
+passed directly to the engine, so the figures exclude order allocation,
+decoding, validation at the API boundary, network I/O, and any session or
+protocol layer — none of which exist in this repository. They are a measure of
+the matching algorithm and its data structures, not of end-to-end order latency
+in a venue. Read them as a floor, and treat any real system built on this as
+strictly slower.
 
 Tail latency on a realistic ~90%-cancel / 10%-new flow (`Match` / `Cancel`):
 **p50 83 ns · p99 167 ns · p999 292 ns**, 0 allocs/op — the p999 stays within
