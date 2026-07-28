@@ -836,14 +836,24 @@ func (e *Engine) ProcessOCO(oco *types.OCOOrder) *MatchResult {
 		return toMatchResult(oco.Primary, dst, status, reason)
 	}
 
-	// Otherwise post the stop; if it fires on entry, cancel the resting primary.
-	// Any trades the stop prints on entry are reported when it is observed, not
-	// folded into the primary's result.
-	e.submitStopInto(oco.Stop, nil)
+	// Publish the primary before submitting the stop. If the stop fires on entry
+	// it cancels the primary, and emitting afterwards would report an order that
+	// is already dead as ACCEPTED.
+	e.emitResult(oco.Primary, dst, status, reason)
+
+	// Then post the stop. Its return values are not discardable: if it triggers on
+	// entry it settles through the book, filling and removing real makers and
+	// moving the last trade price. Dropping them lost those executions outright —
+	// the counterparty's fill reached neither the event stream nor any result —
+	// and left the stop leg with an engine id no consumer had ever been told
+	// about, so its later fills referenced an unknown order. Reported separately
+	// from the primary's result, exactly as ProcessStop reports a bare stop.
+	stopTrades, stopStatus, stopReason := e.submitStopInto(oco.Stop, nil)
 	if oco.Stop.IsTriggered() {
 		e.cancelOCOCounterpart(oco.Stop.Order.ID)
 	}
-	e.emitResult(oco.Primary, dst, status, reason)
+	e.emitResult(oco.Stop.Order, stopTrades, stopStatus, stopReason)
+
 	return toMatchResult(oco.Primary, dst, status, reason)
 }
 
