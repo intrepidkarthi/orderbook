@@ -397,17 +397,33 @@ func (e *Engine) isDuplicate(order *types.Order) bool {
 
 // recordClientOrderID remembers an accepted order's client-order-id key, evicting
 // the oldest when the bounded ring is full.
+//
+// This runs during replay as well as live. The guard is recovered state, not a
+// live-only convenience: an order accepted before the crash must still be a
+// duplicate after it, or a client resending across a venue restart — exactly when
+// resends are most likely — double-books.
 func (e *Engine) recordClientOrderID(order *types.Order) {
-	if e.config.DedupClientOrderIDs <= 0 || e.replaying {
+	if e.config.DedupClientOrderIDs <= 0 {
 		return
 	}
-	key := dedupKey(order)
-	if key == "" {
+	if key := dedupKey(order); key != "" {
+		e.recordDedupKey(key)
+	}
+}
+
+// recordDedupKey inserts a already-built key into the bounded ring, evicting the
+// oldest when full. Split out from recordClientOrderID so snapshot restore can
+// re-seed the guard from EngineSnapshot.DedupKeys without synthesising orders.
+func (e *Engine) recordDedupKey(key string) {
+	if e.config.DedupClientOrderIDs <= 0 || key == "" {
 		return
 	}
 	if e.dedupRing == nil {
 		e.dedupRing = make([]string, e.config.DedupClientOrderIDs)
 		e.dedupSeen = make(map[string]struct{}, e.config.DedupClientOrderIDs)
+	}
+	if _, dup := e.dedupSeen[key]; dup {
+		return // already tracked; re-seeding must not consume two ring slots
 	}
 	if old := e.dedupRing[e.dedupPos]; old != "" {
 		delete(e.dedupSeen, old)
@@ -415,6 +431,21 @@ func (e *Engine) recordClientOrderID(order *types.Order) {
 	e.dedupRing[e.dedupPos] = key
 	e.dedupSeen[key] = struct{}{}
 	e.dedupPos = (e.dedupPos + 1) % len(e.dedupRing)
+}
+
+// dedupKeysChronological returns the tracked keys oldest-first. dedupPos is the
+// next write slot, so it is also the oldest entry; walk forward and wrap.
+func (e *Engine) dedupKeysChronological() []string {
+	if len(e.dedupRing) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(e.dedupSeen))
+	for i := 0; i < len(e.dedupRing); i++ {
+		if k := e.dedupRing[(e.dedupPos+i)%len(e.dedupRing)]; k != "" {
+			keys = append(keys, k)
+		}
+	}
+	return keys
 }
 
 // nextID assigns the order a monotonic engine id if it does not already carry

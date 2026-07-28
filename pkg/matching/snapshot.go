@@ -18,6 +18,11 @@ import (
 // contained orders are deep copies, so the snapshot is independent of the live
 // engine and is JSON/gob-encodable.
 //
+// Also captured is the client-order-id duplicate guard, when the engine is
+// configured with one: it is recovered state rather than a live-only convenience,
+// since a client resending across a venue restart is precisely when the guard
+// must still hold.
+//
 // Not captured: iceberg hidden reserves, trailing-stop ratchet state, and OCO
 // pairings (their internal state is private to package types). Those conditional
 // orders are recovered by replaying the command log rather than from the
@@ -33,6 +38,7 @@ type EngineSnapshot struct {
 	PausedUntil    time.Time          // active band-breach pause deadline (zero if none)
 	Orders         []*types.Order     // resting book, price-then-time order
 	Stops          []*types.StopOrder // pending stops
+	DedupKeys      []string           // accepted client-order-id keys, oldest first
 }
 
 func copyOrder(o *types.Order) *types.Order {
@@ -64,6 +70,7 @@ func (e *Engine) TakeSnapshot() *EngineSnapshot {
 		}
 		snap.Stops = append(snap.Stops, ns)
 	}
+	snap.DedupKeys = e.dedupKeysChronological()
 	return snap
 }
 
@@ -93,6 +100,9 @@ func (e *Engine) LoadSnapshot(snap *EngineSnapshot) error {
 	}
 	if snap.LastTradePrice > 0 {
 		e.book.SetLastTradePrice(snap.LastTradePrice)
+	}
+	for _, k := range snap.DedupKeys {
+		e.recordDedupKey(k) // oldest first, so a smaller ring keeps the newest
 	}
 	e.orderSeq = snap.Seq
 	e.tradeSeq = snap.TradeSeq
