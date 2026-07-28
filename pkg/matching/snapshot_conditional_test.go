@@ -1,6 +1,7 @@
 package matching
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -204,5 +205,72 @@ func TestSnapshotConditionalOrdersAreDeterministic(t *testing.T) {
 				t.Fatalf("snapshot %d differs at iceberg %d: %+v vs %+v", i, j, next.Icebergs[j], first.Icebergs[j])
 			}
 		}
+	}
+}
+
+// TestSnapshotJSONRoundTrip covers the path the WAL actually uses: WriteSnapshot
+// marshals EngineSnapshot to JSON, so in-memory restore passing proves nothing
+// about recovery from disk. Unexported state reached via the types accessors is
+// the part at risk — it would silently encode as zero.
+func TestSnapshotJSONRoundTrip(t *testing.T) {
+	cfg := DefaultConfig("X")
+	e := NewEngine(cfg)
+
+	ib, err := types.NewIcebergOrder(limitOrder(t, "mm", types.SideBuy, 100, 1000), 100)
+	if err != nil {
+		t.Fatalf("NewIcebergOrder: %v", err)
+	}
+	e.ProcessIceberg(ib)
+	e.Process(limitOrder(t, "taker", types.SideSell, 100, 100)) // force one refill
+
+	// Trail wide enough that the trigger (extreme-trail = 90) sits below the last
+	// trade at 100, so the stop rests rather than firing on entry.
+	ts, err := types.NewTrailingStop(marketOrder(t, "u1", types.SideSell, 10), 30)
+	if err != nil {
+		t.Fatalf("NewTrailingStop: %v", err)
+	}
+	ts.Observe(120)
+	e.ProcessTrailingStop(ts)
+
+	if err := e.SetMarkPrice(100); err != nil {
+		t.Fatalf("SetMarkPrice: %v", err)
+	}
+
+	want := e.TakeSnapshot()
+	blob, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var got EngineSnapshot
+	if err := json.Unmarshal(blob, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if len(got.Icebergs) != 1 || got.Icebergs[0] != want.Icebergs[0] {
+		t.Errorf("icebergs did not survive JSON: %+v, want %+v", got.Icebergs, want.Icebergs)
+	}
+	if got.Icebergs[0].Refills == 0 {
+		t.Error("refill count encoded as zero; peak jitter would re-derive seen slice sizes")
+	}
+	if len(got.Trailing) != 1 {
+		t.Fatalf("trailing count = %d, want 1", len(got.Trailing))
+	}
+	if got.Trailing[0].State != want.Trailing[0].State {
+		t.Errorf("trailing ratchet did not survive JSON: %+v, want %+v", got.Trailing[0].State, want.Trailing[0].State)
+	}
+	if got.MarkPrice != want.MarkPrice {
+		t.Errorf("mark price = %d, want %d", got.MarkPrice, want.MarkPrice)
+	}
+
+	// The decoded snapshot must restore to a working engine, not merely decode.
+	e2, err := RestoreEngine(cfg, &got)
+	if err != nil {
+		t.Fatalf("RestoreEngine from decoded snapshot: %v", err)
+	}
+	if e2.trailingStops[ts.Order.ID].StopPrice() != ts.StopPrice() {
+		t.Error("ratchet lost through the JSON path")
+	}
+	if e2.icebergOrders[ib.Order.ID].TotalRemaining() != e.icebergOrders[ib.Order.ID].TotalRemaining() {
+		t.Error("iceberg reserve lost through the JSON path")
 	}
 }
