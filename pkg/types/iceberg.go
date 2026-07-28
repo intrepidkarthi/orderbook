@@ -85,3 +85,12 @@ func (ib *IcebergOrder) IsFullyFilled() bool {
 func (ib *IcebergOrder) TotalRemaining() int64 {
 	return ib.Hidden + ib.Order.RemainingQty
 }
+
+// Refills reports how many slices have been reloaded so far. It is part of the
+// peak-jitter seed, so a snapshot must carry it: restoring with a reset count
+// would re-derive slice sizes a watcher has already seen, defeating the jitter.
+func (ib *IcebergOrder) Refills() int64 { return ib.refills }
+
+// RestoreRefills reinstates the refill count captured by Refills, for snapshot
+// restore.
+func (ib *IcebergOrder) RestoreRefills(n int64) { ib.refills = n }

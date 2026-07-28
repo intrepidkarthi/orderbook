@@ -69,3 +69,33 @@ func (ts *TrailingStop) IsTriggered() bool { return ts.triggered }
 
 // StopPrice returns the current trailed trigger price (in ticks).
 func (ts *TrailingStop) StopPrice() int64 { return ts.stopPrice }
+
+// TrailingState is the encodable form of a trailing stop's ratchet, so a snapshot
+// can restore one exactly rather than restarting its extreme from the next
+// observed price — which would hand back distance the stop had already locked in.
+type TrailingState struct {
+	Extreme     int64
+	StopPrice   int64
+	Initialized bool
+	Triggered   bool
+}
+
+// State captures the ratchet for snapshotting.
+func (ts *TrailingStop) State() TrailingState {
+	return TrailingState{
+		Extreme:     ts.extreme,
+		StopPrice:   ts.stopPrice,
+		Initialized: ts.initialized,
+		Triggered:   ts.triggered,
+	}
+}
+
+// RestoreState reinstates a ratchet captured by State. Intended for snapshot
+// restore; it deliberately bypasses Observe, since replaying the extreme through
+// Observe would require the price history that produced it.
+func (ts *TrailingStop) RestoreState(s TrailingState) {
+	ts.extreme = s.Extreme
+	ts.stopPrice = s.StopPrice
+	ts.initialized = s.Initialized
+	ts.triggered = s.Triggered
+}
