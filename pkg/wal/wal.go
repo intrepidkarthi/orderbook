@@ -165,20 +165,38 @@ func lastSeq(path string) (int64, error) {
 	return entries[len(entries)-1].Seq, nil
 }
 
-// Restore replays entries into an engine (in log order), reproducing the recorded
-// command stream. Orders are replayed fresh so the engine reassigns ids
-// deterministically — a cancel's recorded id therefore matches the replayed
-// order. Cancels for already-gone orders are ignored (idempotent under redelivery).
+// Restore replays every entry into an engine (in log order), reproducing the
+// recorded command stream. Equivalent to RestoreAfter(eng, entries, 0); use it
+// when recovering from an empty engine with no snapshot.
+func Restore(eng *matching.Engine, entries []Entry) {
+	RestoreAfter(eng, entries, 0)
+}
+
+// RestoreAfter replays only the entries whose sequence is greater than afterSeq,
+// which is how a snapshot and its log tail are joined: pass the snapshot's
+// WALSeq. Passing 0 replays everything.
+//
+// Getting this boundary wrong is silent in both directions. Too low and the
+// commands already folded into the snapshot are applied a second time, which
+// double-books orders and corrupts the recovered state; too high and accepted
+// commands are dropped. Neither produces an error — just a different book.
+//
+// Orders are replayed fresh so the engine reassigns ids deterministically — a
+// cancel's recorded id therefore matches the replayed order. Cancels for
+// already-gone orders are ignored (idempotent under redelivery).
 //
 // Replay runs with the engine in replay mode (SetReplaying) so its live-ingress
 // admission controls — minimum resting time and the per-order size caps — do not
 // re-litigate commands the log already recorded as accepted; re-checking them
 // against replay-time timestamps would wrongly reject an accepted cancel and
 // diverge the recovered book. The deterministic matching itself is unchanged.
-func Restore(eng *matching.Engine, entries []Entry) {
+func RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64) {
 	eng.SetReplaying(true)
 	defer eng.SetReplaying(false)
 	for _, e := range entries {
+		if e.Seq <= afterSeq {
+			continue
+		}
 		switch e.Kind {
 		case KindSubmit:
 			if e.Order != nil {
@@ -201,6 +219,50 @@ func WriteSnapshot(path string, snap *matching.EngineSnapshot) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// Checkpoint takes a snapshot of eng, stamps it with the command-log sequence of
+// the last command APPLIED to that engine, and writes it to path. Recovery then
+// replays only the entries after lastAppliedSeq.
+//
+// lastAppliedSeq must be the sequence returned by the Append call for the last
+// command the engine has actually processed — NOT Writer.Seq(). The log is
+// written write-ahead, so entries can be on disk that the engine has not applied
+// yet, and stamping the writer's latest sequence silently drops them at recovery.
+// Call this from whichever goroutine applies commands, between commands, so no
+// command can land in the gap.
+func Checkpoint(path string, eng *matching.Engine, lastAppliedSeq int64) error {
+	snap := eng.TakeSnapshot()
+	snap.WALSeq = lastAppliedSeq
+	return WriteSnapshot(path, snap)
+}
+
+// Recover rebuilds an engine from a snapshot plus the log tail after it: the
+// standard bootstrap path, expressed once here so callers do not reimplement the
+// sequence join and get the boundary wrong. A missing snapshot replays the whole
+// log; a missing log yields the snapshot alone; neither present yields a fresh
+// engine.
+func Recover(config matching.Config, snapPath, walPath string) (*matching.Engine, error) {
+	snap, err := ReadSnapshot(snapPath)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := ReadAll(walPath)
+	if err != nil {
+		return nil, err
+	}
+	var eng *matching.Engine
+	var after int64
+	if snap != nil {
+		if eng, err = matching.RestoreEngine(config, snap); err != nil {
+			return nil, err
+		}
+		after = snap.WALSeq
+	} else {
+		eng = matching.NewEngine(config)
+	}
+	RestoreAfter(eng, entries, after)
+	return eng, nil
 }
 
 // ReadSnapshot reads a snapshot from path; a missing file yields (nil, nil).

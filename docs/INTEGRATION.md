@@ -161,7 +161,9 @@ digest := marketdata.ValueDigest(tape)  // id-independent outcome hash
 **WAL pattern for production:** append every accepted command to a durable log
 *before* the matcher applies it, on a **downstream stage** so `fsync` never blocks
 the matching goroutine. Recover by loading your newest **snapshot** and replaying
-only the WAL entries after it — checkpoint on a cadence to bound replay time.
+only the WAL entries after its `WALSeq` — checkpoint on a cadence to bound replay
+time. `wal.Checkpoint` and `wal.Recover` do this join for you; see below for the
+two ways doing it by hand goes silently wrong.
 Idempotency comes from `ClientOrderID` + the sequence number: a duplicate seq on
 redelivery is ignored, so trades are never double-emitted.
 
@@ -172,17 +174,42 @@ The library provides the primitives:
   to feed a WAL writer, a market-data publisher, and drop copy. The sink must
   return fast (push to a ring/channel); it never back-pressures the matcher.
 - **Snapshot + restore.** `Engine.TakeSnapshot()` captures a sequence-keyed copy
-  of the resting book, pending stops, and counters; `RestoreEngine` / `LoadSnapshot`
-  rebuild it. Recover by loading the newest snapshot and replaying the command log
-  after its `Seq` — bounding replay to O(recent).
+  of the resting book, pending stops, conditional-order state, and counters;
+  `RestoreEngine` / `LoadSnapshot` rebuild it.
 
 **`pkg/wal`** is the durable backend: an append-only, fsync'd command log
 (`wal.Open`/`AppendSubmit`/`AppendCancel`/`Sync`, written write-ahead so no
-acknowledged order is lost), snapshot persistence (`WriteSnapshot`/`ReadSnapshot`,
-atomic), and replay-based recovery (`ReadAll` + `Restore` into a fresh engine).
-It stops cleanly at a torn tail from a crash mid-write. Recover by loading the
-newest snapshot then replaying the WAL entries after its `Seq`. Cross-datacenter
-replication of the log is the only piece left to the operator.
+acknowledged order is lost), snapshot persistence (`WriteSnapshot`/`ReadSnapshot`),
+and replay-based recovery. It stops cleanly at a torn tail from a crash mid-write.
+
+Use `wal.Checkpoint` and `wal.Recover` rather than joining the two by hand:
+
+```go
+// Checkpointing, on the goroutine that applies commands, between commands.
+seq, _ := w.AppendSubmit(order)   // write-ahead
+eng.Process(order)                // then apply
+lastApplied = seq
+wal.Checkpoint("snap.json", eng, lastApplied)
+
+// Recovery: snapshot + only the log tail after it.
+eng, err := wal.Recover(cfg, "snap.json", "wal.log")
+```
+
+Two boundaries are easy to get wrong by hand, and both fail silently — the
+recovered book is simply different, with no error:
+
+- **`EngineSnapshot.WALSeq`, not `Seq`.** `Seq` is the engine's *order* sequence
+  and has nothing to do with log positions. Filtering log entries against it
+  replays an essentially arbitrary slice. `WALSeq` is the log sequence the
+  snapshot is consistent with.
+- **Applied, not appended.** Stamp the checkpoint with the sequence of the last
+  command the engine has *processed*, not `Writer.Seq()`. Because the log is
+  write-ahead, entries exist on disk that the engine has not applied yet;
+  treating the writer's latest sequence as the checkpoint drops exactly those.
+
+Replication of the log between datacenters, and the failover policy around it,
+are the operator's — see the HA discussion below for what the library provides
+seams for and what it deliberately does not.
 
 ---
 
