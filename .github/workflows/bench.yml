@@ -28,7 +28,21 @@ jobs:
             echo ''
             echo 'GitHub-hosted runner · `go test -bench -benchmem`'
             echo ''
+            echo '### Matching core'
+            echo ''
+            echo 'The bare engine: the fastest configuration the library offers.'
+            echo ''
             echo '```'
             go test -run '^$' -bench=. -benchmem ./pkg/orderbook/ ./pkg/matching/
+            echo '```'
+            echo ''
+            echo '### Durable path'
+            echo ''
+            echo 'Runner + EventSink + write-ahead log — the configuration the'
+            echo 'documentation actually recommends embedding. Publishing only the'
+            echo 'numbers above would advertise a path most callers do not use.'
+            echo ''
+            echo '```'
+            go test -run '^$' -bench=. -benchmem ./pkg/wal/
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
