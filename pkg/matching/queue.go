@@ -18,6 +18,8 @@ const (
 	cmdResume
 	cmdCancelOnly
 	cmdSetMark
+	cmdCancelAll
+	cmdCheckpoint
 )
 
 // command is one unit of work for the matching goroutine. Exactly one payload
@@ -33,13 +35,15 @@ type command struct {
 	trailing *types.TrailingStop
 	cancelID int64
 	userID   string
+	snapOut  chan *EngineSnapshot
 	reply    chan cmdReply
 }
 
 // cmdReply is the result of applying a command. match is set for order-submitting
 // commands; order/err are set for a cancel.
 type cmdReply struct {
-	match *MatchResult
-	order *types.Order
-	err   error
+	match  *MatchResult
+	order  *types.Order
+	orders []*types.Order
+	err    error
 }

@@ -32,17 +32,17 @@ import (
 // post-recovery mark update through both manipulation clamps, and a reset
 // guardrail window handed back a full budget at exactly the wrong moment.
 type EngineSnapshot struct {
-	Symbol         string
-	Seq            int64 // engine order sequence as of the snapshot
-	TradeSeq       int64
-	EventSeq       int64
+	Symbol   string
+	Seq      int64 // engine order sequence as of the snapshot
+	TradeSeq int64
+	EventSeq int64
 	// WALSeq is the command-log sequence of the last command APPLIED to the engine
 	// when this snapshot was taken, so recovery can replay only the tail after it.
 	// It is the applied sequence, not the appended one: the log is written
 	// write-ahead, so an entry can exist on disk that the engine has not yet
 	// processed, and treating the writer's latest sequence as the checkpoint would
 	// skip exactly those commands. Zero means unknown — replay the whole log.
-	WALSeq int64
+	WALSeq         int64
 	LastTradePrice int64
 	MarkPrice      int64 // external mark/index reference (0 => use last trade)
 	State          EngineState

@@ -1510,6 +1510,61 @@ func (e *Engine) reverseTrade(tr types.Trade, makerOrders map[int64]*types.Order
 	}
 }
 
+// CancelAllForUser cancels every resting order, pending stop and trailing stop
+// belonging to userID, returning what it removed. This is the operator kill
+// switch, so it deliberately ignores MinRestingTime: an anti-spoofing floor that
+// blocked an operator from pulling a participant's book would be a liability, not
+// a control.
+//
+// It must run on the goroutine that owns the engine. Cancelling account-wide from
+// outside the writer races every concurrent submit, which is exactly the moment
+// you are trying to stop.
+func (e *Engine) CancelAllForUser(userID string) []*types.Order {
+	var out []*types.Order
+	now := e.clock().UTC()
+
+	for _, o := range e.book.Orders() {
+		if o.UserID != userID || !o.IsActive() {
+			continue
+		}
+		if err := o.Cancel(); err != nil {
+			continue
+		}
+		o.UpdatedAt = now
+		_, _ = e.book.Remove(o.ID)
+		delete(e.icebergOrders, o.ID)
+		e.cancelOCOCounterpart(o.ID)
+		e.emitCancel(o)
+		out = append(out, o)
+	}
+	for _, s := range e.stopBook.All() {
+		if s.Order.UserID != userID {
+			continue
+		}
+		e.stopBook.Remove(s.Order.ID)
+		if err := s.Order.Cancel(); err != nil {
+			continue
+		}
+		s.Order.UpdatedAt = now
+		e.emitCancel(s.Order)
+		out = append(out, s.Order)
+	}
+	for id, ts := range e.trailingStops {
+		if ts.Order.UserID != userID {
+			continue
+		}
+		delete(e.trailingStops, id)
+		if err := ts.Order.Cancel(); err != nil {
+			continue
+		}
+		ts.Order.UpdatedAt = now
+		e.emitCancel(ts.Order)
+		out = append(out, ts.Order)
+	}
+	e.flushPending()
+	return out
+}
+
 // Cancel removes a resting order (or a pending stop) if it belongs to userID and
 // is still active.
 func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {

@@ -52,12 +52,35 @@ type Runner struct {
 	done   chan struct{} // closed when the matching goroutine has exited
 	quit   chan struct{} // the shutdown fence; closed by Close
 	once   sync.Once     // Close is idempotent
+	log    CommandLog
+	// lastApplied is the log sequence of the last command actually applied. It is
+	// only ever touched by the matching goroutine, which is what makes a
+	// checkpoint's WALSeq trustworthy: appended-but-unapplied commands are on disk
+	// and must still be replayed.
+	lastApplied int64
+}
+
+// CommandLog is the write-ahead seam: the Runner appends each mutating command
+// here and only then applies it, so nothing the engine has done is missing from
+// the log. pkg/wal.Writer satisfies it.
+//
+// Append is called on the matching goroutine, so a slow log slows matching. Use a
+// buffered writer and batch the fsync (group commit) rather than syncing per
+// command.
+type CommandLog interface {
+	AppendSubmit(o *types.Order) (int64, error)
+	AppendCancel(orderID int64, userID string) (int64, error)
 }
 
 // RunnerConfig configures a Runner.
 type RunnerConfig struct {
 	Engine    Config
 	QueueSize int // command buffer capacity; 0 => 1024
+	// Log, if set, receives every mutating command before it is applied.
+	Log CommandLog
+	// Replaying starts the engine in replay mode and suppresses logging, so a
+	// bootstrap replay does not re-append the log it is reading.
+	Replaying bool
 }
 
 // NewRunner builds a Runner over a fresh Engine and starts its matching
@@ -71,6 +94,11 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		queue:  make(chan command, cfg.QueueSize),
 		done:   make(chan struct{}),
 		quit:   make(chan struct{}),
+		log:    cfg.Log,
+	}
+	if cfg.Replaying {
+		r.engine.SetReplaying(true)
+		r.log = nil // never re-append the log being replayed
 	}
 	go r.loop()
 	return r
@@ -100,6 +128,7 @@ func (r *Runner) loop() {
 
 func (r *Runner) dispatch(cmd command) {
 	var rep cmdReply
+	r.logCommand(cmd)
 	switch cmd.kind {
 	case cmdSubmit:
 		rep.match = r.engine.Process(cmd.order)
@@ -125,10 +154,43 @@ func (r *Runner) dispatch(cmd command) {
 		// cancelID reused as the int64 payload; a rejected step (ErrMarkStepTooLarge)
 		// simply leaves the mark unchanged on this async path.
 		_ = r.engine.SetMarkPrice(cmd.cancelID)
+	case cmdCancelAll:
+		rep.orders = r.engine.CancelAllForUser(cmd.userID)
+	case cmdCheckpoint:
+		snap := r.engine.TakeSnapshot()
+		snap.WALSeq = r.lastApplied
+		cmd.snapOut <- snap
 	}
 	if cmd.reply != nil {
 		cmd.reply <- rep
 	}
+}
+
+// logCommand writes a mutating command to the log before it is applied, and
+// records the sequence so a checkpoint can name the log position it is consistent
+// with. A log failure halts the engine rather than letting it run ahead of its
+// own journal — silently diverging from the record is worse than stopping.
+func (r *Runner) logCommand(cmd command) {
+	if r.log == nil {
+		return
+	}
+	var (
+		seq int64
+		err error
+	)
+	switch cmd.kind {
+	case cmdSubmit:
+		seq, err = r.log.AppendSubmit(cmd.order)
+	case cmdCancel:
+		seq, err = r.log.AppendCancel(cmd.cancelID, cmd.userID)
+	default:
+		return // control commands carry no book state; the snapshot covers them
+	}
+	if err != nil {
+		r.engine.Halt()
+		return
+	}
+	r.lastApplied = seq
 }
 
 // send enqueues cmd and blocks until the matching goroutine has applied it,
@@ -337,6 +399,52 @@ func (r *Runner) TrySubmitAsync(order *types.Order) (<-chan *MatchResult, error)
 		return nil, ErrQueueFull
 	}
 }
+
+// CancelAllForUser pulls every resting order, pending stop and trailing stop
+// belonging to userID, on the matching goroutine and atomically with respect to
+// concurrent submits. This is the operator kill switch; it ignores
+// MinRestingTime.
+func (r *Runner) CancelAllForUser(userID string) ([]*types.Order, error) {
+	rep, ok := r.send(command{kind: cmdCancelAll, userID: userID})
+	if !ok {
+		return nil, ErrShuttingDown
+	}
+	return rep.orders, nil
+}
+
+// Checkpoint takes a snapshot on the matching goroutine, stamped with the log
+// sequence of the last command actually applied. Taking it from outside the
+// writer would capture a book mid-command and pair it with a log position that
+// does not correspond to it.
+func (r *Runner) Checkpoint() (*EngineSnapshot, error) {
+	out := make(chan *EngineSnapshot, 1)
+	cmd := command{kind: cmdCheckpoint, snapOut: out}
+
+	select {
+	case <-r.quit:
+		return nil, ErrShuttingDown
+	default:
+	}
+	select {
+	case r.queue <- cmd:
+	case <-r.quit:
+		return nil, ErrShuttingDown
+	}
+	select {
+	case snap := <-out:
+		return snap, nil
+	case <-r.done:
+		select {
+		case snap := <-out:
+			return snap, nil
+		default:
+			return nil, ErrShuttingDown
+		}
+	}
+}
+
+// SetReplaying toggles replay mode on the underlying engine. Bootstrap only.
+func (r *Runner) SetReplaying(v bool) { r.engine.SetReplaying(v) }
 
 // QueueLen reports the number of commands currently buffered in the queue — a
 // backpressure gauge to export as a metric.
