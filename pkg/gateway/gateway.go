@@ -6,13 +6,14 @@
 // identity and wall-clock timing policy, which must not live in a bit-reproducible
 // core. Pair a Gateway with a Runner at the network edge.
 //
-// The gateway is single-writer-friendly but not itself synchronised; front it
-// with your own ingress goroutine (or one per connection) and pass a monotonic
-// ingress timestamp to Submit.
+// The gateway is safe for concurrent use: a single Gateway is intended to front
+// many connection goroutines, which is the only topology a real ingress has. Pass
+// a monotonic ingress timestamp to Submit.
 package gateway
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
@@ -27,6 +28,7 @@ var ErrThrottled = errors.New("gateway: account rate limit exceeded")
 // refills at RatePerSec tokens/second up to Burst; a submit with no token is
 // denied. It is the quote-stuffing / flood-DoS defence.
 type RateGate struct {
+	mu         sync.Mutex // one gate fronts every connection goroutine
 	ratePerSec float64
 	burst      float64
 	buckets    map[string]*bucket
@@ -46,6 +48,8 @@ func NewRateGate(ratePerSec, burst float64) *RateGate {
 // Allow refills the account's bucket up to now and consumes a token, reporting
 // whether the order is admitted.
 func (g *RateGate) Allow(user string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	b := g.buckets[user]
 	if b == nil {
 		b = &bucket{tokens: g.burst, last: now}
@@ -76,8 +80,13 @@ type Gateway struct {
 	gate   *RateGate
 	bump   time.Duration
 	// OnBump, if set, is called for each liquidity-taking order with the time it
-	// would be released after the speed bump. A real gateway holds the order until
-	// then so makers can reprice; wire this to your scheduler.
+	// would be released after the speed bump.
+	//
+	// This is an OBSERVATION HOOK, not enforcement. Submit calls it and then
+	// forwards the order immediately; nothing here delays anything. Real
+	// hold-and-release needs the embedder's scheduler and wall clock, so wire this
+	// to yours if you want an actual speed bump. Treating the hook alone as a
+	// latency-arbitrage control would be a mistake.
 	OnBump func(o *types.Order, releaseAt time.Time)
 }
 
@@ -97,9 +106,12 @@ func New(runner *matching.Runner, cfg Config) *Gateway {
 	return g
 }
 
-// Submit runs an order through the rate gate and speed bump, then forwards it to
-// the engine. now is the ingress timestamp. A throttled order is rejected here,
-// before it reaches the matcher.
+// Submit runs an order through the rate gate, notifies OnBump if the order takes
+// liquidity, then forwards it to the engine. now is the ingress timestamp. A
+// throttled order is rejected here, before it reaches the matcher.
+//
+// The rate gate enforces; the speed bump does not — see OnBump. Submit is safe to
+// call from many connection goroutines at once.
 func (g *Gateway) Submit(o *types.Order, now time.Time) (*matching.MatchResult, error) {
 	if g.gate != nil && !g.gate.Allow(o.UserID, now) {
 		return nil, ErrThrottled
