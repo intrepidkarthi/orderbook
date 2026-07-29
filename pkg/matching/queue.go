@@ -19,6 +19,7 @@ const (
 	cmdCancelOnly
 	cmdSetMark
 	cmdCancelAll
+	cmdReduce
 	cmdCheckpoint
 )
 
@@ -26,17 +27,18 @@ const (
 // field is meaningful per kind. reply, if non-nil, receives the outcome once the
 // command has been applied.
 type command struct {
-	kind     cmdKind
-	order    *types.Order
-	stop     *types.StopOrder
-	oco      *types.OCOOrder
-	iceberg  *types.IcebergOrder
-	pegged   *types.PeggedOrder
-	trailing *types.TrailingStop
-	cancelID int64
-	userID   string
-	snapOut  chan *EngineSnapshot
-	reply    chan cmdReply
+	kind      cmdKind
+	order     *types.Order
+	stop      *types.StopOrder
+	oco       *types.OCOOrder
+	iceberg   *types.IcebergOrder
+	pegged    *types.PeggedOrder
+	trailing  *types.TrailingStop
+	cancelID  int64
+	reduceQty int64
+	userID    string
+	snapOut   chan *EngineSnapshot
+	reply     chan cmdReply
 }
 
 // cmdReply is the result of applying a command. match is set for order-submitting

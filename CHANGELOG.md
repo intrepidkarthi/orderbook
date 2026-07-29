@@ -7,6 +7,81 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-29
+
+Adds the network edge. v0.9.0 fixed what was broken; this release adds what was
+absent — a client-facing order-entry protocol, a session layer, per-account
+message sequencing with gap-free resume, and a reference gateway that speaks it
+over TCP.
+
+With this, *production-grade embeddable matching core with a demonstrated network
+seam* is a claim the tests support. Both qualifiers are load-bearing:
+production-grade describes the core, embeddable concedes the venue is not here.
+
+### Added
+
+- **`cmd/obgw`** — a reference TCP order-entry gateway. Authentication defaults to
+  deny, so an unconfigured venue rejects everyone rather than admitting them.
+  One goroutine per connection, admission control before enqueue, drain on
+  SIGTERM.
+- **`internal/wire`** — SoupBinTCP 3.00 framing carrying fixed-width big-endian
+  payloads, no new dependencies. Frozen by 12 byte-exact golden vectors: a field
+  that moves silently reinterprets every message a deployed client sends, so
+  changing a layout means bumping `Version`, not editing a vector. Documented in
+  [docs/PROTOCOL.md](docs/PROTOCOL.md).
+- **`pkg/orderentry`** — per-account outbound streams that outlive connections.
+  A `Session` is a socket; a `Stream` is an account's sequence. That separation
+  is what makes resume possible: a maker whose resting order fills while its
+  connection is down still has the execution waiting when it returns.
+- **Gap-free resume**, scoped to a venue incarnation. A restart mints a new
+  incarnation id, so a stale cursor is refused rather than served different
+  content under numbers the client believes it already has. A cursor older than
+  the retention ring is refused explicitly; the client is never told it is up to
+  date when it is not.
+- **`Engine.Reduce` / `Runner.Reduce`** — in-place down-size retaining queue
+  position. The one order-entry operation a gateway provably cannot build
+  outside the writer goroutine: cancel-then-new sends the order to the back of
+  its level, which for a market maker managing size is a material loss. Size
+  increases and price changes are rejected rather than silently reinterpreted,
+  because an order that could grow in place would let a participant reserve a
+  spot in the queue.
+- **`matching.MultiSink`** and **`Runner.TryEnqueue` / `TryEnqueueCancel`**.
+  Fire-and-forget submission never hands the engine-owned order back to a
+  connection goroutine, which removes the whole read-after-submit race class.
+- **`Gateway.Allow`** splits the admission decision from forwarding, so the gate
+  can sit in front of `TryEnqueue`.
+
+### Security
+
+- The wire carries **no account and no engine order id**. Orders are named only
+  by the client's own `ClOrdID`, scoped to the authenticated session. The engine
+  cancels by `(orderID, userID)` and self-trade prevention lets one account
+  observe another's resting orders, so a wire carrying either field would let a
+  client name an order it does not own — there is no field in which to express
+  it. Two accounts using the identical `ClOrdID` cannot reach each other's
+  orders, and a test asserts it.
+- `STPMode` and the privileged flag are absent from the wire: the first is venue
+  policy, the second a liquidation capability that must never be client-settable.
+- A reduce or cancel against another account's order is refused
+  indistinguishably from a missing order, so a probe cannot learn that someone
+  else's order exists.
+
+### Fixed
+
+- `Server.Close` deadlocked against its own connection handlers. Closing a
+  listener stops new accepts and does nothing to established sockets, so the
+  drain waited forever on handlers parked in a read. Found by the integration
+  test on its first run, which is the reason the reference server exists.
+
+### Changed
+
+- README now claims *production-grade embeddable matching core with a
+  demonstrated network seam*, and states plainly what is still yours: TLS,
+  credential storage, multi-symbol routing, clearing, and any HA topology. The
+  library ships the seams for primary-backup and deliberately not the consensus.
+- **Production-readiness remains a property of a deployment, not of a library.**
+  That sentence stays in the README permanently.
+
 ## [0.9.0] - 2026-07-29
 
 A correctness release. A production-readiness audit of the recovery, event and

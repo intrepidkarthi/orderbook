@@ -6,9 +6,10 @@
 
 <p align="center"><b><a href="https://intrepidkarthi.github.io/orderbook/">▶ Live demo</a></b> — the real engine, compiled to WebAssembly, running in your browser.</p>
 
-An embeddable central limit order book (CLOB) and matching engine in Go:
-integer-exact pricing, a zero-allocation hot path, a lock-free single-writer
-core, and deterministic, replayable execution.
+A production-grade embeddable matching core in Go, with a demonstrated network
+seam: integer-exact pricing, a zero-allocation match path, a lock-free
+single-writer core, deterministic and machine-checked crash recovery, and a
+reference order-entry gateway that speaks a frozen binary protocol over TCP.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/intrepidkarthi/orderbook.svg)](https://pkg.go.dev/github.com/intrepidkarthi/orderbook)
 [![CI](https://github.com/intrepidkarthi/orderbook/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/intrepidkarthi/orderbook/actions/workflows/ci.yml)
@@ -31,12 +32,28 @@ grounded in a real enforcement case or incident, catalogued in
 reproducible market-microstructure research harness and an interactive
 WebAssembly demo that runs the real engine in the browser.
 
-**Scope.** This is a library, not a venue. There is no order-entry protocol,
-session layer, client message sequencing, or network listener in this
-repository — `pkg/gateway` applies admission control in-process and expects you
-to own the network edge. FIX/OUCH codecs and execution-report encoding are not
-implemented. The engine has never run a live market; it is used here to drive a
-simulator, a backtester, and a microstructure research harness.
+**Scope.** *Production-grade* describes the core; *embeddable* concedes the venue
+is not here. Both qualifiers are load-bearing.
+
+What ships: the matching core, durable recovery, an event stream proven to
+reconstruct the book, an operator kill switch, a frozen binary order-entry
+protocol ([docs/PROTOCOL.md](docs/PROTOCOL.md)), and `cmd/obgw` — a reference TCP
+gateway with authentication, per-account outbound streams, gap-free resume across
+a disconnect, and bounded backpressure at every stage.
+
+What does not, and is yours: **TLS and credential storage** (the reference sends a
+shared secret in the clear and says so), **multi-symbol routing** (order ids and
+sequences are per-engine, so several symbols means several engines and a router
+above them), **clearing and settlement**, and **any HA topology** — the library
+ships the seams for primary-backup (deterministic apply, an ordered command log,
+replay mode, snapshot bootstrap) and deliberately not the consensus, because
+bundling one forces a wrong answer on everybody. See
+[docs/EXCHANGE-ARCHITECTURE.md](docs/EXCHANGE-ARCHITECTURE.md) for why, including
+the venues that lost quorum getting it wrong.
+
+The engine has never run a live market. **Production-readiness is a property of
+your deployment, not of this library** — what is offered here is that the pieces
+you build on are correct, tested, and honest about their edges.
 
 ---
 
@@ -73,10 +90,16 @@ simulator, a backtester, and a microstructure research harness.
   idempotency, mark-price step **and** depth bounds, a self-output guardrail, and
   timed band-breach pauses — plus a market-abuse surveillance suite (spoofing,
   order-to-trade ratio, marking-the-close, ramping, pinging, cross-book), an
-  an enforcing per-account rate gate, an operator kill switch, and a
+  enforcing per-account rate gate, an operator kill switch, and a
   uniform-price call auction. Each maps to a real case in
   [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md). The taker speed bump is an
   observation hook, not enforcement — it reports, it does not delay.
+- **A network edge that works.** `cmd/obgw` is a reference TCP order-entry
+  gateway: authentication defaulting to deny, a frozen binary protocol
+  ([docs/PROTOCOL.md](docs/PROTOCOL.md)), per-account outbound streams that
+  outlive a connection, and gap-free resume — reconnect with your cursor and
+  receive the fills that landed while you were disconnected. A client can never
+  name another account's order, because the wire has no field for it.
 - **Market data.** L1 / L2 / L3 (market-by-order) snapshots with sequence
   numbers.
 - **Tested and benchmarked.** Race, fuzz, soak, and replay-recovery suites;
@@ -129,6 +152,15 @@ r.SubmitAsync(order) // enqueue without blocking; result arrives on the returned
 buf := make([]types.Trade, 0, 8)
 buf, status, _ := eng.Match(order, buf[:0])
 ```
+
+Or run the reference gateway and talk to it over a socket:
+
+```sh
+go run ./cmd/obgw -addr 127.0.0.1:9000 -symbol BTC-USD -accounts alice:s3cret
+```
+
+`cmd/obgw/server_test.go` is a working client — login, enter, cancel, resume —
+and is the most useful reference for writing another one.
 
 Runnable, testable examples render on
 [pkg.go.dev](https://pkg.go.dev/github.com/intrepidkarthi/orderbook/pkg/matching#pkg-examples).

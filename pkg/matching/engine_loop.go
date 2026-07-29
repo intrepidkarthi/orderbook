@@ -154,6 +154,8 @@ func (r *Runner) dispatch(cmd command) {
 		// cancelID reused as the int64 payload; a rejected step (ErrMarkStepTooLarge)
 		// simply leaves the mark unchanged on this async path.
 		_ = r.engine.SetMarkPrice(cmd.cancelID)
+	case cmdReduce:
+		rep.order, rep.err = r.engine.Reduce(cmd.cancelID, cmd.reduceQty, cmd.userID)
 	case cmdCancelAll:
 		rep.orders = r.engine.CancelAllForUser(cmd.userID)
 	case cmdCheckpoint:
@@ -398,6 +400,16 @@ func (r *Runner) TrySubmitAsync(order *types.Order) (<-chan *MatchResult, error)
 	default:
 		return nil, ErrQueueFull
 	}
+}
+
+// Reduce shrinks a resting order in place on the matching goroutine, keeping its
+// queue position. See Engine.Reduce.
+func (r *Runner) Reduce(orderID, newQty int64, userID string) (*types.Order, error) {
+	rep, ok := r.send(command{kind: cmdReduce, cancelID: orderID, reduceQty: newQty, userID: userID})
+	if !ok {
+		return nil, ErrShuttingDown
+	}
+	return rep.order, rep.err
 }
 
 // CancelAllForUser pulls every resting order, pending stop and trailing stop

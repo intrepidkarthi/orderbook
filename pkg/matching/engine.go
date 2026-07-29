@@ -1510,6 +1510,57 @@ func (e *Engine) reverseTrade(tr types.Trade, makerOrders map[int64]*types.Order
 	}
 }
 
+// Reduce shrinks a resting order in place, keeping its queue position, and
+// returns the order.
+//
+// This is the one order-entry operation a gateway provably cannot build on the
+// outside. Cancel-then-new is the obvious substitute and it is wrong: it sends
+// the order to the back of its price level, which for a market maker managing
+// size is a material loss. Retaining priority requires mutating the order where
+// it rests, which only the goroutine that owns the book may do.
+//
+// It is a reduction only. A size INCREASE, or a price change, correctly forfeits
+// priority — a resting order that could grow ahead of the queue would let a
+// participant reserve a place in line — so those belong in the gateway as
+// cancel-then-new, and are rejected here rather than silently reinterpreted.
+//
+// newQty is the new TOTAL quantity, matching how the order was submitted. An
+// order already filled beyond newQty cannot shrink to it; that returns
+// ErrInvalidQuantity rather than quietly clamping, since the caller's model of
+// the order is wrong and it should find out.
+func (e *Engine) Reduce(orderID int64, newQty int64, userID string) (*types.Order, error) {
+	order, exists := e.book.Get(orderID)
+	if !exists {
+		return nil, types.ErrOrderNotFound
+	}
+	if order.UserID != userID {
+		// Same response as a missing order: a probe must not be able to tell
+		// "not yours" from "does not exist".
+		return nil, types.ErrOrderNotFound
+	}
+	if !order.IsActive() {
+		return nil, types.ErrOrderNotActive
+	}
+	if newQty <= 0 || newQty >= order.Quantity {
+		return nil, types.ErrInvalidQuantity
+	}
+	if newQty <= order.FilledQty {
+		return nil, types.ErrInvalidQuantity
+	}
+
+	released := order.Quantity - newQty
+	order.Quantity = newQty
+	order.RemainingQty = newQty - order.FilledQty
+	order.UpdatedAt = e.clock().UTC()
+	// The level's aggregate must lose exactly what the order gave up, or depth
+	// drifts from the sum of its orders.
+	e.book.UpdateOrderQuantity(orderID, released)
+
+	e.emitReplaced(order)
+	e.flushPending()
+	return order, nil
+}
+
 // CancelAllForUser cancels every resting order, pending stop and trailing stop
 // belonging to userID, returning what it removed. This is the operator kill
 // switch, so it deliberately ignores MinRestingTime: an anti-spoofing floor that
