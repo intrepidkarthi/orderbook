@@ -247,6 +247,13 @@ type Engine struct {
 	sink     EventSink
 	eventSeq int64
 	eventBuf []Event
+	// pending holds the events produced *during* a command — trades as they
+	// execute, and iceberg slices as they reload — in the order they actually
+	// happened. Emission used to collect trades and publish them after the fact,
+	// which put a refilled slice's announcement before the trades that consumed
+	// the previous slice, so a consumer saw executions against an order it had
+	// been told was finished.
+	pending []Event
 
 	// client-order-id dedup (near-term replay guard): a ring of the most recent
 	// (user,clientID) keys plus a set for O(1) lookup.
@@ -540,19 +547,53 @@ func (e *Engine) emitResult(order *types.Order, trades []types.Trade, status typ
 	if e.sink == nil {
 		return
 	}
-	buf := e.eventBuf[:0]
-	e.eventSeq++
+	// A rejection means nothing happened: an FOK that could not fill has already
+	// had its trades reversed, so publishing them would announce executions that
+	// were undone.
 	if status == types.OrderStatusRejected {
-		buf = append(buf, Event{Seq: e.eventSeq, Kind: EventRejected, OrderID: order.ID, UserID: order.UserID, Order: order, Reason: reason})
+		e.pending = e.pending[:0]
+	}
+	buf := e.eventBuf[:0]
+	if status == types.OrderStatusRejected {
+		buf = append(buf, Event{Kind: EventRejected, OrderID: order.ID, UserID: order.UserID, Order: order, Reason: reason})
 	} else {
-		buf = append(buf, Event{Seq: e.eventSeq, Kind: EventAccepted, OrderID: order.ID, UserID: order.UserID, Order: order})
+		buf = append(buf, Event{Kind: EventAccepted, OrderID: order.ID, UserID: order.UserID, Order: order})
 	}
-	for i := range trades {
+	buf = append(buf, e.pending...)
+	e.pending = e.pending[:0]
+	// An order that ends Cancelled was announced as ACCEPTED above but never
+	// rested: an IOC or market remainder, or a taker cancelled by self-trade
+	// prevention. Without a matching delete a consumer reconstructs it as live
+	// forever, so close it out here.
+	if status == types.OrderStatusCancelled {
+		buf = append(buf, Event{Kind: EventCanceled, OrderID: order.ID, UserID: order.UserID, Order: order})
+	}
+	e.eventBuf = e.stampAndPublish(buf)
+}
+
+// stampAndPublish numbers a composed batch and hands it to the sink. Sequence
+// numbers are assigned here, not when each event is recorded: a trade is recorded
+// mid-match while the submitted order's own event is only composed afterwards, so
+// numbering at record time produced a stream whose Seq ran backwards.
+func (e *Engine) stampAndPublish(buf []Event) []Event {
+	for i := range buf {
 		e.eventSeq++
-		buf = append(buf, Event{Seq: e.eventSeq, Kind: EventTrade, OrderID: trades[i].TakerOrderID, Trade: &trades[i]})
+		buf[i].Seq = e.eventSeq
 	}
-	e.eventBuf = buf
 	e.sink.OnEvents(buf)
+	return buf
+}
+
+// emitAdd publishes a single Accepted for an order (re-)entering the book outside
+// the normal submit path — today, an iceberg slice refilled from its reserve.
+// Without it the reserve reloads invisibly: consumers saw the slice fill to zero,
+// concluded the order was done, and then had to discard every later fill of a
+// still-live order as referencing something unknown.
+func (e *Engine) emitAdd(order *types.Order) {
+	if e.sink == nil {
+		return
+	}
+	e.pending = append(e.pending, Event{Kind: EventAccepted, OrderID: order.ID, UserID: order.UserID, Order: order})
 }
 
 // emitCancel publishes a single Canceled event for a removed resting order.
@@ -560,9 +601,36 @@ func (e *Engine) emitCancel(order *types.Order) {
 	if e.sink == nil {
 		return
 	}
-	e.eventSeq++
-	e.eventBuf = append(e.eventBuf[:0], Event{Seq: e.eventSeq, Kind: EventCanceled, OrderID: order.ID, UserID: order.UserID, Order: order})
-	e.sink.OnEvents(e.eventBuf)
+	e.pending = append(e.pending, Event{Kind: EventCanceled, OrderID: order.ID, UserID: order.UserID, Order: order})
+}
+
+// emitReplaced announces an in-place size change that no trade explains — today,
+// a maker shrunk by self-trade-prevention DECREMENT.
+func (e *Engine) emitReplaced(order *types.Order) {
+	if e.sink == nil {
+		return
+	}
+	e.pending = append(e.pending, Event{Kind: EventReplaced, OrderID: order.ID, UserID: order.UserID, Order: order})
+}
+
+// emitTerminalIfDone closes out an order that settled without resting — a stop
+// fired by a cascade whose remainder was cancelled rather than booked.
+func (e *Engine) emitTerminalIfDone(order *types.Order) {
+	if e.sink == nil || order.Status != types.OrderStatusCancelled {
+		return
+	}
+	e.pending = append(e.pending, Event{Kind: EventCanceled, OrderID: order.ID, UserID: order.UserID, Order: order})
+}
+
+// flushPending publishes any batch built outside a submit path — the standalone
+// Cancel, where there is no emitResult to compose the events into.
+func (e *Engine) flushPending() {
+	if e.sink == nil || len(e.pending) == 0 {
+		return
+	}
+	buf := append(e.eventBuf[:0], e.pending...)
+	e.pending = e.pending[:0]
+	e.eventBuf = e.stampAndPublish(buf)
 }
 
 // emitStateChange publishes a Halted/Resumed event (guardrail trip, band-breach
@@ -703,10 +771,14 @@ func (e *Engine) cascadeStops(dst []types.Trade) []types.Trade {
 		for _, s := range fired {
 			// If this stop is an OCO leg, cancel its primary before it executes.
 			e.cancelOCOCounterpart(s.Order.ID)
+			e.emitAdd(s.Order) // the stop is now a live order; announce it before it trades
 			dst, _, _ = e.settleInto(s.Order, dst)
+			e.emitTerminalIfDone(s.Order)
 		}
 		for _, ts := range trailing {
+			e.emitAdd(ts.Order)
 			dst, _, _ = e.settleInto(ts.Order, dst)
+			e.emitTerminalIfDone(ts.Order)
 		}
 	}
 	return dst
@@ -897,9 +969,11 @@ func (e *Engine) cancelOCOCounterpart(legID int64) {
 	if o, exists := e.book.Get(otherID); exists {
 		_ = o.Cancel()
 		_, _ = e.book.Remove(otherID)
+		e.emitCancel(o)
 	} else if s, exists := e.stopBook.Get(otherID); exists {
 		_ = s.Order.Cancel()
 		e.stopBook.Remove(otherID)
+		e.emitCancel(s.Order)
 	}
 	e.dropOCO(oco)
 }
@@ -981,11 +1055,13 @@ func (e *Engine) match(taker *types.Order, dst []types.Trade) ([]types.Trade, ma
 			case STPCancelOldest:
 				_ = maker.Cancel()
 				_, _ = e.book.Remove(maker.ID)
+				e.emitCancel(maker)
 				continue
 			case STPCancelBoth:
 				taker.Status = types.OrderStatusCancelled
 				_ = maker.Cancel()
 				_, _ = e.book.Remove(maker.ID)
+				e.emitCancel(maker)
 				return e.recordLast(dst, start), makerOrders
 			case STPDecrement:
 				// Reduce both by the overlap with no trade; the smaller side fully
@@ -993,6 +1069,12 @@ func (e *Engine) match(taker *types.Order, dst []types.Trade) ([]types.Trade, ma
 				e.decrement(taker, maker)
 				if maker.RemainingQty == 0 {
 					_, _ = e.book.Remove(maker.ID)
+					e.emitCancel(maker)
+				} else {
+					// Shrunk in place, keeping queue position: there is no trade to
+					// infer the new size from, so without this a consumer's
+					// remaining-quantity accounting stays permanently wrong.
+					e.emitReplaced(maker)
 				}
 				if taker.RemainingQty == 0 {
 					taker.Status = types.OrderStatusCancelled
@@ -1020,6 +1102,7 @@ func (e *Engine) match(taker *types.Order, dst []types.Trade) ([]types.Trade, ma
 			if ib, ok := e.icebergOrders[maker.ID]; ok {
 				if ib.Refill() {
 					_ = e.book.Add(ib.Order)
+					e.emitAdd(ib.Order)
 				} else {
 					delete(e.icebergOrders, maker.ID)
 				}
@@ -1256,6 +1339,7 @@ func (e *Engine) matchProRata(taker *types.Order, dst []types.Trade) ([]types.Tr
 				if ib, ok := e.icebergOrders[maker.ID]; ok {
 					if ib.Refill() {
 						_ = e.book.Add(ib.Order)
+						e.emitAdd(ib.Order)
 					} else {
 						delete(e.icebergOrders, maker.ID)
 					}
@@ -1352,7 +1436,17 @@ func (e *Engine) executeTrade(taker, maker *types.Order, price, qty int64, dst [
 	tr.ID = e.tradeSeq
 	tr.SequenceNum = e.tradeSeq
 	tr.CreatedAt = now
-	return append(dst, tr)
+	dst = append(dst, tr)
+	e.pendTrade(&dst[len(dst)-1])
+	return dst
+}
+
+// pendTrade records an execution at the moment it happens.
+func (e *Engine) pendTrade(tr *types.Trade) {
+	if e.sink == nil {
+		return
+	}
+	e.pending = append(e.pending, Event{Kind: EventTrade, OrderID: tr.TakerOrderID, Trade: tr})
 }
 
 // ForceTrade injects a trade between two orders at price for qty — a privileged
@@ -1443,6 +1537,7 @@ func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
 		_, _ = e.book.Remove(orderID)
 		delete(e.icebergOrders, orderID) // no-op for non-iceberg orders
 		e.emitCancel(order)
+		e.flushPending()
 		return order, nil
 	}
 
@@ -1454,6 +1549,7 @@ func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
 		_ = s.Order.Cancel()
 		s.Order.UpdatedAt = now
 		e.emitCancel(s.Order)
+		e.flushPending()
 		return s.Order, nil
 	}
 
@@ -1465,6 +1561,7 @@ func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
 		_ = ts.Order.Cancel()
 		ts.Order.UpdatedAt = now
 		e.emitCancel(ts.Order)
+		e.flushPending()
 		return ts.Order, nil
 	}
 
