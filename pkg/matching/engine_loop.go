@@ -2,6 +2,7 @@ package matching
 
 import (
 	"errors"
+	"sync"
 
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -13,6 +14,22 @@ import (
 // space instead, so cancels always get through: use TrySubmit for sheddable new
 // liquidity and Cancel for the reliable cancel path under overload.
 var ErrQueueFull = errors.New("matching: runner command queue is full")
+
+// ErrShuttingDown is reported by every submit path once Close has been called.
+// Producers get a refusal instead of a panic, so a server does not have to
+// guarantee that all N connection goroutines have stopped before it shuts the
+// matcher down — a guarantee no real ingress can actually make.
+var ErrShuttingDown = errors.New("matching: runner is shutting down")
+
+// shutdownResult is the refusal handed back to an order-bearing submit that
+// arrived after the fence closed. It is a rejection rather than a nil result so
+// callers can treat it exactly like any other rejected order.
+func shutdownResult(order *types.Order) *MatchResult {
+	if order != nil {
+		order.Status = types.OrderStatusRejected
+	}
+	return &MatchResult{Order: order, Status: types.OrderStatusRejected, RejectionReason: ErrShuttingDown}
+}
 
 // Runner drives an Engine from a single matching goroutine, fed by an MPSC
 // command queue. It is the concurrency front for the engine: many producers may
@@ -32,7 +49,9 @@ var ErrQueueFull = errors.New("matching: runner command queue is full")
 type Runner struct {
 	engine *Engine
 	queue  chan command
-	done   chan struct{}
+	done   chan struct{} // closed when the matching goroutine has exited
+	quit   chan struct{} // the shutdown fence; closed by Close
+	once   sync.Once     // Close is idempotent
 }
 
 // RunnerConfig configures a Runner.
@@ -51,18 +70,32 @@ func NewRunner(cfg RunnerConfig) *Runner {
 		engine: NewEngine(cfg.Engine),
 		queue:  make(chan command, cfg.QueueSize),
 		done:   make(chan struct{}),
+		quit:   make(chan struct{}),
 	}
 	go r.loop()
 	return r
 }
 
 // loop is the single matching goroutine: it owns the engine and applies commands
-// in FIFO order until the queue is closed.
+// in FIFO order until the shutdown fence closes, then drains whatever was already
+// accepted so no producer is left waiting on a reply that never comes.
 func (r *Runner) loop() {
-	for cmd := range r.queue {
-		r.dispatch(cmd)
+	defer close(r.done)
+	for {
+		select {
+		case cmd := <-r.queue:
+			r.dispatch(cmd)
+		case <-r.quit:
+			for {
+				select {
+				case cmd := <-r.queue:
+					r.dispatch(cmd)
+				default:
+					return
+				}
+			}
+		}
 	}
-	close(r.done)
 }
 
 func (r *Runner) dispatch(cmd command) {
@@ -98,50 +131,106 @@ func (r *Runner) dispatch(cmd command) {
 	}
 }
 
-// send enqueues cmd and blocks until the matching goroutine has applied it.
-func (r *Runner) send(cmd command) cmdReply {
+// send enqueues cmd and blocks until the matching goroutine has applied it,
+// reporting ok=false if the runner is shutting down. It never panics and never
+// blocks forever: the fence is checked before enqueueing, while waiting for queue
+// space, and while waiting for the reply.
+func (r *Runner) send(cmd command) (cmdReply, bool) {
 	reply := make(chan cmdReply, 1)
 	cmd.reply = reply
-	r.queue <- cmd
-	return <-reply
+
+	select {
+	case <-r.quit:
+		return cmdReply{}, false
+	default:
+	}
+
+	select {
+	case r.queue <- cmd:
+	case <-r.quit:
+		return cmdReply{}, false
+	}
+
+	select {
+	case rep := <-reply:
+		return rep, true
+	case <-r.done:
+		// The loop exited. It drains before doing so, so a reply may already be
+		// waiting — select above picks randomly between two ready cases, and
+		// losing an applied command's result here would be a silent lie.
+		select {
+		case rep := <-reply:
+			return rep, true
+		default:
+			return cmdReply{}, false
+		}
+	}
 }
 
 // --- synchronous API (mirrors Engine; safe for concurrent producers) ---
 
-// Process submits a limit/market order and waits for its result.
+// Process submits a limit/market order and waits for its result. After Close it
+// returns a rejection carrying ErrShuttingDown rather than panicking.
 func (r *Runner) Process(order *types.Order) *MatchResult {
-	return r.send(command{kind: cmdSubmit, order: order}).match
+	rep, ok := r.send(command{kind: cmdSubmit, order: order})
+	if !ok {
+		return shutdownResult(order)
+	}
+	return rep.match
 }
 
 // Cancel removes a resting order (or pending stop) belonging to userID.
 func (r *Runner) Cancel(orderID int64, userID string) (*types.Order, error) {
-	rep := r.send(command{kind: cmdCancel, cancelID: orderID, userID: userID})
+	rep, ok := r.send(command{kind: cmdCancel, cancelID: orderID, userID: userID})
+	if !ok {
+		return nil, ErrShuttingDown
+	}
 	return rep.order, rep.err
 }
 
 // ProcessStop submits a stop / stop-limit order.
 func (r *Runner) ProcessStop(s *types.StopOrder) *MatchResult {
-	return r.send(command{kind: cmdStop, stop: s}).match
+	rep, ok := r.send(command{kind: cmdStop, stop: s})
+	if !ok {
+		return shutdownResult(s.Order)
+	}
+	return rep.match
 }
 
 // ProcessOCO submits a one-cancels-other pair.
 func (r *Runner) ProcessOCO(o *types.OCOOrder) *MatchResult {
-	return r.send(command{kind: cmdOCO, oco: o}).match
+	rep, ok := r.send(command{kind: cmdOCO, oco: o})
+	if !ok {
+		return shutdownResult(o.Primary)
+	}
+	return rep.match
 }
 
 // ProcessIceberg submits an iceberg order.
 func (r *Runner) ProcessIceberg(ib *types.IcebergOrder) *MatchResult {
-	return r.send(command{kind: cmdIceberg, iceberg: ib}).match
+	rep, ok := r.send(command{kind: cmdIceberg, iceberg: ib})
+	if !ok {
+		return shutdownResult(ib.Order)
+	}
+	return rep.match
 }
 
 // ProcessPegged submits a pegged order.
 func (r *Runner) ProcessPegged(p *types.PeggedOrder) *MatchResult {
-	return r.send(command{kind: cmdPegged, pegged: p}).match
+	rep, ok := r.send(command{kind: cmdPegged, pegged: p})
+	if !ok {
+		return shutdownResult(p.Order)
+	}
+	return rep.match
 }
 
 // ProcessTrailingStop submits a trailing stop.
 func (r *Runner) ProcessTrailingStop(ts *types.TrailingStop) *MatchResult {
-	return r.send(command{kind: cmdTrailing, trailing: ts}).match
+	rep, ok := r.send(command{kind: cmdTrailing, trailing: ts})
+	if !ok {
+		return shutdownResult(ts.Order)
+	}
+	return rep.match
 }
 
 // Halt suspends trading until Resume.
@@ -166,8 +255,25 @@ func (r *Runner) SetMarkPrice(price int64) { r.send(command{kind: cmdSetMark, ca
 func (r *Runner) SubmitAsync(order *types.Order) <-chan *MatchResult {
 	out := make(chan *MatchResult, 1)
 	reply := make(chan cmdReply, 1)
-	r.queue <- command{kind: cmdSubmit, order: order, reply: reply}
-	go func() { out <- (<-reply).match }()
+	select {
+	case r.queue <- command{kind: cmdSubmit, order: order, reply: reply}:
+	case <-r.quit:
+		out <- shutdownResult(order)
+		return out
+	}
+	go func() {
+		select {
+		case rep := <-reply:
+			out <- rep.match
+		case <-r.done:
+			select {
+			case rep := <-reply:
+				out <- rep.match
+			default:
+				out <- shutdownResult(order)
+			}
+		}
+	}()
 	return out
 }
 
@@ -177,10 +283,25 @@ func (r *Runner) SubmitAsync(order *types.Order) <-chan *MatchResult {
 // bounded-backpressure path for new liquidity under overload; Cancel keeps its
 // blocking path so cancels are never shed.
 func (r *Runner) TrySubmit(order *types.Order) (*MatchResult, error) {
+	select {
+	case <-r.quit:
+		return nil, ErrShuttingDown
+	default:
+	}
 	reply := make(chan cmdReply, 1)
 	select {
 	case r.queue <- command{kind: cmdSubmit, order: order, reply: reply}:
-		return (<-reply).match, nil
+		select {
+		case rep := <-reply:
+			return rep.match, nil
+		case <-r.done:
+			select {
+			case rep := <-reply:
+				return rep.match, nil
+			default:
+				return nil, ErrShuttingDown
+			}
+		}
 	default:
 		return nil, ErrQueueFull
 	}
@@ -189,11 +310,28 @@ func (r *Runner) TrySubmit(order *types.Order) (*MatchResult, error) {
 // TrySubmitAsync is the non-blocking async submit: it enqueues without waiting and
 // returns a channel for the result, or ErrQueueFull if the queue is full.
 func (r *Runner) TrySubmitAsync(order *types.Order) (<-chan *MatchResult, error) {
+	select {
+	case <-r.quit:
+		return nil, ErrShuttingDown
+	default:
+	}
 	reply := make(chan cmdReply, 1)
 	select {
 	case r.queue <- command{kind: cmdSubmit, order: order, reply: reply}:
 		out := make(chan *MatchResult, 1)
-		go func() { out <- (<-reply).match }()
+		go func() {
+			select {
+			case rep := <-reply:
+				out <- rep.match
+			case <-r.done:
+				select {
+				case rep := <-reply:
+					out <- rep.match
+				default:
+					out <- shutdownResult(order)
+				}
+			}
+		}()
 		return out, nil
 	default:
 		return nil, ErrQueueFull
@@ -233,10 +371,16 @@ func (r *Runner) PendingStopCount() int { return r.engine.PendingStopCount() }
 // Snapshot returns a top-of-book view to the given depth.
 func (r *Runner) Snapshot(depth int) *orderbook.Snapshot { return r.engine.Snapshot(depth) }
 
-// Close stops the matching goroutine after all queued commands have been
-// applied. It is safe to call once; further submissions will panic on the closed
-// queue, so stop producing before calling Close.
+// Close stops the matching goroutine after the commands already accepted into the
+// queue have been applied, and waits for it to exit. It is idempotent and safe to
+// call while producers are still running: submissions racing with it are refused
+// with ErrShuttingDown rather than panicking.
+//
+// It closes a separate fence rather than the command queue itself. Closing the
+// queue from the consumer side panicked any producer mid-send, which made correct
+// shutdown require proving that every producer had already stopped — not a
+// property a server with a goroutine per connection can establish.
 func (r *Runner) Close() {
-	close(r.queue)
+	r.once.Do(func() { close(r.quit) })
 	<-r.done
 }
