@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
@@ -208,17 +209,64 @@ func RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64) {
 	}
 }
 
-// WriteSnapshot writes a snapshot to path atomically (temp file + rename).
-func WriteSnapshot(path string, snap *matching.EngineSnapshot) error {
+// WriteSnapshot writes a snapshot to path durably: write to a temp file, fsync
+// it, rename over the target, then fsync the parent directory.
+//
+// The rename alone is atomic but not durable. Without the first fsync the file's
+// contents may still be in the page cache when the rename lands, so a crash can
+// leave a snapshot that exists, has the right name and is empty or truncated —
+// and Recover will load it. Without the second, the directory entry itself may
+// not survive, leaving the target pointing at nothing. Both are the standard
+// cost of a crash-atomic file swap.
+//
+// On any failure the temp file is removed rather than left beside the target,
+// and the previous snapshot is untouched: a failed write never destroys the last
+// good one.
+func WriteSnapshot(path string, snap *matching.EngineSnapshot) (err error) {
 	b, err := json.Marshal(snap)
 	if err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
+
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if _, err = f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir fsyncs a directory so a rename into it survives a crash. Opening a
+// directory for read and syncing it is the portable POSIX form; platforms that
+// refuse it report no error the caller can act on, so the failure is swallowed
+// rather than failing a snapshot that is already on disk.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil //nolint:nilerr // the snapshot is written; directory durability is best-effort
+	}
+	defer d.Close()
+	_ = d.Sync()
+	return nil
 }
 
 // Checkpoint takes a snapshot of eng, stamps it with the command-log sequence of
