@@ -308,6 +308,15 @@ func NewEngine(config Config) *Engine {
 	}
 }
 
+// SetEventSink attaches (or clears) the event sink after construction. Recovery
+// needs it: an engine must replay its log with no sink, so a lifetime of
+// historical events is not republished to live consumers, and only then start
+// publishing.
+//
+// Call it before the engine is handed to a Runner; it is not safe to change the
+// sink while the matching goroutine is running.
+func (e *Engine) SetEventSink(s EventSink) { e.sink = s }
+
 // SetReplaying toggles replay/bootstrap mode. It suppresses exactly the controls
 // that depend on wall-clock time — the minimum resting time and the band-breach
 // pause — because those would be re-evaluated against replay-time timestamps and

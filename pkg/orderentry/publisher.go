@@ -23,12 +23,14 @@ type Publisher struct {
 	cond     *sync.Cond
 	pending  []matching.Event
 	closed   bool
+	pumping  bool // Pump is running, so it owns finishing
 	dropped  atomic.Uint64
 	maxDepth int
 	reg      *Registry
 	done     chan struct{}
 	busy     bool       // the pump is mid-batch
 	drained  *sync.Cond // signalled when the queue empties
+	doneOnce sync.Once  // whoever finishes first closes done
 }
 
 // NewPublisher builds a publisher feeding reg. maxDepth bounds the queue between
@@ -96,7 +98,17 @@ func (p *Publisher) Dropped() uint64 { return p.dropped.Load() }
 // whole point of the split: the matcher's cost is one value-copy per event, and
 // everything expensive is somebody else's goroutine.
 func (p *Publisher) Pump() {
-	defer close(p.done)
+	p.mu.Lock()
+	if p.closed {
+		// Closed before the pump ever ran: Close has already finished us, and
+		// touching done here would close it twice.
+		p.mu.Unlock()
+		return
+	}
+	p.pumping = true
+	p.mu.Unlock()
+
+	defer p.finish()
 	for {
 		p.mu.Lock()
 		for len(p.pending) == 0 && !p.closed {
@@ -122,7 +134,15 @@ func (p *Publisher) Pump() {
 	}
 }
 
+// finish marks the publisher finished exactly once, whether that is the pump
+// exiting or Close deciding no pump will ever run.
+func (p *Publisher) finish() { p.doneOnce.Do(func() { close(p.done) }) }
+
 // Close stops the pump after it has drained, and waits for it.
+//
+// It does not require that Pump was ever started. A publisher constructed and
+// then closed without pumping — an aborted startup, or a server built but never
+// served — used to block here forever waiting on a goroutine that did not exist.
 func (p *Publisher) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -131,8 +151,14 @@ func (p *Publisher) Close() {
 		return
 	}
 	p.closed = true
+	pumping := p.pumping
 	p.mu.Unlock()
+
 	p.cond.Broadcast()
+	if !pumping {
+		p.finish()
+		return
+	}
 	<-p.done
 }
 

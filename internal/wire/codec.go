@@ -2,9 +2,31 @@ package wire
 
 import "encoding/binary"
 
-// Every payload is fixed-width big-endian. Encoders append into a caller buffer
-// so a hot outbound path can reuse one; decoders take a slice and never retain
-// it, so a reader can reuse its receive buffer too.
+// Every payload is fixed-width big-endian and begins with two bytes: the message
+// type, then the protocol version. Encoders append into a caller buffer so a hot
+// outbound path can reuse one; decoders take a slice and never retain it, so a
+// reader can reuse its receive buffer too.
+//
+// Decoders verify the type byte. A payload that decodes cleanly as the wrong
+// message is the failure mode this header exists to prevent.
+
+// header writes the type and version and returns the offset of the body.
+func header(b []byte, msgType, version uint8) int {
+	b[0] = msgType
+	b[1] = version
+	return 2
+}
+
+// checkHeader verifies a payload is the message the caller asked for.
+func checkHeader(src []byte, width int, want uint8) error {
+	if len(src) < width {
+		return ErrShort
+	}
+	if src[0] != want {
+		return ErrBadType
+	}
+	return nil
+}
 
 // --- Enter ---
 
@@ -14,11 +36,11 @@ func EncodeEnter(dst []byte, m Enter) ([]byte, error) {
 	dst = append(dst, make([]byte, EnterLen)...)
 	b := dst[base:]
 
-	b[0] = m.Version
-	if err := putFixed(b[1:1+ClOrdIDLen], m.ClOrdID); err != nil {
+	off := header(b, MsgEnter, m.Version)
+	if err := putFixed(b[off:off+ClOrdIDLen], m.ClOrdID); err != nil {
 		return nil, err
 	}
-	off := 1 + ClOrdIDLen
+	off += ClOrdIDLen
 	if err := putFixed(b[off:off+SymbolLen], m.Symbol); err != nil {
 		return nil, err
 	}
@@ -35,13 +57,13 @@ func EncodeEnter(dst []byte, m Enter) ([]byte, error) {
 
 // DecodeEnter reads an Enter payload from src.
 func DecodeEnter(src []byte) (Enter, error) {
-	if len(src) < EnterLen {
-		return Enter{}, ErrShort
+	if err := checkHeader(src, EnterLen, MsgEnter); err != nil {
+		return Enter{}, err
 	}
-	off := 1 + ClOrdIDLen
+	off := 2 + ClOrdIDLen
 	m := Enter{
-		Version: src[0],
-		ClOrdID: getFixed(src[1 : 1+ClOrdIDLen]),
+		Version: src[1],
+		ClOrdID: getFixed(src[2 : 2+ClOrdIDLen]),
 		Symbol:  getFixed(src[off : off+SymbolLen]),
 	}
 	off += SymbolLen
@@ -62,8 +84,8 @@ func EncodeCancel(dst []byte, m Cancel) ([]byte, error) {
 	base := len(dst)
 	dst = append(dst, make([]byte, CancelLen)...)
 	b := dst[base:]
-	b[0] = m.Version
-	if err := putFixed(b[1:1+ClOrdIDLen], m.ClOrdID); err != nil {
+	off := header(b, MsgCancel, m.Version)
+	if err := putFixed(b[off:off+ClOrdIDLen], m.ClOrdID); err != nil {
 		return nil, err
 	}
 	return dst, nil
@@ -71,10 +93,10 @@ func EncodeCancel(dst []byte, m Cancel) ([]byte, error) {
 
 // DecodeCancel reads a Cancel payload from src.
 func DecodeCancel(src []byte) (Cancel, error) {
-	if len(src) < CancelLen {
-		return Cancel{}, ErrShort
+	if err := checkHeader(src, CancelLen, MsgCancel); err != nil {
+		return Cancel{}, err
 	}
-	return Cancel{Version: src[0], ClOrdID: getFixed(src[1 : 1+ClOrdIDLen])}, nil
+	return Cancel{Version: src[1], ClOrdID: getFixed(src[2 : 2+ClOrdIDLen])}, nil
 }
 
 // --- Accepted ---
@@ -84,11 +106,11 @@ func EncodeAccepted(dst []byte, m Accepted) ([]byte, error) {
 	base := len(dst)
 	dst = append(dst, make([]byte, AcceptedLen)...)
 	b := dst[base:]
-	b[0] = m.Version
-	if err := putFixed(b[1:1+ClOrdIDLen], m.ClOrdID); err != nil {
+	off := header(b, MsgAccepted, m.Version)
+	if err := putFixed(b[off:off+ClOrdIDLen], m.ClOrdID); err != nil {
 		return nil, err
 	}
-	off := 1 + ClOrdIDLen
+	off += ClOrdIDLen
 	binary.BigEndian.PutUint64(b[off:], uint64(m.Price))
 	binary.BigEndian.PutUint64(b[off+8:], uint64(m.Quantity))
 	b[off+16] = m.Side
@@ -97,13 +119,13 @@ func EncodeAccepted(dst []byte, m Accepted) ([]byte, error) {
 
 // DecodeAccepted reads an Accepted payload from src.
 func DecodeAccepted(src []byte) (Accepted, error) {
-	if len(src) < AcceptedLen {
-		return Accepted{}, ErrShort
+	if err := checkHeader(src, AcceptedLen, MsgAccepted); err != nil {
+		return Accepted{}, err
 	}
-	off := 1 + ClOrdIDLen
+	off := 2 + ClOrdIDLen
 	return Accepted{
-		Version:  src[0],
-		ClOrdID:  getFixed(src[1:off]),
+		Version:  src[1],
+		ClOrdID:  getFixed(src[2:off]),
 		Price:    int64(binary.BigEndian.Uint64(src[off:])),
 		Quantity: int64(binary.BigEndian.Uint64(src[off+8:])),
 		Side:     src[off+16],
@@ -117,11 +139,11 @@ func EncodeExecuted(dst []byte, m Executed) ([]byte, error) {
 	base := len(dst)
 	dst = append(dst, make([]byte, ExecutedLen)...)
 	b := dst[base:]
-	b[0] = m.Version
-	if err := putFixed(b[1:1+ClOrdIDLen], m.ClOrdID); err != nil {
+	off := header(b, MsgExecuted, m.Version)
+	if err := putFixed(b[off:off+ClOrdIDLen], m.ClOrdID); err != nil {
 		return nil, err
 	}
-	off := 1 + ClOrdIDLen
+	off += ClOrdIDLen
 	binary.BigEndian.PutUint64(b[off:], uint64(m.Price))
 	binary.BigEndian.PutUint64(b[off+8:], uint64(m.Quantity))
 	binary.BigEndian.PutUint64(b[off+16:], uint64(m.LeavesQty))
@@ -131,13 +153,13 @@ func EncodeExecuted(dst []byte, m Executed) ([]byte, error) {
 
 // DecodeExecuted reads an Executed payload from src.
 func DecodeExecuted(src []byte) (Executed, error) {
-	if len(src) < ExecutedLen {
-		return Executed{}, ErrShort
+	if err := checkHeader(src, ExecutedLen, MsgExecuted); err != nil {
+		return Executed{}, err
 	}
-	off := 1 + ClOrdIDLen
+	off := 2 + ClOrdIDLen
 	return Executed{
-		Version:   src[0],
-		ClOrdID:   getFixed(src[1:off]),
+		Version:   src[1],
+		ClOrdID:   getFixed(src[2:off]),
 		Price:     int64(binary.BigEndian.Uint64(src[off:])),
 		Quantity:  int64(binary.BigEndian.Uint64(src[off+8:])),
 		LeavesQty: int64(binary.BigEndian.Uint64(src[off+16:])),
@@ -147,55 +169,55 @@ func DecodeExecuted(src []byte) (Executed, error) {
 
 // --- Rejected / Canceled / CmdReject (identical shape, distinct types) ---
 
-func encodeIDReason(dst []byte, width int, version uint8, clOrdID string, reason uint16) ([]byte, error) {
+func encodeIDReason(dst []byte, width int, msgType, version uint8, clOrdID string, reason uint16) ([]byte, error) {
 	base := len(dst)
 	dst = append(dst, make([]byte, width)...)
 	b := dst[base:]
-	b[0] = version
-	if err := putFixed(b[1:1+ClOrdIDLen], clOrdID); err != nil {
+	off := header(b, msgType, version)
+	if err := putFixed(b[off:off+ClOrdIDLen], clOrdID); err != nil {
 		return nil, err
 	}
-	binary.BigEndian.PutUint16(b[1+ClOrdIDLen:], reason)
+	binary.BigEndian.PutUint16(b[off+ClOrdIDLen:], reason)
 	return dst, nil
 }
 
-func decodeIDReason(src []byte, width int) (uint8, string, uint16, error) {
-	if len(src) < width {
-		return 0, "", 0, ErrShort
+func decodeIDReason(src []byte, width int, want uint8) (uint8, string, uint16, error) {
+	if err := checkHeader(src, width, want); err != nil {
+		return 0, "", 0, err
 	}
-	return src[0], getFixed(src[1 : 1+ClOrdIDLen]), binary.BigEndian.Uint16(src[1+ClOrdIDLen:]), nil
+	return src[1], getFixed(src[2 : 2+ClOrdIDLen]), binary.BigEndian.Uint16(src[2+ClOrdIDLen:]), nil
 }
 
 // EncodeRejected appends a Rejected payload to dst.
 func EncodeRejected(dst []byte, m Rejected) ([]byte, error) {
-	return encodeIDReason(dst, RejectedLen, m.Version, m.ClOrdID, m.Reason)
+	return encodeIDReason(dst, RejectedLen, MsgRejected, m.Version, m.ClOrdID, m.Reason)
 }
 
 // DecodeRejected reads a Rejected payload from src.
 func DecodeRejected(src []byte) (Rejected, error) {
-	v, id, r, err := decodeIDReason(src, RejectedLen)
+	v, id, r, err := decodeIDReason(src, RejectedLen, MsgRejected)
 	return Rejected{Version: v, ClOrdID: id, Reason: r}, err
 }
 
 // EncodeCanceled appends a Canceled payload to dst.
 func EncodeCanceled(dst []byte, m Canceled) ([]byte, error) {
-	return encodeIDReason(dst, CanceledLen, m.Version, m.ClOrdID, m.Reason)
+	return encodeIDReason(dst, CanceledLen, MsgCanceled, m.Version, m.ClOrdID, m.Reason)
 }
 
 // DecodeCanceled reads a Canceled payload from src.
 func DecodeCanceled(src []byte) (Canceled, error) {
-	v, id, r, err := decodeIDReason(src, CanceledLen)
+	v, id, r, err := decodeIDReason(src, CanceledLen, MsgCanceled)
 	return Canceled{Version: v, ClOrdID: id, Reason: r}, err
 }
 
 // EncodeCmdReject appends a CmdReject payload to dst.
 func EncodeCmdReject(dst []byte, m CmdReject) ([]byte, error) {
-	return encodeIDReason(dst, CmdRejectLen, m.Version, m.ClOrdID, m.Reason)
+	return encodeIDReason(dst, CmdRejectLen, MsgCmdReject, m.Version, m.ClOrdID, m.Reason)
 }
 
 // DecodeCmdReject reads a CmdReject payload from src.
 func DecodeCmdReject(src []byte) (CmdReject, error) {
-	v, id, r, err := decodeIDReason(src, CmdRejectLen)
+	v, id, r, err := decodeIDReason(src, CmdRejectLen, MsgCmdReject)
 	return CmdReject{Version: v, ClOrdID: id, Reason: r}, err
 }
 
@@ -206,22 +228,22 @@ func EncodeReplaced(dst []byte, m Replaced) ([]byte, error) {
 	base := len(dst)
 	dst = append(dst, make([]byte, ReplacedLen)...)
 	b := dst[base:]
-	b[0] = m.Version
-	if err := putFixed(b[1:1+ClOrdIDLen], m.ClOrdID); err != nil {
+	off := header(b, MsgReplaced, m.Version)
+	if err := putFixed(b[off:off+ClOrdIDLen], m.ClOrdID); err != nil {
 		return nil, err
 	}
-	binary.BigEndian.PutUint64(b[1+ClOrdIDLen:], uint64(m.LeavesQty))
+	binary.BigEndian.PutUint64(b[off+ClOrdIDLen:], uint64(m.LeavesQty))
 	return dst, nil
 }
 
 // DecodeReplaced reads a Replaced payload from src.
 func DecodeReplaced(src []byte) (Replaced, error) {
-	if len(src) < ReplacedLen {
-		return Replaced{}, ErrShort
+	if err := checkHeader(src, ReplacedLen, MsgReplaced); err != nil {
+		return Replaced{}, err
 	}
 	return Replaced{
-		Version:   src[0],
-		ClOrdID:   getFixed(src[1 : 1+ClOrdIDLen]),
-		LeavesQty: int64(binary.BigEndian.Uint64(src[1+ClOrdIDLen:])),
+		Version:   src[1],
+		ClOrdID:   getFixed(src[2 : 2+ClOrdIDLen]),
+		LeavesQty: int64(binary.BigEndian.Uint64(src[2+ClOrdIDLen:])),
 	}, nil
 }

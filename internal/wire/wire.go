@@ -37,7 +37,11 @@ import (
 
 // Protocol version. Bumping it is a breaking change to every committed vector in
 // testdata, which is the point: the vectors are the freeze.
-const Version uint8 = 1
+//
+// v2 added an explicit message-type byte. v1 distinguished messages by payload
+// length, which meant any future message that happened to share a length with an
+// existing one would have been silently misread as it.
+const Version uint8 = 2
 
 // SoupBinTCP packet types. Lowercase letters are client-to-server, uppercase are
 // server-to-client, following the published spec.
@@ -54,8 +58,9 @@ const (
 	PacketLogoutRequest byte = 'O'
 )
 
-// Message types carried inside Unsequenced (inbound) and Sequenced (outbound)
-// packets.
+// Message types. Every payload begins with one of these, then Version. Encoding
+// the type explicitly rather than inferring it from length is what lets the
+// protocol grow: a new message is a new type byte, not a length nobody may reuse.
 const (
 	MsgEnter  uint8 = 'E' // inbound: new order
 	MsgCancel uint8 = 'C' // inbound: cancel by ClOrdID
@@ -136,7 +141,7 @@ type Enter struct {
 }
 
 // EnterLen is the encoded width of an Enter payload.
-const EnterLen = 1 + ClOrdIDLen + SymbolLen + 1 + 1 + 1 + 1 + 8 + 8
+const EnterLen = 1 + 1 + ClOrdIDLen + SymbolLen + 1 + 1 + 1 + 1 + 8 + 8
 
 // Cancel references an order by the client's own id. There is deliberately no
 // way to name an engine order id or another account.
@@ -146,7 +151,7 @@ type Cancel struct {
 }
 
 // CancelLen is the encoded width of a Cancel payload.
-const CancelLen = 1 + ClOrdIDLen
+const CancelLen = 1 + 1 + ClOrdIDLen
 
 // --- outbound payloads ---
 
@@ -161,7 +166,7 @@ type Accepted struct {
 }
 
 // AcceptedLen is the encoded width of an Accepted payload.
-const AcceptedLen = 1 + ClOrdIDLen + 8 + 8 + 1
+const AcceptedLen = 1 + 1 + ClOrdIDLen + 8 + 8 + 1
 
 // Rejected reports that an order was refused, with a code a client can branch on.
 type Rejected struct {
@@ -171,7 +176,7 @@ type Rejected struct {
 }
 
 // RejectedLen is the encoded width of a Rejected payload.
-const RejectedLen = 1 + ClOrdIDLen + 2
+const RejectedLen = 1 + 1 + ClOrdIDLen + 2
 
 // Executed is a fill. LeavesQty is carried because the event stream is proven to
 // reconstruct per-order remaining quantity (see TestEventStreamReconstructsBook);
@@ -186,7 +191,7 @@ type Executed struct {
 }
 
 // ExecutedLen is the encoded width of an Executed payload.
-const ExecutedLen = 1 + ClOrdIDLen + 8 + 8 + 8 + 1
+const ExecutedLen = 1 + 1 + ClOrdIDLen + 8 + 8 + 8 + 1
 
 // Canceled reports an order leaving the book, whether the client asked or the
 // venue did (self-trade prevention, an OCO twin, an IOC remainder, a kill switch).
@@ -197,7 +202,7 @@ type Canceled struct {
 }
 
 // CanceledLen is the encoded width of a Canceled payload.
-const CanceledLen = 1 + ClOrdIDLen + 2
+const CanceledLen = 1 + 1 + ClOrdIDLen + 2
 
 // Replaced reports an in-place size change that kept queue position — today,
 // self-trade-prevention DECREMENT.
@@ -208,7 +213,7 @@ type Replaced struct {
 }
 
 // ReplacedLen is the encoded width of a Replaced payload.
-const ReplacedLen = 1 + ClOrdIDLen + 8
+const ReplacedLen = 1 + 1 + ClOrdIDLen + 8
 
 // CmdReject refuses the command itself rather than an order — malformed input, a
 // rate limit, a saturated matcher. It is distinct from Rejected so a client can
@@ -220,7 +225,7 @@ type CmdReject struct {
 }
 
 // CmdRejectLen is the encoded width of a CmdReject payload.
-const CmdRejectLen = 1 + ClOrdIDLen + 2
+const CmdRejectLen = 1 + 1 + ClOrdIDLen + 2
 
 // --- encoding helpers ---
 
@@ -236,6 +241,23 @@ func putFixed(dst []byte, s string) error {
 		dst[i] = 0
 	}
 	return nil
+}
+
+// MsgTypeOf reports the message type of a payload, so a dispatcher can switch on
+// it without decoding. Length is never the discriminator.
+func MsgTypeOf(payload []byte) (uint8, bool) {
+	if len(payload) < 2 {
+		return 0, false
+	}
+	return payload[0], true
+}
+
+// VersionOf reports the protocol version a payload declares.
+func VersionOf(payload []byte) (uint8, bool) {
+	if len(payload) < 2 {
+		return 0, false
+	}
+	return payload[1], true
 }
 
 // getFixed reads a NUL-padded fixed-width field.

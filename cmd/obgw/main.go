@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -30,21 +31,33 @@ func main() {
 		accounts = flag.String("accounts", "", "comma-separated user:password pairs")
 		rate     = flag.Float64("rate", 1000, "per-account orders/second")
 		burst    = flag.Float64("burst", 200, "per-account burst allowance")
+		walPath  = flag.String("wal", "", "write-ahead log path (empty = no durability)")
+		snapPath = flag.String("snapshot", "", "snapshot path, used with -wal to bound restart time")
+		ckpt     = flag.Duration("checkpoint", 30*time.Second, "checkpoint interval")
 	)
 	flag.Parse()
 
 	cfg := Config{
-		Addr:       *addr,
-		Symbol:     *symbol,
-		Accounts:   parseAccounts(*accounts),
-		RatePerSec: *rate,
-		Burst:      *burst,
+		Addr:            *addr,
+		Symbol:          *symbol,
+		Accounts:        parseAccounts(*accounts),
+		RatePerSec:      *rate,
+		Burst:           *burst,
+		WALPath:         *walPath,
+		SnapshotPath:    *snapPath,
+		CheckpointEvery: *ckpt,
 	}
 	if len(cfg.Accounts) == 0 {
 		log.Println("obgw: no accounts configured — every login will be rejected")
 	}
+	if cfg.WALPath == "" {
+		log.Println("obgw: no -wal path — running WITHOUT durability; a crash loses the book")
+	}
 
-	srv := NewServer(cfg)
+	srv, err := NewServer(cfg)
+	if err != nil {
+		log.Fatalf("obgw: %v", err)
+	}
 	if err := srv.Listen(); err != nil {
 		log.Fatalf("obgw: listen: %v", err)
 	}

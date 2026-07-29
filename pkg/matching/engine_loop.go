@@ -77,6 +77,11 @@ type RunnerConfig struct {
 	Engine    Config
 	QueueSize int // command buffer capacity; 0 => 1024
 	// Log, if set, receives every mutating command before it is applied.
+	//
+	// Beware the typed-nil trap: assigning a nil *T to this interface field gives
+	// a non-nil interface holding a nil pointer, which passes a `!= nil` check and
+	// then panics on first use. Leave the field unset rather than assigning a
+	// possibly-nil concrete value.
 	Log CommandLog
 	// Replaying starts the engine in replay mode and suppresses logging, so a
 	// bootstrap replay does not re-append the log it is reading.
@@ -86,11 +91,25 @@ type RunnerConfig struct {
 // NewRunner builds a Runner over a fresh Engine and starts its matching
 // goroutine. Call Close to stop it.
 func NewRunner(cfg RunnerConfig) *Runner {
+	return NewRunnerFor(nil, cfg)
+}
+
+// NewRunnerFor builds a Runner over an EXISTING engine, which is what recovery
+// needs: an engine rebuilt from a snapshot plus log tail already holds the book,
+// and handing NewRunner a bare Config would silently discard it and start empty.
+// A nil engine is equivalent to NewRunner.
+//
+// The engine must not be driven from anywhere else afterwards — the Runner's
+// goroutine now owns it.
+func NewRunnerFor(eng *Engine, cfg RunnerConfig) *Runner {
 	if cfg.QueueSize <= 0 {
 		cfg.QueueSize = 1024
 	}
+	if eng == nil {
+		eng = NewEngine(cfg.Engine)
+	}
 	r := &Runner{
-		engine: NewEngine(cfg.Engine),
+		engine: eng,
 		queue:  make(chan command, cfg.QueueSize),
 		done:   make(chan struct{}),
 		quit:   make(chan struct{}),

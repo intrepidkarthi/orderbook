@@ -10,10 +10,20 @@ import (
 	"github.com/intrepidkarthi/orderbook/internal/wire"
 )
 
+// mustServer builds a server or fails the test.
+func mustServer(t *testing.T, cfg Config) *Server {
+	t.Helper()
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	return srv
+}
+
 // testServer starts a server on an ephemeral port with two accounts.
 func testServer(t *testing.T) *Server {
 	t.Helper()
-	srv := NewServer(Config{
+	srv := mustServer(t, Config{
 		Addr:          "127.0.0.1:0",
 		Symbol:        "X",
 		Incarnation:   "INC0000001",
@@ -142,7 +152,7 @@ func (c *client) await(t *testing.T, wantLen int, timeout time.Duration) ([]byte
 // TestLoginDefaultsToDeny — an unconfigured venue must reject everyone, not admit
 // everyone.
 func TestLoginDefaultsToDeny(t *testing.T) {
-	srv := NewServer(Config{Addr: "127.0.0.1:0", Symbol: "X"})
+	srv := mustServer(t, Config{Addr: "127.0.0.1:0", Symbol: "X"})
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -287,7 +297,7 @@ func TestCannotCancelAnotherAccountsOrder(t *testing.T) {
 // TestFlooderIsThrottledNotFatal — a client hammering the venue gets refusals,
 // and the venue keeps serving everyone else.
 func TestFlooderIsThrottled(t *testing.T) {
-	srv := NewServer(Config{
+	srv := mustServer(t, Config{
 		Addr: "127.0.0.1:0", Symbol: "X", Incarnation: "INC1",
 		Accounts:   map[string]string{"alice": "pw1", "bob": "pw2"},
 		RatePerSec: 5, Burst: 5, OutboundDepth: 4096, StreamRing: 4096,
@@ -319,7 +329,7 @@ func TestFlooderIsThrottled(t *testing.T) {
 // TestNonReadingClientIsDisconnected — a client that stops reading must be cut
 // off rather than allowed to back up into the venue.
 func TestNonReadingClientIsDisconnected(t *testing.T) {
-	srv := NewServer(Config{
+	srv := mustServer(t, Config{
 		Addr: "127.0.0.1:0", Symbol: "X", Incarnation: "INC1",
 		Accounts:   map[string]string{"alice": "pw1", "bob": "pw2"},
 		RatePerSec: 1e6, Burst: 1e6,

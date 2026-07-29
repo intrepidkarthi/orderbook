@@ -7,6 +7,64 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-29
+
+A hostile re-read of v0.10.0, and the repairs. Everything below was found by
+reviewing the new code the way the original critique reviewed the old — looking
+for fields that exist but are never checked, constants declared and never used,
+and claims the code does not back.
+
+### Fixed
+
+- **The protocol had no message type.** Eight `Msg*` constants were declared and
+  never used; the server told Enter from Cancel by payload length. Any future
+  message sharing a length with an existing one would have been silently misread
+  as it, and a dead `switch payload[0]` block carried a comment describing a type
+  byte that did not exist. Every payload now leads with an explicit type, both
+  ends verify it, and the protocol is at **version 2** — which is what spending a
+  version freeze is supposed to look like.
+- **`Symbol` was decoded and thrown away.** The gateway built every order with
+  its own configured instrument and never looked at the one the client sent, so
+  an order naming any symbol was booked here. Now refused.
+- **The reference server had no durability.** The library ships a write-ahead
+  log, a checkpoint and a documented seam, and `cmd/obgw` wired up none of it —
+  the one artifact showing people how to use this demonstrated running without
+  it. Now `-wal`, `-snapshot` and `-checkpoint`, with group commit, recovery on
+  start, and a startup warning when durability is off.
+- **`NewServer` recovered from disk and discarded the result**, building its
+  runner from a bare config. Added `matching.NewRunnerFor`, which takes an
+  already-recovered engine, because `NewRunner` silently starting empty is the
+  trap that caused it.
+- **No timeouts anywhere.** No read deadline, no idle timeout, and
+  `PacketServerHeartbt` was declared and never sent. Connect and say nothing and
+  a goroutine, a buffer and a stream lived forever. Now a 10s unauthenticated
+  login deadline, a 30s authenticated idle timeout refreshed by any packet, and a
+  5s server heartbeat so a client can tell a quiet venue from a dead one.
+- **`Publisher.Close` deadlocked when `Pump` had never run**, waiting forever on
+  a goroutine that did not exist. A publisher built and closed without serving —
+  an aborted startup — hung the process.
+- **A typed-nil `CommandLog` segfaulted the matcher.** Assigning a nil
+  `*wal.Writer` to the interface field yields a non-nil interface holding a nil
+  pointer, so the `!= nil` guard passed and the first command dereferenced nil.
+  Fixed at the call site and documented on the field, since the API invites it.
+
+### Added
+
+- `matching.NewRunnerFor` and `Engine.SetEventSink`. The latter exists because
+  recovery must replay with no sink attached — otherwise restarting republishes a
+  lifetime of historical executions at whoever connects next.
+- Tests for every item above, plus one asserting the reason-code vocabulary
+  defined in `internal/wire` and `pkg/orderentry` still agrees. It was duplicated
+  across two packages with nothing checking it.
+
+### Changed
+
+- `docs/PROTOCOL.md` documents v2, the timeout and heartbeat regime, and the
+  durability flags. It also states plainly that the golden vectors were generated
+  by running the encoder: they prove the layout has not changed *accidentally*,
+  which is a real job, but they do not prove it is correct. A ratchet, not a
+  specification.
+
 ## [0.10.0] - 2026-07-29
 
 Adds the network edge. v0.9.0 fixed what was broken; this release adds what was
