@@ -301,12 +301,24 @@ func NewEngine(config Config) *Engine {
 	}
 }
 
-// SetReplaying toggles replay/bootstrap mode. In replay mode the engine bypasses
-// the live-ingress admission controls (minimum resting time and the per-order
-// size caps) because the command log it is replaying already reflects commands
-// that passed those checks live — re-litigating them against replay-time
-// timestamps would wrongly reject an accepted cancel and diverge the recovered
-// book. Recovery paths (see pkg/wal Restore) wrap replay in SetReplaying(true) /
+// SetReplaying toggles replay/bootstrap mode. It suppresses exactly the controls
+// that depend on wall-clock time — the minimum resting time and the band-breach
+// pause — because those would be re-evaluated against replay-time timestamps and
+// would wrongly reject commands the live engine accepted.
+//
+// It does NOT suppress the deterministic admission checks. The command log is
+// written write-ahead and so records commands as submitted rather than as
+// accepted; the per-order caps, the notional overflow guard and the duplicate
+// client-order-id check are pure functions of the order, the configuration and
+// the replayed book, so re-running them reproduces the live outcome. Skipping
+// them let an order the live engine rejected rest on the recovered book.
+//
+// The corollary is that configuration must not change across a recovery. Tighten
+// a cap between the crash and the restart and replay will legitimately reject
+// commands that were accepted before it, producing a book that differs from the
+// one that crashed — correctly, but not identically.
+//
+// Recovery paths (see pkg/wal Restore) wrap replay in SetReplaying(true) /
 // SetReplaying(false). The deterministic matching itself is unaffected.
 func (e *Engine) SetReplaying(v bool) { e.replaying = v }
 
@@ -336,12 +348,25 @@ func saturatingAdd(a, b int64) int64 {
 
 // checkOrderCaps enforces the optional per-order size/notional limits and always
 // rejects an order whose notional overflows int64. Privileged (liquidation/ADL)
-// orders bypass the configured caps but are still overflow-checked. Bypassed in
-// replay mode.
+// orders bypass the configured caps but are still overflow-checked.
+//
+// These run during replay too. The command log is written write-ahead, so it
+// records commands as SUBMITTED, not as accepted — an order the live engine
+// rejected is in the log like any other. Every check here is a deterministic
+// function of the submitted order, the configuration and the replayed book, so
+// re-running them reproduces the live decision exactly; skipping them instead
+// rested live-rejected orders on the recovered book and silently diverged it from
+// the engine that crashed.
+//
+// The overflow guard in particular is an arithmetic invariant rather than ingress
+// policy: a corrupt or hand-edited log entry must not be able to replay a
+// notional that wraps int64 into the book.
+//
+// The genuinely time-dependent controls are not here — minimum resting time and
+// the band-breach pause gate on e.replaying at their own call sites, because
+// re-evaluating those against replay-time timestamps would wrongly reject
+// commands the live engine accepted.
 func (e *Engine) checkOrderCaps(order *types.Order) error {
-	if e.replaying {
-		return nil
-	}
 	priv := order.Privileged
 	if !priv && e.config.MinOrderQty > 0 && order.Quantity < e.config.MinOrderQty {
 		return types.ErrOrderBelowMinQty
