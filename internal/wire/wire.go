@@ -1,0 +1,256 @@
+// Package wire is the binary order-entry format spoken by cmd/obgw.
+//
+// Framing and session semantics are SoupBinTCP 3.00 — a length-prefixed,
+// typed-packet session layer with heartbeats and sequenced replay, published by
+// Nasdaq and implemented by many venues. Taking it wholesale means the session
+// rules are somebody else's well-tested design rather than an invention, and it
+// costs no dependencies: the whole thing is a 2-byte length and a 1-byte type.
+//
+// The payloads inside those packets are this repository's own, because no
+// standard order-entry payload matches this engine's order surface. They are
+// fixed-width big-endian records so a decoder is bounds-checkable by inspection
+// and a golden hex vector pins every field position.
+//
+// # This is deliberately not importable
+//
+// It lives under internal/ so "unsupported, may change" is a fact the compiler
+// enforces rather than a sentence in a doc comment. pkg/orderentry is the
+// supported, semver-covered surface; this package is how those types reach a
+// socket, and the format is frozen by testdata vectors rather than by API policy.
+//
+// # What is deliberately absent from the wire
+//
+// A client never names an account and never sees an engine order id. Orders are
+// referenced only by the client's own ClOrdID, scoped to the authenticated
+// session. That is a security boundary, not a simplification: the engine cancels
+// by (orderID, userID), and self-trade prevention lets one account observe
+// another's resting orders, so a wire that carried either field would let a
+// client name an order it does not own. Nor does the wire carry STPMode or the
+// privileged flag — the first is venue policy, the second is a liquidation
+// capability that must never be client-settable.
+package wire
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Protocol version. Bumping it is a breaking change to every committed vector in
+// testdata, which is the point: the vectors are the freeze.
+const Version uint8 = 1
+
+// SoupBinTCP packet types. Lowercase letters are client-to-server, uppercase are
+// server-to-client, following the published spec.
+const (
+	PacketDebug         byte = '+'
+	PacketLoginAccepted byte = 'A'
+	PacketLoginRejected byte = 'J'
+	PacketSequencedData byte = 'S'
+	PacketServerHeartbt byte = 'H'
+	PacketEndOfSession  byte = 'Z'
+	PacketLoginRequest  byte = 'L'
+	PacketUnsequenced   byte = 'U'
+	PacketClientHeartbt byte = 'R'
+	PacketLogoutRequest byte = 'O'
+)
+
+// Message types carried inside Unsequenced (inbound) and Sequenced (outbound)
+// packets.
+const (
+	MsgEnter  uint8 = 'E' // inbound: new order
+	MsgCancel uint8 = 'C' // inbound: cancel by ClOrdID
+
+	MsgAccepted  uint8 = 'A' // outbound: order is live
+	MsgRejected  uint8 = 'R' // outbound: order refused
+	MsgExecuted  uint8 = 'X' // outbound: a fill
+	MsgCanceled  uint8 = 'D' // outbound: order removed
+	MsgReplaced  uint8 = 'P' // outbound: size changed in place, queue position kept
+	MsgCmdReject uint8 = 'K' // outbound: the command itself was refused
+)
+
+// Field widths. ClOrdIDLen bounds a client identifier; SymbolLen is 16 rather
+// than a tighter fit because real venue symbols outgrow short fields and
+// widening one later would invalidate every committed vector.
+const (
+	ClOrdIDLen = 20
+	SymbolLen  = 16
+)
+
+// Side and order-type encodings.
+const (
+	SideBuy  uint8 = 'B'
+	SideSell uint8 = 'S'
+
+	TypeLimit  uint8 = 'L'
+	TypeMarket uint8 = 'M'
+
+	TIFGoodTillCancel  uint8 = 'G'
+	TIFImmediateOrCanc uint8 = 'I'
+	TIFFillOrKill      uint8 = 'F'
+)
+
+// Reason codes. A deliberately narrow vocabulary a client can branch on, not a
+// mirror of the engine's error set: coupling the wire to an internal sentinel
+// list would make every new sentinel a protocol change.
+const (
+	ReasonNone           uint16 = 0
+	ReasonOther          uint16 = 1
+	ReasonUnknownOrder   uint16 = 2
+	ReasonDuplicateClOrd uint16 = 3
+	ReasonTooSmall       uint16 = 4
+	ReasonTooLarge       uint16 = 5
+	ReasonPriceBand      uint16 = 6
+	ReasonSelfTrade      uint16 = 7
+	ReasonPostOnlyCross  uint16 = 8
+	ReasonFOKCannotFill  uint16 = 9
+	ReasonHalted         uint16 = 10
+	ReasonThrottled      uint16 = 11
+	ReasonOverloaded     uint16 = 12
+	ReasonNotAuthorised  uint16 = 13
+	ReasonMalformed      uint16 = 14
+	ReasonShuttingDown   uint16 = 15
+)
+
+var (
+	ErrShort     = errors.New("wire: buffer too short")
+	ErrBadType   = errors.New("wire: unknown message type")
+	ErrTooLong   = errors.New("wire: field exceeds its fixed width")
+	ErrBadPacket = errors.New("wire: malformed packet")
+)
+
+// --- inbound payloads ---
+
+// Enter is a new order. Version leads every payload so a decoder can refuse a
+// message it does not understand before reading any field whose meaning may have
+// changed.
+type Enter struct {
+	Version  uint8
+	ClOrdID  string // client's own identifier, unique per session
+	Symbol   string
+	Side     uint8
+	Type     uint8
+	TIF      uint8
+	PostOnly bool
+	Price    int64 // ticks; 0 for market orders
+	Quantity int64 // lots
+}
+
+// EnterLen is the encoded width of an Enter payload.
+const EnterLen = 1 + ClOrdIDLen + SymbolLen + 1 + 1 + 1 + 1 + 8 + 8
+
+// Cancel references an order by the client's own id. There is deliberately no
+// way to name an engine order id or another account.
+type Cancel struct {
+	Version uint8
+	ClOrdID string
+}
+
+// CancelLen is the encoded width of a Cancel payload.
+const CancelLen = 1 + ClOrdIDLen
+
+// --- outbound payloads ---
+
+// Accepted reports that an order is live. OrderID is the venue's public handle
+// for it, scoped to this session; it is not the engine's internal id.
+type Accepted struct {
+	Version  uint8
+	ClOrdID  string
+	Price    int64
+	Quantity int64
+	Side     uint8
+}
+
+// AcceptedLen is the encoded width of an Accepted payload.
+const AcceptedLen = 1 + ClOrdIDLen + 8 + 8 + 1
+
+// Rejected reports that an order was refused, with a code a client can branch on.
+type Rejected struct {
+	Version uint8
+	ClOrdID string
+	Reason  uint16
+}
+
+// RejectedLen is the encoded width of a Rejected payload.
+const RejectedLen = 1 + ClOrdIDLen + 2
+
+// Executed is a fill. LeavesQty is carried because the event stream is proven to
+// reconstruct per-order remaining quantity (see TestEventStreamReconstructsBook);
+// without that proof this field would be a guess and had to be omitted.
+type Executed struct {
+	Version   uint8
+	ClOrdID   string
+	Price     int64
+	Quantity  int64
+	LeavesQty int64
+	Aggressor uint8 // SideBuy or SideSell: which side took liquidity
+}
+
+// ExecutedLen is the encoded width of an Executed payload.
+const ExecutedLen = 1 + ClOrdIDLen + 8 + 8 + 8 + 1
+
+// Canceled reports an order leaving the book, whether the client asked or the
+// venue did (self-trade prevention, an OCO twin, an IOC remainder, a kill switch).
+type Canceled struct {
+	Version uint8
+	ClOrdID string
+	Reason  uint16
+}
+
+// CanceledLen is the encoded width of a Canceled payload.
+const CanceledLen = 1 + ClOrdIDLen + 2
+
+// Replaced reports an in-place size change that kept queue position — today,
+// self-trade-prevention DECREMENT.
+type Replaced struct {
+	Version   uint8
+	ClOrdID   string
+	LeavesQty int64
+}
+
+// ReplacedLen is the encoded width of a Replaced payload.
+const ReplacedLen = 1 + ClOrdIDLen + 8
+
+// CmdReject refuses the command itself rather than an order — malformed input, a
+// rate limit, a saturated matcher. It is distinct from Rejected so a client can
+// tell "the venue would not look at this" from "the venue looked and said no".
+type CmdReject struct {
+	Version uint8
+	ClOrdID string
+	Reason  uint16
+}
+
+// CmdRejectLen is the encoded width of a CmdReject payload.
+const CmdRejectLen = 1 + ClOrdIDLen + 2
+
+// --- encoding helpers ---
+
+// putFixed writes s left-aligned into a fixed-width, NUL-padded field. An
+// over-long value is an error rather than a silent truncation, because a
+// truncated ClOrdID would collide with another order.
+func putFixed(dst []byte, s string) error {
+	if len(s) > len(dst) {
+		return fmt.Errorf("%w: %q needs %d bytes, field is %d", ErrTooLong, s, len(s), len(dst))
+	}
+	n := copy(dst, s)
+	for i := n; i < len(dst); i++ {
+		dst[i] = 0
+	}
+	return nil
+}
+
+// getFixed reads a NUL-padded fixed-width field.
+func getFixed(src []byte) string {
+	for i, b := range src {
+		if b == 0 {
+			return string(src[:i])
+		}
+	}
+	return string(src)
+}
+
+func putBool(b bool) byte {
+	if b {
+		return 1
+	}
+	return 0
+}
