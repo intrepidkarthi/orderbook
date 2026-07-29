@@ -55,7 +55,15 @@ simulator, a backtester, and a microstructure research harness.
 - **Deterministic and recoverable.** The same ordered command stream produces
   byte-identical trades and book state — enabling command-log replay, durable
   WAL crash recovery (`pkg/wal`: write-ahead log + snapshots), and reproducible
-  backtests.
+  backtests. `Runner.Checkpoint` and `wal.Recover` join the snapshot to its log
+  position, and the property is gated in CI against a 2,000-command tape:
+  checkpoint anywhere, recover, and the book, all three sequence counters, the
+  duplicate guard and the conditional-order state match the uninterrupted run.
+- **An event stream that reconstructs the book.** `Accepted`/`Trade`/`Canceled`/
+  `Replaced` replay into an L3 book identical to the engine's, asserted on every
+  commit across 22 scenarios covering every order class — including iceberg
+  refill, all five self-trade-prevention modes, FOK reversal and cascade-fired
+  stops.
 - **Full order surface.** Limit, market, stop / stop-limit, iceberg (hidden),
   post-only, pegged, OCO / bracket, and trailing-stop orders; GTC / IOC / FOK
   time-in-force; self-trade prevention; a price-band circuit breaker; FIFO or
@@ -65,8 +73,10 @@ simulator, a backtester, and a microstructure research harness.
   idempotency, mark-price step **and** depth bounds, a self-output guardrail, and
   timed band-breach pauses — plus a market-abuse surveillance suite (spoofing,
   order-to-trade ratio, marking-the-close, ramping, pinging, cross-book), an
-  enforcing gateway (rate limit + speed bump), and a uniform-price call auction.
-  Each maps to a real case in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
+  an enforcing per-account rate gate, an operator kill switch, and a
+  uniform-price call auction. Each maps to a real case in
+  [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md). The taker speed bump is an
+  observation hook, not enforcement — it reports, it does not delay.
 - **Market data.** L1 / L2 / L3 (market-by-order) snapshots with sequence
   numbers.
 - **Tested and benchmarked.** Race, fuzz, soak, and replay-recovery suites;
@@ -167,6 +177,14 @@ Tail latency on a realistic ~90%-cancel / 10%-new flow (`Match` / `Cancel`):
 **p50 83 ns · p99 167 ns · p999 292 ns**, 0 allocs/op — the p999 stays within
 ~3.5× of the median. Absolute figures include `time.Now` overhead; the
 median-to-tail shape is the signal.
+
+**These are the bare `Engine`.** Most embedders use the `Runner` (the
+concurrency-safe front), usually with a write-ahead log and an event sink. That
+path allocates 4 allocs/op rather than 0, and adding group-committed durability
+costs roughly an order of magnitude, dominated by `fsync`. The zero-allocation
+claim above is about `Match` into a caller buffer, not about the concurrent API.
+See [docs/BENCHMARKS.md](docs/BENCHMARKS.md#the-durable-path) for the comparison
+and for why the durable figures are given as ratios rather than nanoseconds.
 
 Reproduce with `make bench`. CI runs the benchmarks on every push. Methodology
 and full results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).

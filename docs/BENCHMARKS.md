@@ -10,6 +10,8 @@ in-repo so anyone can reproduce them.
 make bench
 # or:
 go test -run '^$' -bench=. -benchmem ./pkg/orderbook/ ./pkg/matching/
+# the durable path (Runner + EventSink + WAL):
+go test -run '^$' -bench=. -benchmem ./pkg/wal/
 ```
 
 CI also runs these on every push and publishes the numbers to the
@@ -42,6 +44,43 @@ against a warm book: **p50 83 ns · p99 167 ns · p999 292 ns**, 0 allocs/op.
 | Cancel (dominant real op) | — | ~4 M/s, 0 allocs | ✅ |
 | Best bid/ask read | < 1 µs | 6.3 ns | ✅ |
 | Hot-path allocations | 0 on submit/cancel/match | 0 (via `Match`) | ✅ |
+
+## The durable path
+
+The table above measures the `Engine` directly. Most embedders do not use the
+`Engine` directly — they use the `Runner`, which is the concurrency-safe front,
+and most add a write-ahead log and an event sink. That path was previously
+unmeasured, so the only published numbers were for the fastest configuration the
+library offers rather than the one the documentation recommends.
+
+Allocation counts are deterministic and are the durable part of this comparison:
+
+| Path | allocs/op | What it adds |
+|---|---:|---|
+| `Engine.Match` into a caller buffer | **0** | nothing — the zero-allocation claim applies here |
+| `Engine.Process` (resting insert) | 2 | the `*MatchResult` |
+| `Runner.Process` | 4 | the command hand-off and its reply channel |
+| `Runner.Process` + `EventSink` | 4 | emission reuses the engine's event buffer |
+| `Runner.Process` + `EventSink` + WAL | 9 | JSON-encoding the log record |
+
+Relative cost, measured together on one machine in one run:
+
+- Adding an `EventSink` to the `Runner` is close to free — within run-to-run
+  noise on the insert path.
+- Adding a write-ahead log with **group commit** (one `Sync` per 256 commands)
+  costs roughly an order of magnitude over the in-memory path, and is dominated
+  by the `fsync`, not by encoding.
+- `Sync` on **every** command costs three further orders of magnitude. That is
+  the storage device, not the engine. Choose the group size deliberately; it is
+  the single biggest performance decision in a durable deployment.
+- `Runner.Checkpoint` against a 5,000-order book is on the order of a
+  millisecond and allocates proportionally to book size. Checkpoint cadence
+  trades recovery time against this pause.
+
+Absolute nanosecond figures for these are deliberately not published here: they
+are dominated by the machine's storage and by whatever else it is doing. Run
+`go test -bench=. ./pkg/wal/` on your own hardware, with your own group-commit
+size, and use the ratios above to sanity-check the shape.
 
 ## Notes on the numbers
 

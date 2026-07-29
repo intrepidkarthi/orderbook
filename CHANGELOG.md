@@ -7,6 +7,93 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-29
+
+A correctness release. A production-readiness audit of the recovery, event and
+concurrency paths found that several controls the documentation marked as
+shipped did not actually hold, and one execution path lost fills outright. Each
+item below was reproduced with a failing test before it was fixed.
+
+The headline is uncomfortable and worth stating plainly: the parts most likely
+to hurt an embedder were not the missing pieces the README already disclosed,
+but the pieces it claimed were finished.
+
+### Fixed
+
+- **Lost executions on OCO entry.** `ProcessOCO` called `submitStopInto` and
+  discarded all three return values. A stop leg triggering on entry still
+  settled through the book — filling and removing real makers and moving the
+  last trade price — while reaching neither the event stream nor any
+  `MatchResult`. The counterparty's fill was gone permanently. The same discard
+  meant the stop leg was never announced, so its later fills referenced an order
+  id no consumer had seen.
+- **The event stream did not reconstruct the book**, despite `event.go` saying
+  it did. Eight distinct defects: market and IOC remainders announced as
+  `ACCEPTED` and terminated with no delete; iceberg refills re-adding a slice
+  under the same id silently, so the owner of a live iceberg went dark after its
+  first slice; the surviving OCO leg removed silently; STP `CANCEL_OLDEST` and
+  `CANCEL_BOTH` removing the maker with no delete; STP `DECREMENT` shrinking
+  both sides with no trade and no event at all; cascade-fired stops settling
+  without ever being announced; and a rejected FOK publishing trades that
+  `reverseTrade` had already undone. Emission is now composed in causal order
+  per command, with sequence numbers assigned at publish time — numbering at
+  record time produced a stream whose `Seq` ran backwards.
+- **Snapshot restore was lossy in five ways.** Trailing stops vanished outright
+  (they live only in the engine's map, never in either book); icebergs came back
+  as a bare displayed slice with the reserve gone; OCO pairings were lost,
+  leaving two independent orders either of which could fill; `markPrice` reset
+  to zero, and both manipulation clamps skip when the current mark is zero, so
+  the first post-recovery update was unconstrained; and the self-output
+  guardrail's window reset, handing back a full budget immediately after a
+  restart.
+- **The client-order-id duplicate guard was empty after recovery**, on both the
+  snapshot and the replay path. It stopped enforcing precisely when a client is
+  most likely to resend — after the venue restarts — which is the FIX PossDup
+  case it exists to cover.
+- **Snapshot and log could not be joined.** `EngineSnapshot` carried no log
+  position, and `INTEGRATION.md` told callers to replay entries after `Seq` —
+  the engine's *order* sequence, unrelated to log positions. Following the
+  documented recipe replayed an arbitrary slice of the log.
+- **Replay bypassed the deterministic admission checks**, including the int64
+  notional overflow guard. Because the log is write-ahead it records commands as
+  submitted, not accepted, so an order the live engine rejected rested on the
+  recovered book.
+- **`WriteSnapshot` was atomic but not durable** — no fsync of either the file
+  or the parent directory, so a crash could leave a correctly-named empty
+  snapshot that `Recover` would load.
+- **`Runner.Close` panicked in-flight producers** by closing the shared command
+  queue from the consumer side. Correct shutdown required proving every producer
+  had stopped, which a server with a goroutine per connection cannot do.
+- **`pkg/gateway` data-raced** at the topology its own package doc recommended.
+
+### Added
+
+- `wal.Checkpoint`, `wal.Recover` and `wal.RestoreAfter` — the snapshot/log join
+  expressed once, in code, instead of as prose for callers to reimplement.
+- `Runner.Checkpoint` and `RunnerConfig.Log`: a write-ahead seam that logs each
+  mutating command before applying it, tracking the sequence of the last command
+  *applied* rather than appended.
+- `Engine.CancelAllForUser` / `Runner.CancelAllForUser` — the operator kill
+  switch. It pulls resting orders, pending stops and trailing stops, ignores
+  `MinRestingTime`, and announces every removal.
+- `matching.ErrShuttingDown` and an idempotent, fenced `Runner.Close`.
+- `EventReplaced` now carries in-place size changes that keep queue position.
+- Crash-recovery property test over a 2,000-command generated tape, replacing a
+  determinism gate that ran on six hand-written orders.
+- `TestEventStreamReconstructsBook`: 22 scenarios asserting the event stream
+  rebuilds the engine's own L3 book, order-for-order and lot-for-lot.
+- Benchmarks for the durable path (`Runner` + `EventSink` + WAL), which had no
+  published number while the README advertised the bare engine's.
+
+### Changed
+
+- **Docs corrected where they overclaimed.** `THREAT-MODEL.md` row 16 no longer
+  marks the taker speed bump as an enforcing control — it is an observation hook
+  that reports and does not delay. The README no longer implies the
+  zero-allocation figure applies to the concurrent API: `Match` into a caller
+  buffer allocates nothing, `Runner.Process` allocates 4/op, and durability adds
+  roughly an order of magnitude.
+
 ## [0.8.0] - 2026-07-26
 
 Completes the microstructure research agenda. All four roadmap items are now
