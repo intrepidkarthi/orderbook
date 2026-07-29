@@ -446,6 +446,41 @@ func (r *Runner) Checkpoint() (*EngineSnapshot, error) {
 // SetReplaying toggles replay mode on the underlying engine. Bootstrap only.
 func (r *Runner) SetReplaying(v bool) { r.engine.SetReplaying(v) }
 
+// TryEnqueue submits an order without waiting for it to be applied and without
+// waiting for queue space: it returns ErrQueueFull if the queue is full, or
+// ErrShuttingDown after Close. Nothing is returned about the outcome.
+//
+// This is the path a network ingress should use. The synchronous methods hand
+// back the engine-owned *types.Order, which the matching goroutine keeps mutating
+// — so a connection goroutine that reads any field of it is racing the matcher.
+// Fire-and-forget removes that entire class of bug by never exposing the pointer;
+// the outcome arrives on the event stream instead, which is the same path every
+// other consumer already uses.
+func (r *Runner) TryEnqueue(order *types.Order) error {
+	return r.tryEnqueue(command{kind: cmdSubmit, order: order})
+}
+
+// TryEnqueueCancel is the cancel counterpart of TryEnqueue.
+func (r *Runner) TryEnqueueCancel(orderID int64, userID string) error {
+	return r.tryEnqueue(command{kind: cmdCancel, cancelID: orderID, userID: userID})
+}
+
+// tryEnqueue posts a command with no reply channel. dispatch already tolerates a
+// nil reply, so nothing downstream needs to change.
+func (r *Runner) tryEnqueue(cmd command) error {
+	select {
+	case <-r.quit:
+		return ErrShuttingDown
+	default:
+	}
+	select {
+	case r.queue <- cmd:
+		return nil
+	default:
+		return ErrQueueFull
+	}
+}
+
 // QueueLen reports the number of commands currently buffered in the queue — a
 // backpressure gauge to export as a metric.
 func (r *Runner) QueueLen() int { return len(r.queue) }

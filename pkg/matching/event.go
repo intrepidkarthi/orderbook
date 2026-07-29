@@ -89,3 +89,21 @@ type Event struct {
 type EventSink interface {
 	OnEvents(events []Event)
 }
+
+// MultiSink fans one event stream out to several sinks in order. Config.EventSink
+// is a single slot consumed once at construction, so without this, attaching a
+// publisher would silently displace whatever sink an embedder already had —
+// their audit trail or drop copy would simply stop.
+//
+// It inherits the EventSink contract: every sink must return promptly, and the
+// slice and its pointers are reused after the call, so each sink copies anything
+// it retains. A nil entry is skipped.
+type MultiSink []EventSink
+
+func (m MultiSink) OnEvents(events []Event) {
+	for _, s := range m {
+		if s != nil {
+			s.OnEvents(events)
+		}
+	}
+}
