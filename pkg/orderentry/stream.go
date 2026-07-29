@@ -156,7 +156,8 @@ func (s *Stream) Since(seq uint64) ([]Msg, error) {
 type Registry struct {
 	mu          sync.RWMutex
 	streams     map[string]*Stream
-	orders      map[int64]*live // engine order id -> owner, client id, remaining
+	orders      map[int64]*live  // engine order id -> owner, client id, remaining
+	byClOrd     map[string]int64 // account+client id -> engine order id
 	incarnation string
 	ringSize    int
 }
@@ -168,6 +169,7 @@ func NewRegistry(incarnation string, ringSize int) *Registry {
 	return &Registry{
 		streams:     map[string]*Stream{},
 		orders:      map[int64]*live{},
+		byClOrd:     map[string]int64{},
 		incarnation: incarnation,
 		ringSize:    ringSize,
 	}
@@ -306,11 +308,32 @@ func (r *Registry) track(o *types.Order) {
 	// An iceberg reload re-announces the same id; keep one entry and reset its
 	// remaining to the new slice rather than accumulating.
 	r.orders[o.ID] = &live{account: o.UserID, clOrdID: o.ClientOrderID, remaining: o.Quantity}
+	if o.ClientOrderID != "" {
+		r.byClOrd[clOrdKey(o.UserID, o.ClientOrderID)] = o.ID
+	}
+}
+
+// clOrdKey scopes a client order id to its account. Scoping is the security
+// boundary: without it one client could name another's order simply by guessing
+// a common identifier like "1".
+func clOrdKey(account, clOrdID string) string { return account + "\x00" + clOrdID }
+
+// OrderIDFor resolves a client's own order id to the engine's, within that
+// client's account. It is how a cancel arriving over the wire names an order
+// without the wire ever carrying an engine id or an account.
+func (r *Registry) OrderIDFor(account, clOrdID string) (int64, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id, ok := r.byClOrd[clOrdKey(account, clOrdID)]
+	return id, ok
 }
 
 func (r *Registry) forget(id int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if l, ok := r.orders[id]; ok && l.clOrdID != "" {
+		delete(r.byClOrd, clOrdKey(l.account, l.clOrdID))
+	}
 	delete(r.orders, id)
 }
 
@@ -337,6 +360,9 @@ func (r *Registry) fill(id, qty int64) (account, clOrdID string, leaves int64, o
 	}
 	account, clOrdID, leaves = l.account, l.clOrdID, l.remaining
 	if l.remaining == 0 {
+		if l.clOrdID != "" {
+			delete(r.byClOrd, clOrdKey(l.account, l.clOrdID))
+		}
 		delete(r.orders, id)
 	}
 	return account, clOrdID, leaves, true

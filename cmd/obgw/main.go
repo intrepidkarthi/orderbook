@@ -1,0 +1,87 @@
+// Command obgw is a reference order-entry gateway: a real TCP server speaking the
+// binary protocol in internal/wire, in front of one matching engine.
+//
+// It exists to demonstrate the seam, not to be deployed. What it shows is that
+// the library's pieces — the Runner's fire-and-forget enqueue, the gateway's
+// admission control, the event stream, and per-account outbound streams that
+// survive a disconnect — compose into a working venue edge. What it deliberately
+// omits is everything a real deployment must decide for itself: TLS, credential
+// storage, multi-symbol routing, and an HA topology.
+//
+// Authentication defaults to deny. With no accounts configured, every login is
+// rejected — an empty configuration must not produce an open venue.
+//
+//	obgw -addr :9000 -symbol BTC-USD -accounts alice:s3cret,bob:hunter2
+package main
+
+import (
+	"flag"
+	"log"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+)
+
+func main() {
+	var (
+		addr     = flag.String("addr", "127.0.0.1:9000", "listen address")
+		symbol   = flag.String("symbol", "BTC-USD", "the single instrument this gateway serves")
+		accounts = flag.String("accounts", "", "comma-separated user:password pairs")
+		rate     = flag.Float64("rate", 1000, "per-account orders/second")
+		burst    = flag.Float64("burst", 200, "per-account burst allowance")
+	)
+	flag.Parse()
+
+	cfg := Config{
+		Addr:       *addr,
+		Symbol:     *symbol,
+		Accounts:   parseAccounts(*accounts),
+		RatePerSec: *rate,
+		Burst:      *burst,
+	}
+	if len(cfg.Accounts) == 0 {
+		log.Println("obgw: no accounts configured — every login will be rejected")
+	}
+
+	srv := NewServer(cfg)
+	if err := srv.Listen(); err != nil {
+		log.Fatalf("obgw: listen: %v", err)
+	}
+	log.Printf("obgw: serving %s on %s (incarnation %s)", cfg.Symbol, srv.Addr(), cfg.Incarnation)
+
+	// Drain on SIGTERM rather than dying mid-command: the Runner's fence lets
+	// in-flight producers finish instead of panicking them.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		log.Println("obgw: draining")
+		srv.Close()
+	}()
+
+	if err := srv.Serve(); err != nil {
+		log.Fatalf("obgw: serve: %v", err)
+	}
+	log.Println("obgw: stopped")
+}
+
+// parseAccounts reads user:password pairs. A malformed entry is skipped with a
+// warning rather than silently ignored — a typo in a credential list must not
+// quietly leave an account unusable.
+func parseAccounts(s string) map[string]string {
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		user, pass, ok := strings.Cut(pair, ":")
+		if !ok || user == "" || pass == "" {
+			log.Printf("obgw: ignoring malformed account entry %q (want user:password)", pair)
+			continue
+		}
+		out[user] = pass
+	}
+	return out
+}

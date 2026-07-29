@@ -122,6 +122,22 @@ func (g *Gateway) Submit(o *types.Order, now time.Time) (*matching.MatchResult, 
 	return g.runner.Process(o), nil
 }
 
+// Allow runs the admission checks without forwarding: the rate gate, and the
+// speed-bump observation hook. It reports whether the order may proceed.
+//
+// An ingress that submits fire-and-forget needs this, because Submit's return
+// value assumes it is the thing calling the engine. Splitting the decision from
+// the forwarding is what lets the gate sit in front of Runner.TryEnqueue.
+func (g *Gateway) Allow(o *types.Order, now time.Time) bool {
+	if g.gate != nil && !g.gate.Allow(o.UserID, now) {
+		return false
+	}
+	if g.bump > 0 && g.OnBump != nil && g.IsTaker(o) {
+		g.OnBump(o, now.Add(g.bump))
+	}
+	return true
+}
+
 // Cancel forwards a cancel. It is deliberately never rate-gated: shedding new
 // liquidity while keeping cancels flowing is the point of the DoS design.
 func (g *Gateway) Cancel(orderID int64, user string) (*types.Order, error) {
