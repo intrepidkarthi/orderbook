@@ -450,6 +450,8 @@ func (sess *session) apply(payload []byte) {
 		sess.cancel(payload)
 	case wire.MsgReduce:
 		sess.reduce(payload)
+	case wire.MsgReplaceOrder:
+		sess.replaceOrder(payload)
 	case wire.MsgEnterStop:
 		sess.enterStop(payload)
 	case wire.MsgEnterOCO:
@@ -839,6 +841,59 @@ func (sess *session) waitForStream(target uint64, timeout time.Duration) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// replaceOrder cancels one order and enters another atomically.
+//
+// Enqueued on the read loop so the replace cannot overtake the order it names; only
+// the outcome is awaited elsewhere. There is no bespoke acknowledgement — a
+// successful replace is the Canceled for the old ClOrdID followed by the Accepted for
+// the new one, which describes it exactly, and a failure is a CmdReject naming the
+// original.
+func (sess *session) replaceOrder(payload []byte) {
+	m, err := wire.DecodeReplaceOrder(payload)
+	if err != nil || m.Version != wire.Version {
+		sess.reject("", orderentry.ReasonMalformed)
+		return
+	}
+	id, ok := sess.srv.reg.OrderIDFor(sess.account, m.OrigClOrdID)
+	if !ok {
+		sess.reject(m.OrigClOrdID, orderentry.ReasonUnknownOrder)
+		return
+	}
+	replacement, reason := sess.buildOrder(m.Order)
+	if reason != 0 {
+		sess.reject(m.Order.ClOrdID, reason)
+		return
+	}
+	// The replacement is new liquidity, so it passes the admission gate exactly as a
+	// plain Enter would. Replace must not be a way around the venue's throttle.
+	if !sess.srv.gate.Allow(replacement, time.Now()) {
+		sess.reject(m.Order.ClOrdID, orderentry.ReasonThrottled)
+		return
+	}
+	done, err := sess.srv.runner.TryReplaceAsync(id, sess.account, replacement)
+	if err != nil {
+		reason := orderentry.ReasonOverloaded
+		if errors.Is(err, matching.ErrShuttingDown) {
+			reason = orderentry.ReasonShuttingDown
+		}
+		sess.reject(m.Order.ClOrdID, reason)
+		return
+	}
+	go func() {
+		select {
+		case rerr := <-done:
+			if rerr != nil {
+				// The cancel half failed, so nothing was replaced and nothing new was
+				// entered. Named by the ORIGINAL id: that is the order the client was
+				// wrong about.
+				sess.reject(m.OrigClOrdID, orderentry.ReasonFor(rerr))
+			}
+		case <-sess.closed:
+		case <-sess.srv.quit:
+		}
+	}()
 }
 
 // massCancel pulls everything the account has resting.

@@ -1619,6 +1619,41 @@ func (e *Engine) Reduce(orderID int64, newQty int64, userID string) (*types.Orde
 	return order, nil
 }
 
+// Replace cancels a resting order and submits a replacement in one command, so no
+// other order can interleave between the two.
+//
+// It is the atomic form of cancel-then-new, and it exists because the two-message
+// sequence leaves the client naked in between: if its connection dies in the gap it
+// cannot tell whether it holds zero orders or one.
+//
+// Queue priority is forfeited by design — an order that could reprice or grow in
+// place would let a participant reserve a place in line. Use Reduce for a same-price
+// size reduction, which keeps priority.
+//
+// The failure semantics are asymmetric on purpose:
+//
+//   - If the original cannot be cancelled — missing, not this user's, inactive, or
+//     inside MinRestingTime — the replacement is NOT submitted and the error is
+//     returned. A client replacing an order it no longer holds did not ask to open a
+//     new position, and entering one would double its exposure at the worst moment.
+//   - If the cancel succeeds and the replacement is then refused, the client holds
+//     neither. That is reported by the Canceled and Rejected events of this same
+//     command, so it is immediately visible rather than discovered later. Restoring
+//     the original instead would hand it back at the tail of the queue without
+//     saying so, and a silent loss of priority is worse than a reported refusal.
+func (e *Engine) Replace(orderID int64, userID string, replacement *types.Order) (*MatchResult, error) {
+	if replacement == nil {
+		return nil, types.ErrNilOrder
+	}
+	// Cancel first, and only proceed if it actually happened. Cancel enforces
+	// ownership and MinRestingTime, so a replace cannot be used to sidestep the
+	// anti-spoofing floor that a bare cancel obeys.
+	if _, err := e.Cancel(orderID, userID); err != nil {
+		return nil, err
+	}
+	return e.Process(replacement), nil
+}
+
 // OpenOrdersFor returns deep copies of every resting order belonging to userID,
 // in book order. Copies, because the originals are engine-owned and the matching
 // goroutine keeps mutating them.

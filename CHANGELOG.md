@@ -38,6 +38,33 @@ versions may include breaking changes).
 
 ### Added
 
+- **Atomic cancel/replace.** `ReplaceOrder` (`Z`) cancels a resting order and enters
+  another in one command. Without it a reprice is two messages and the client is naked
+  between them: if the connection dies in the gap it cannot tell whether it holds zero
+  orders or one, and another participant can take the price meanwhile.
+
+  Priority is forfeited by design — an order that could reprice in place would let a
+  participant reserve a place in line — so `Reduce` remains the way to shrink at the
+  same price. There is no new outbound message: a successful replace is the `Canceled`
+  for the old id followed by the `Accepted` for the new one.
+
+  The failure semantics are asymmetric and deliberate. If the original cannot be
+  cancelled, **the replacement is not entered** and the refusal names the original id;
+  a client replacing an order it no longer holds did not ask to open a new position.
+  If the cancel succeeds and the replacement is then refused, the client holds neither
+  and is told so within the same command — reported rather than discovered, which is
+  what the two-message sequence could not offer. Restoring the original instead would
+  hand it back at the tail of the queue without saying so, and a silent loss of
+  priority is worse than a reported refusal.
+
+  It is subject to the minimum resting time, like cancel and reduce: it withdraws
+  displayed size, and a verb that escaped the floor would leave the anti-spoofing
+  control guarding two routes out of three.
+
+- `Engine.Replace`, `Runner.TryReplaceAsync`, `wal.KindReplace` and
+  `CommandLog.AppendReplace`. The log records a replace as **one** record rather than a
+  cancel plus a submit, so replay cannot apply half of it.
+
 - **Conditional orders on the wire: stop, stop-limit, OCO, iceberg, pegged and
   trailing.** The engine has supported all of them since v0.5.0 and the protocol
   could express none: a client could place a limit or a market order and nothing
@@ -91,6 +118,18 @@ vector is byte-identical. `MassCancel` shares `Query`'s exact layout and
 the third time that has paid for itself.
 
 ### Fixed
+
+- **Two message types were each assigned twice.** Adding the conditional-order
+  messages gave `'O'` to both `EnterOCO` and `OpenOrder`, and `'P'` to both
+  `EnterPegged` and `Replaced`. Nothing failed, because the payload widths differed and
+  `checkHeader` tests width first — which means those messages were being told apart by
+  *length*, the exact v1 dispatch the type byte was introduced to replace. A collision
+  between two messages of equal width would have silently decoded one as the other.
+
+  `EnterOCO` is now `'N'` and `EnterPegged` `'Y'`, and
+  `TestMessageTypesAreDistinct` asserts every `Msg*` constant is unique across both
+  directions so this cannot come back. Two golden vectors changed as a result — both
+  added earlier in this same unreleased cycle, so no released client has seen them.
 
 - **The conditional order types were never written to the log.** `cmdStop`,
   `cmdOCO`, `cmdIceberg`, `cmdPegged` and `cmdTrailing` all mutate the book and none

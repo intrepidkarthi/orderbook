@@ -61,15 +61,23 @@ const (
 // Message types. Every payload begins with one of these, then Version. Encoding
 // the type explicitly rather than inferring it from length is what lets the
 // protocol grow: a new message is a new type byte, not a length nobody may reuse.
+//
+// They must all be DISTINCT, across both directions. Inbound and outbound are
+// separate conversations, so sharing a byte between them looks harmless — and it is
+// not: every decoder checks only the type it wants, so two messages with the same
+// byte are separated by nothing but their widths, which is the v1 dispatch this
+// header replaced. TestMessageTypesAreDistinct enforces it, after 'O' and 'P' were
+// each briefly assigned twice.
 const (
 	MsgEnter              uint8 = 'E' // inbound: new order
 	MsgCancel             uint8 = 'C' // inbound: cancel by ClOrdID
 	MsgQuery              uint8 = 'Q' // inbound: report my open orders
 	MsgReduce             uint8 = 'M' // inbound: shrink a resting order, keeping queue position
+	MsgReplaceOrder       uint8 = 'Z' // inbound: cancel one order and enter another, atomically
 	MsgEnterStop          uint8 = 'S' // inbound: stop / stop-limit order
-	MsgEnterOCO           uint8 = 'O' // inbound: one-cancels-other pair
+	MsgEnterOCO           uint8 = 'N' // inbound: one-cancels-other pair
 	MsgEnterIceberg       uint8 = 'I' // inbound: iceberg (reserve) order
-	MsgEnterPegged        uint8 = 'P' // inbound: order pegged to bid/ask/mid
+	MsgEnterPegged        uint8 = 'Y' // inbound: order pegged to bid/ask/mid
 	MsgEnterTrailing      uint8 = 'W' // inbound: trailing stop
 	MsgMassCancel         uint8 = 'F' // inbound: cancel everything I have resting
 	MsgCancelOnDisconnect uint8 = 'B' // inbound: pull my book if this session drops
@@ -175,6 +183,42 @@ type Cancel struct {
 
 // CancelLen is the encoded width of a Cancel payload.
 const CancelLen = 1 + 1 + ClOrdIDLen
+
+// ReplaceOrder cancels a resting order and enters another in a single command, so
+// the client is never briefly holding neither.
+//
+// Without it a reprice is two messages, Cancel then Enter, and between them the
+// client is naked: if the connection dies in the gap it does not know whether it has
+// zero orders or one, and another participant can take the price in between. Every
+// real venue offers an atomic replace for exactly that reason.
+//
+// **Priority is forfeited.** The replacement goes to the back of its price level,
+// which is correct — an order that could reprice or grow in place would let a
+// participant reserve a place in the queue. A same-price size REDUCTION should use
+// Reduce, which keeps priority. Replace is for everything else.
+//
+// **The atomicity is precise, and narrower than it sounds.** No other command can
+// interleave: the cancel and the entry happen back to back on the matching
+// goroutine. If the original cannot be cancelled — already filled, already gone, not
+// yours, or inside the venue's minimum resting time — nothing happens at all and the
+// replacement is NOT entered, because a client replacing an order it no longer holds
+// did not mean to open a new position. But if the original is cancelled and the
+// replacement is then refused by the engine (a price band, a post-only cross), the
+// client ends up holding neither, and is told so by a Canceled followed by a
+// Rejected. That outcome is reported in the same command rather than left to be
+// discovered, which is the part the two-message sequence could not offer.
+//
+// There is no new outbound message: a successful replace is a Canceled for the old
+// ClOrdID followed by an Accepted for the new one, which already describes it
+// exactly.
+type ReplaceOrder struct {
+	Version     uint8
+	OrigClOrdID string
+	Order       BaseOrder
+}
+
+// ReplaceOrderLen is the encoded width of a ReplaceOrder payload.
+const ReplaceOrderLen = 1 + 1 + ClOrdIDLen + BaseOrderLen
 
 // --- conditional orders ---
 //

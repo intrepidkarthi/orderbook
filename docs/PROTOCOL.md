@@ -150,6 +150,38 @@ of your own orders.
 | Price | 8 | ticks; 0 for market |
 | Quantity | 8 | lots |
 
+**ReplaceOrder** — MsgType `Z` (1) + Version (1) + OrigClOrdID (20) + base order (56).
+Cancels a resting order and enters another in one command.
+
+Without it a reprice is two messages, `Cancel` then `Enter`, and between them you are
+naked: if the connection dies in the gap you do not know whether you hold zero orders
+or one, and another participant can take the price meanwhile.
+
+**Priority is forfeited.** The replacement goes to the back of its price level, which
+is correct — an order that could reprice or grow in place would let a participant
+reserve a place in the queue. For a same-price size *reduction* use `Reduce`, which
+keeps priority.
+
+**There is no new outbound message.** A successful replace is a `Canceled` for the old
+ClOrdID followed by an `Accepted` for the new one, which already describes it exactly.
+
+**The atomicity is precise, and narrower than the word suggests:**
+
+- No other command interleaves — the cancel and the entry happen back to back on the
+  matching goroutine.
+- If the original cannot be cancelled (already filled, not yours, or inside the
+  minimum resting time) **the replacement is not entered**, and the refusal names the
+  *original* ClOrdID. A client replacing an order it no longer holds did not ask to
+  open a new position, and entering one would double its exposure.
+- If the original *is* cancelled and the replacement is then refused — a price band, a
+  post-only cross — you hold neither, and are told by a `Canceled` followed by a
+  `Rejected`. That is reported inside the same command rather than left to be
+  discovered, which is the part the two-message sequence cannot offer.
+
+A replace is subject to the minimum resting time, like a cancel and a reduce: it
+withdraws displayed size, and a verb that escaped the floor would leave the
+anti-spoofing control guarding two routes out of three.
+
 **Conditional entry** — five messages, each carrying the same 56-byte base-order
 block as `Enter`'s body plus its own parameters:
 
@@ -158,8 +190,8 @@ block as `Enter`'s body plus its own parameters:
 | **EnterStop** | `S` | StopPrice (8) | 66 |
 | **EnterIceberg** | `I` | DisplayQty (8) | 66 |
 | **EnterTrailing** | `W` | Trail (8) | 66 |
-| **EnterPegged** | `P` | Ref (1), Offset (8) | 67 |
-| **EnterOCO** | `O` | StopClOrdID (20), StopPrice (8), StopLimitPrice (8) | 94 |
+| **EnterPegged** | `Y` | Ref (1), Offset (8) | 67 |
+| **EnterOCO** | `N` | StopClOrdID (20), StopPrice (8), StopLimitPrice (8) | 94 |
 
 Base-order block: ClOrdID (20) + Symbol (16) + Side (1) + Type (1) + TIF (1) +
 PostOnly (1) + Price (8) + Quantity (8).

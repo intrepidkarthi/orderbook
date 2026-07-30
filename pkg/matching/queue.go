@@ -20,6 +20,7 @@ const (
 	cmdSetMark
 	cmdCancelAll
 	cmdReduce
+	cmdReplace
 	cmdOpenOrders
 	cmdTrailingCount
 	cmdCheckpoint
@@ -36,6 +37,7 @@ type command struct {
 	iceberg   *types.IcebergOrder
 	pegged    *types.PeggedOrder
 	trailing  *types.TrailingStop
+	replace   *types.Order // the replacement order for cmdReplace
 	cancelID  int64
 	reduceQty int64
 	userID    string

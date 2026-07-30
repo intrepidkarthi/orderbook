@@ -76,6 +76,7 @@ type CommandLog interface {
 	AppendSubmit(o *types.Order) (int64, error)
 	AppendCancel(orderID int64, userID string) (int64, error)
 	AppendReduce(orderID, newQty int64, userID string) (int64, error)
+	AppendReplace(orderID int64, userID string, replacement *types.Order) (int64, error)
 	AppendCancelAll(userID string) (int64, error)
 	AppendStop(s *types.StopOrder) (int64, error)
 	AppendOCO(o *types.OCOOrder) (int64, error)
@@ -187,6 +188,8 @@ func (r *Runner) dispatch(cmd command) {
 		_ = r.engine.SetMarkPrice(cmd.cancelID)
 	case cmdReduce:
 		rep.order, rep.err = r.engine.Reduce(cmd.cancelID, cmd.reduceQty, cmd.userID)
+	case cmdReplace:
+		rep.match, rep.err = r.engine.Replace(cmd.cancelID, cmd.userID, cmd.replace)
 	case cmdCancelAll:
 		rep.orders = r.engine.CancelAllForUser(cmd.userID)
 	case cmdOpenOrders:
@@ -222,6 +225,8 @@ func (r *Runner) logCommand(cmd command) {
 		seq, err = r.log.AppendCancel(cmd.cancelID, cmd.userID)
 	case cmdReduce:
 		seq, err = r.log.AppendReduce(cmd.cancelID, cmd.reduceQty, cmd.userID)
+	case cmdReplace:
+		seq, err = r.log.AppendReplace(cmd.cancelID, cmd.userID, cmd.replace)
 	case cmdCancelAll:
 		seq, err = r.log.AppendCancelAll(cmd.userID)
 	case cmdStop:
@@ -535,6 +540,43 @@ func (r *Runner) TryEnqueue(order *types.Order) error {
 // TryEnqueueCancel is the cancel counterpart of TryEnqueue.
 func (r *Runner) TryEnqueueCancel(orderID int64, userID string) error {
 	return r.tryEnqueue(command{kind: cmdCancel, cancelID: orderID, userID: userID})
+}
+
+// TryReplaceAsync enqueues an atomic cancel-and-replace and returns a channel
+// carrying its error — nil on success.
+//
+// Same shape as TryReduceAsync and for the same reasons: enqueued on the caller's
+// goroutine so it cannot overtake the order it names, awaited off it so the matcher
+// cannot stall a connection's ingress, and only the error crosses the channel
+// because the resulting order is engine-owned.
+func (r *Runner) TryReplaceAsync(orderID int64, userID string, replacement *types.Order) (<-chan error, error) {
+	select {
+	case <-r.quit:
+		return nil, ErrShuttingDown
+	default:
+	}
+	reply := make(chan cmdReply, 1)
+	cmd := command{kind: cmdReplace, cancelID: orderID, userID: userID, replace: replacement, reply: reply}
+	select {
+	case r.queue <- cmd:
+	default:
+		return nil, ErrQueueFull
+	}
+	out := make(chan error, 1)
+	go func() {
+		select {
+		case rep := <-reply:
+			out <- rep.err
+		case <-r.done:
+			select {
+			case rep := <-reply:
+				out <- rep.err
+			default:
+				out <- ErrShuttingDown
+			}
+		}
+	}()
+	return out, nil
 }
 
 // TryCancelAllAsync enqueues an account-wide cancel without waiting for it to be

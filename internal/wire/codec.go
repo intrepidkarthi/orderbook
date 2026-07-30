@@ -602,3 +602,34 @@ func DecodeEnterOCO(src []byte) (EnterOCO, error) {
 		StopLimitPrice: int64(binary.BigEndian.Uint64(src[off+ClOrdIDLen+8:])),
 	}, nil
 }
+
+// --- ReplaceOrder ---
+
+// EncodeReplaceOrder appends a ReplaceOrder payload to dst.
+func EncodeReplaceOrder(dst []byte, m ReplaceOrder) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, ReplaceOrderLen)...)
+	b := dst[base:]
+	off := header(b, MsgReplaceOrder, m.Version)
+	if err := putFixed(b[off:off+ClOrdIDLen], m.OrigClOrdID); err != nil {
+		return nil, err
+	}
+	off += ClOrdIDLen
+	if err := putBase(b[off:], m.Order); err != nil {
+		return nil, err
+	}
+	return dst, nil
+}
+
+// DecodeReplaceOrder reads a ReplaceOrder payload from src.
+func DecodeReplaceOrder(src []byte) (ReplaceOrder, error) {
+	if err := checkHeader(src, ReplaceOrderLen, MsgReplaceOrder); err != nil {
+		return ReplaceOrder{}, err
+	}
+	off := 2 + ClOrdIDLen
+	return ReplaceOrder{
+		Version:     src[1],
+		OrigClOrdID: getFixed(src[2:off]),
+		Order:       getBase(src[off:]),
+	}, nil
+}

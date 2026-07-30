@@ -50,6 +50,7 @@ const (
 	KindIceberg                        // a ProcessIceberg(iceberg)
 	KindPegged                         // a ProcessPegged(pegged)
 	KindTrailing                       // a ProcessTrailingStop(trailing)
+	KindReplace                        // a Replace(id, user, replacement)
 )
 
 // Entry is one durable command-log record.
@@ -259,6 +260,13 @@ func (w *Writer) AppendCancelAll(userID string) (int64, error) {
 	return w.append(Entry{Kind: KindCancelAll, UserID: userID})
 }
 
+// AppendReplace logs a Replace. CancelID names the order being replaced and Order
+// carries the replacement, so replay reproduces both halves as one step rather than
+// as a cancel that might succeed followed by an entry that might not.
+func (w *Writer) AppendReplace(orderID int64, userID string, replacement *types.Order) (int64, error) {
+	return w.append(Entry{Kind: KindReplace, CancelID: orderID, UserID: userID, Order: replacement})
+}
+
 // AppendStop logs a ProcessStop. The trigger price is recorded alongside the order,
 // because replaying the order without it would rest a plain order that never fires.
 func (w *Writer) AppendStop(s *types.StopOrder) (int64, error) {
@@ -458,6 +466,11 @@ func RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64) {
 			_, _ = eng.Reduce(e.CancelID, e.NewQty, e.UserID)
 		case KindCancelAll:
 			eng.CancelAllForUser(e.UserID)
+		case KindReplace:
+			// Refusals are ignored for the same reason a cancel's are: the log records
+			// what was attempted, and replay must reach the same outcome by attempting
+			// the same thing.
+			_, _ = eng.Replace(e.CancelID, e.UserID, e.Order.Fresh())
 		case KindStop:
 			if s, err := types.NewStopOrder(e.Order.Fresh(), e.StopPrice); err == nil {
 				eng.ProcessStop(s)

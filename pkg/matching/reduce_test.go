@@ -393,6 +393,7 @@ func TestReduceIsWrittenToTheLog(t *testing.T) {
 type countingLog struct {
 	submits, cancels, reduces, cancelAlls     int
 	stops, ocos, icebergs, peggeds, trailings int
+	replaces                                  int
 	seq                                       int64
 }
 
@@ -405,6 +406,11 @@ func (l *countingLog) AppendCancel(int64, string) (int64, error) { l.cancels++; 
 func (l *countingLog) AppendReduce(int64, int64, string) (int64, error) { l.reduces++; return l.next() }
 
 func (l *countingLog) AppendCancelAll(string) (int64, error) { l.cancelAlls++; return l.next() }
+
+func (l *countingLog) AppendReplace(int64, string, *types.Order) (int64, error) {
+	l.replaces++
+	return l.next()
+}
 
 func (l *countingLog) AppendStop(*types.StopOrder) (int64, error) { l.stops++; return l.next() }
 
@@ -420,4 +426,89 @@ func (l *countingLog) AppendPegged(*types.PeggedOrder) (int64, error) { l.pegged
 func (l *countingLog) AppendTrailing(*types.TrailingStop) (int64, error) {
 	l.trailings++
 	return l.next()
+}
+
+// TestReplaceHonoursMinRestingTime — a replace cancels displayed size, so the
+// anti-spoofing floor must apply to it too. A verb that escaped it would leave the
+// control guarding two routes out of three: Cancel, Reduce, and then a Replace that
+// pulls the order anyway.
+func TestReplaceHonoursMinRestingTime(t *testing.T) {
+	cfg := DefaultConfig("X")
+	cfg.MinRestingTime = time.Hour
+	e := NewEngine(cfg)
+
+	o := redOrder(t, "spoofer", types.SideBuy, 100, 1000)
+	e.Process(o)
+
+	repl := redOrder(t, "spoofer", types.SideBuy, 90, 1)
+	if _, err := e.Replace(o.ID, "spoofer", repl); !errors.Is(err, types.ErrCancelTooSoon) {
+		t.Errorf("err = %v, want ErrCancelTooSoon", err)
+	}
+	// And nothing changed: the original still rests and the replacement was not
+	// entered.
+	if got := e.OrderCount(); got != 1 {
+		t.Errorf("book holds %d orders, want 1", got)
+	}
+	if _, qty, _ := e.BestBid(); qty != 1000 {
+		t.Errorf("depth = %d, want the original 1000", qty)
+	}
+}
+
+// TestReplaceOfAMissingOrderEntersNothing pins the asymmetry: if the cancel half
+// cannot happen, the replacement must not be entered. A client replacing an order it
+// no longer holds did not ask to open a new position.
+func TestReplaceOfAMissingOrderEntersNothing(t *testing.T) {
+	e := NewEngine(DefaultConfig("X"))
+	repl := redOrder(t, "mm", types.SideBuy, 100, 5)
+	if _, err := e.Replace(999, "mm", repl); !errors.Is(err, types.ErrOrderNotFound) {
+		t.Errorf("err = %v, want ErrOrderNotFound", err)
+	}
+	if got := e.OrderCount(); got != 0 {
+		t.Errorf("book holds %d orders — a replacement was entered for an order that never existed", got)
+	}
+}
+
+// TestReplaceCannotCrossAccounts — Replace goes through Cancel, which checks
+// ownership, so it inherits the guard rather than reimplementing it.
+func TestReplaceCannotCrossAccounts(t *testing.T) {
+	e := NewEngine(DefaultConfig("X"))
+	victim := redOrder(t, "victim", types.SideBuy, 100, 10)
+	e.Process(victim)
+
+	repl := redOrder(t, "attacker", types.SideBuy, 1, 1)
+	if _, err := e.Replace(victim.ID, "attacker", repl); !errors.Is(err, types.ErrOrderNotFound) {
+		t.Errorf("err = %v, want ErrOrderNotFound", err)
+	}
+	if _, qty, _ := e.BestBid(); qty != 10 {
+		t.Errorf("depth = %d, want the victim's untouched 10", qty)
+	}
+}
+
+// TestReplaceIsLoggedAsOneCommand — the log must record it as a single step. Two
+// records, a cancel and a submit, would let replay apply one without the other.
+func TestReplaceIsLoggedAsOneCommand(t *testing.T) {
+	log := &countingLog{}
+	r := NewRunner(RunnerConfig{Engine: DefaultConfig("X"), Log: log})
+	defer r.Close()
+
+	res := r.Process(redOrder(t, "mm", types.SideBuy, 100, 10))
+	repl := redOrder(t, "mm", types.SideBuy, 105, 12)
+	done, err := r.TryReplaceAsync(res.Order.ID, "mm", repl)
+	if err != nil {
+		t.Fatalf("TryReplaceAsync: %v", err)
+	}
+	select {
+	case rerr := <-done:
+		if rerr != nil {
+			t.Fatalf("replace failed: %v", rerr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no outcome reported")
+	}
+	if log.replaces != 1 {
+		t.Errorf("log saw %d replaces, want 1", log.replaces)
+	}
+	if log.cancels != 0 {
+		t.Errorf("log saw %d separate cancels; a replace must be one record, not two", log.cancels)
+	}
 }

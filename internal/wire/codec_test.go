@@ -394,6 +394,11 @@ func goldenCases(t *testing.T) map[string][]byte {
 		})),
 		"cancel": must(EncodeCancel(nil, Cancel{Version: Version, ClOrdID: "cl-1"})),
 		"reduce": must(EncodeReduce(nil, Reduce{Version: Version, ClOrdID: "cl-1", Quantity: 40})),
+		"replace_order": must(EncodeReplaceOrder(nil, ReplaceOrder{
+			Version: Version, OrigClOrdID: "cl-old",
+			Order: BaseOrder{ClOrdID: "cl-new", Symbol: "BTC-USD", Side: SideBuy, Type: TypeLimit,
+				TIF: TIFGoodTillCancel, Price: 30500, Quantity: 250},
+		})),
 		"enter_stop": must(EncodeEnterStop(nil, EnterStop{
 			Version: Version,
 			Order: BaseOrder{ClOrdID: "cl-s", Symbol: "BTC-USD", Side: SideSell, Type: TypeMarket,
@@ -611,5 +616,68 @@ func TestConditionalRoundTrips(t *testing.T) {
 	}
 	if got, err := DecodeEnterOCO(ob); err != nil || got != oco {
 		t.Errorf("oco: got %+v err %v", got, err)
+	}
+}
+
+// TestMessageTypesAreDistinct — every Msg* constant must be unique across both
+// directions.
+//
+// This is not hypothetical. Adding the conditional-order messages assigned 'O' to
+// both EnterOCO and OpenOrder, and 'P' to both EnterPegged and Replaced. Nothing
+// failed, because the payload widths happened to differ and checkHeader tests the
+// width first — which means the two messages were being told apart by length, the
+// exact dispatch the type byte was introduced to replace. A collision between two
+// messages of equal width would have silently decoded one as the other.
+func TestMessageTypesAreDistinct(t *testing.T) {
+	types := map[string]uint8{
+		"Enter": MsgEnter, "Cancel": MsgCancel, "Query": MsgQuery, "Reduce": MsgReduce,
+		"ReplaceOrder": MsgReplaceOrder,
+		"EnterStop":    MsgEnterStop, "EnterOCO": MsgEnterOCO, "EnterIceberg": MsgEnterIceberg,
+		"EnterPegged": MsgEnterPegged, "EnterTrailing": MsgEnterTrailing,
+		"MassCancel": MsgMassCancel, "CancelOnDisconnect": MsgCancelOnDisconnect,
+		"Accepted": MsgAccepted, "Rejected": MsgRejected, "Executed": MsgExecuted,
+		"Canceled": MsgCanceled, "Replaced": MsgReplaced, "CmdReject": MsgCmdReject,
+		"OpenOrder": MsgOpenOrder, "QueryEnd": MsgQueryEnd,
+		"MassCancelAck": MsgMassCancelAck, "CODAck": MsgCODAck,
+	}
+	seen := map[uint8]string{}
+	for name, b := range types {
+		if prev, dup := seen[b]; dup {
+			t.Errorf("%s and %s both use type byte %q", prev, name, b)
+			continue
+		}
+		seen[b] = name
+	}
+	// A byte of zero would collide with a zeroed buffer, which is what a bug looks
+	// like rather than a message.
+	for name, b := range types {
+		if b == 0 {
+			t.Errorf("%s has type byte 0", name)
+		}
+	}
+}
+
+// TestReplaceOrderRoundTrip — the original id and the replacement travel together,
+// which is the whole point: two messages is what leaves the client naked.
+func TestReplaceOrderRoundTrip(t *testing.T) {
+	// 78 = 2 header + 20 original ClOrdID + 56 base order.
+	if ReplaceOrderLen != 78 {
+		t.Errorf("ReplaceOrderLen = %d, want 78", ReplaceOrderLen)
+	}
+	want := ReplaceOrder{
+		Version: Version, OrigClOrdID: "old-1",
+		Order: BaseOrder{ClOrdID: "new-1", Symbol: "ETH-USD", Side: SideSell, Type: TypeLimit,
+			TIF: TIFImmediateOrCanc, PostOnly: true, Price: 2100, Quantity: 3},
+	}
+	b, err := EncodeReplaceOrder(nil, want)
+	if err != nil {
+		t.Fatalf("EncodeReplaceOrder: %v", err)
+	}
+	got, err := DecodeReplaceOrder(b)
+	if err != nil {
+		t.Fatalf("DecodeReplaceOrder: %v", err)
+	}
+	if got != want {
+		t.Errorf("round trip\n got %+v\nwant %+v", got, want)
 	}
 }
