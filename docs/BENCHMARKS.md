@@ -30,8 +30,8 @@ int64 ticks/lots, pooled book nodes/levels, single-writer engine:
 | Benchmark | ns/op | ~ops/sec | B/op | allocs/op |
 |-----------|------:|---------:|-----:|----------:|
 | `OrderBook_BestBid` (top-of-book read) | 5.8 | ~170 M | 0 | 0 |
-| `OrderBook_Cancel` (drain) | 273 | ~3.7 M | 46† | ~0† |
-| `OrderBook_CancelReplace` (MM churn) | 172 | ~5.8 M | 1† | ~0† |
+| `OrderBook_Cancel` (drain) | 273‡ | ~3.7 M | 46† | ~0† |
+| `OrderBook_CancelReplace` (MM churn, 10 K book) | 172 | ~5.8 M | 1† | ~0† |
 | `OrderBook_LevelChurn` (new price level) | 292 | ~3.4 M | 0 | 0 |
 | `Engine_MatchInto` (`Match`, maker+taker+trade) | 329 | ~3.0 M | **0** | **0** |
 | `Engine_Match` (`Process` convenience wrapper) | 419 | ~2.4 M | 296 | 4 |
@@ -39,6 +39,31 @@ int64 ticks/lots, pooled book nodes/levels, single-writer engine:
 Run-to-run spread is ±10% on most rows and wider on `CancelReplace`, which varied
 120–212 ns across the five runs. Treat these as an order of magnitude with a shape,
 not as constants.
+
+‡ **That figure is a ten-million-order book, and the benchmark does not say so.**
+`OrderBook_Cancel` inserts `b.N` orders and cancels all of them, so `b.N` is also
+the book size — and Go chooses `b.N` by wall-clock, which on this machine lands
+around 10 M. The number is therefore mostly cache behaviour at a depth no real
+symbol reaches:
+
+| resting orders | ns/op |
+|---:|---:|
+| 200,000 | 65 |
+| 1,000,000 | 114 |
+| 5,000,000 | 179 |
+| 10,000,000 | 255–273 |
+
+**At a plausible book depth, cancel is ~65 ns.** Both numbers are real; the 273 is
+the pessimistic end of a scaling curve rather than a typical cost, and quoting it
+without the book size — as this page did — understates the engine by 4×. The same
+applies to `OrderBook_Add` (92 ns at 200 K, 206 ns at 10 M). It does not apply to
+`CancelReplace` (fixed 10,000-order book) or `LevelChurn`, whose working sets are
+constant, which is why those two barely move.
+
+The general lesson, and the reason this is called out rather than quietly fixed:
+for any book-level benchmark, **the book size is a parameter of the result.** A
+library that benchmarks a 1,000-order book will look an order of magnitude faster
+than one that benchmarks 10 M, with no difference in the code.
 
 † **`0 allocs/op` in Go's output means "under 1.0", not "none".** The figure is
 integer division, so a path allocating 0.99 objects per operation prints as `0` —

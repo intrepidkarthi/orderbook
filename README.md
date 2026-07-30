@@ -196,8 +196,9 @@ Core-library microbenchmarks (Apple M4, `go1.23.5 darwin/arm64`, single-threaded
 | Benchmark | ns/op | allocs/op | ~ops/sec |
 |---|---:|---:|---:|
 | Top-of-book read (`BestBid`) | 5.8 | 0 | ~170 M |
-| Cancel (drain) | 273 | 0.0002 | ~3.7 M |
-| Cancel / replace (book) | 172 | 0.009 | ~5.8 M |
+| Cancel (drain, 200 K-order book) | 65 | 0.0002 | ~15 M |
+| Cancel (drain, 10 M-order book) | 273 | 0.0002 | ~3.7 M |
+| Cancel / replace (10 K-order book) | 172 | 0.009 | ~5.8 M |
 | New price level (churn) | 292 | 0 | ~3.4 M |
 | Maker + taker match — `Match` (into caller buffer) | 329 | **0** | ~3.0 M |
 | Maker + taker match — `Process` (convenience wrapper) | 419 | 4 | ~2.4 M |
@@ -207,6 +208,11 @@ counts are deliberate: Go prints `allocs/op` as integer division, so "0" can mea
 anything under 1.0. Measured against `runtime.MemStats`, cancel really does allocate
 ~0.0002 objects per operation — and `Add` into a growing book really does allocate
 1.05, which is what "pooled" means rather than "allocation-free".
+
+**Book size is part of the result**, so it is stated. Cancel is given at two depths
+because the benchmark's iteration count doubles as the book size, and the 4× spread
+between them is cache behaviour, not code. Any book-level benchmark quoted without
+its depth — including, until now, this one — is not comparable to anything.
 
 **What these numbers measure.** In-process calls into the matching core, and
 nothing else. `*types.Order` values are constructed before `b.ResetTimer()` and

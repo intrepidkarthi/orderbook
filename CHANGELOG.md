@@ -15,7 +15,8 @@ versions may include breaking changes).
   engine did not change; the documentation was wrong, in both directions.
 
   - `OrderBook_Cancel` was published at 253 ns. Five runs gave 265–301 ns, median
-    273 — the old figure is outside the measured range. Now 273.
+    273 — the old figure is outside the measured range. Corrected, and then
+    corrected again for a bigger reason: see the next item.
   - `Runner.Process` was published at **4 allocs/op**; it is **3**. Checked against
     the v0.11.0 tag to confirm this was a recording error rather than a change.
   - "Group commit costs roughly an order of magnitude" — it costs **~30×**
@@ -28,6 +29,20 @@ versions may include breaking changes).
   - Several figures were *conservative* rather than wrong (`BestBid`, `MatchInto`,
     `Process`) and have been brought to their measured medians too, so the table is
     internally consistent rather than a mix of vintages.
+
+- **The cancel benchmark's book size was an undisclosed parameter.**
+  `OrderBook_Cancel` inserts `b.N` orders and cancels all of them, so `b.N` is also
+  the book depth — and Go picks `b.N` by wall-clock. The published figure was
+  therefore a **ten-million-order book**, a depth no real symbol reaches, and it
+  understated the engine by 4×: cancel is ~65 ns at 200,000 resting orders and
+  ~273 ns at 10 M. Both are now published, with the depth stated, plus the scaling
+  curve between them. `OrderBook_Add` has the same property (92 ns at 200 K, 206 ns
+  at 10 M); `CancelReplace` and `LevelChurn` do not, because their working sets are
+  fixed, which is why those two barely move.
+
+  Stated rather than quietly corrected, because it generalises: for any book-level
+  benchmark the book size is part of the result, and a figure quoted without it is
+  not comparable to anything.
 
 - **"0 allocs/op" was being reported as stronger than it is.** Go computes that
   column by integer division, so anything under 1.0 prints as `0` — which is how
