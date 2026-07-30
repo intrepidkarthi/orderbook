@@ -25,21 +25,46 @@ versions may include breaking changes).
 - **`Reduce` bypassed the minimum resting time.** `Cancel` enforces it; `Reduce`
   did not. The control targets the Coscia pattern — post size, pull it before it
   can fill — and a reduce from 1000 lots to 1 withdraws 999 of them, so the whole
-  pattern was available behind a different verb. Now refused with
-  `ErrCancelTooSoon`, with the same exemptions `Cancel` has (replay, and
-  privileged liquidation orders).
+  pattern was available behind a different verb. That was nearly harmless while
+  only an embedder could call `Reduce`; shipping it on the wire would have handed
+  it to every authenticated client. Now refused with `ErrCancelTooSoon`, with the
+  same exemptions `Cancel` has (replay, and privileged liquidation orders).
 
   **Behaviour change for embedders:** `Engine.Reduce` and `Runner.Reduce` now fail
-  inside a configured `MinRestingTime`. Venues that leave the floor at zero — the
-  default — see no change.
+  with `ErrCancelTooSoon` inside a configured `MinRestingTime`. Venues that leave
+  the floor at zero — the default — see no change.
 
 ### Added
 
-- `matching.Runner.TryReduceAsync`, the shape a network ingress needs and neither
-  existing path had: the enqueue happens on the caller's goroutine so a reduce
-  cannot overtake the order it names, while only the wait for the outcome moves
-  off it so the matcher can never stall a connection's ingress. Only the error
-  crosses the channel — the applied order is engine-owned.
+- **Reduce over the wire.** `Engine.Reduce` and the outbound `Replaced` that
+  reports it both shipped in v0.10.0, but no inbound message could ever
+  ask for one: a client's only route to a smaller order was cancel-then-new, which
+  sends it to the back of its price level. That is the exact cost `Engine.Reduce`
+  exists to avoid, and the capability was unreachable from the only place a client
+  can speak.
+
+  `Quantity` is the new **total**, not a delta. A delta cannot be made safe
+  against a concurrent fill: the two sides would be subtracting from different
+  numbers, and the result would depend on which the venue believed.
+
+  Unlike a cancel, a refused reduce is reported. It fails for reasons the client
+  caused and can correct — asking to grow, or to shrink below what is already
+  filled — and silence is indistinguishable from a reduce still in flight. Zero is
+  refused rather than treated as a cancel, because one message with two meanings
+  is how a client ends up cancelling an order it meant to trim.
+
+- `matching.Runner.TryReduceAsync`, which is the shape a network ingress needs and
+  neither existing path had: the enqueue happens on the caller's goroutine so a
+  reduce cannot overtake the order it names, while only the wait for the outcome
+  moves off it so the matcher can never stall a connection's ingress. Only the
+  error crosses the channel — the applied order is engine-owned.
+
+- `ReasonInvalidQuantity` (16). Distinct from `Malformed` (14): malformed means the
+  venue would not look at the message, this means it looked at a real order and the
+  size asked for is not one it can take.
+
+- `ReasonTooSoon` (17), the one refusal in the vocabulary a client should simply
+  retry.
 
 - **In-band reconciliation.** A `Query` message returns one `OpenOrder` per live
   order followed by a `QueryEnd`. Resume can legitimately fail — an evicted
@@ -68,9 +93,26 @@ versions may include breaking changes).
   compile until it does, which is the intended outcome — silently continuing to
   drop those commands is the bug being fixed.
 
-Adding three message types required **no version bump**, which is what the type
-byte introduced in v0.11.0 bought: every existing golden vector is byte-identical
-and a test pins the eight existing payload widths against hand-derived values.
+### Known gaps
+
+- **A recovered order cannot be named by `ClOrdID`.** Recovery rebuilds the book
+  but not the session layer's `ClOrdID` → order-id index, so after a restart a
+  client sees its resting orders via `Query` and cannot cancel or reduce them.
+  This predates `Reduce` and affects `Cancel` identically; documented in
+  [docs/PROTOCOL.md](docs/PROTOCOL.md#durability) rather than left to be
+  discovered.
+
+### On the version
+
+Four new message types this cycle, and **no version bump** — which is what the
+type byte introduced in v0.11.0 bought. Every pre-existing golden vector is
+byte-identical, and a test pins the eight original payload widths against values
+derived by hand.
+
+`Reduce` is the sharpest demonstration: it encodes to the same 30 bytes as
+`Replaced`, with the same field at the same offset, and the two vectors differ in
+exactly one byte — the type. Under v1's length-based dispatch they could not have
+coexisted at all.
 
 ## [0.11.0] - 2026-07-29
 

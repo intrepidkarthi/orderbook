@@ -28,6 +28,13 @@ const (
 	ReasonNotAuthorised  uint16 = 13
 	ReasonMalformed      uint16 = 14
 	ReasonShuttingDown   uint16 = 15
+	// ReasonInvalidQuantity refuses a size for an order that does exist — a
+	// reduce that is not a reduction, or one below what is already filled. The
+	// venue looked; the client's model of its own order is wrong.
+	ReasonInvalidQuantity uint16 = 16
+	// ReasonTooSoon refuses a withdrawal of displayed size before the venue's
+	// minimum resting time has elapsed — the one refusal a client should retry.
+	ReasonTooSoon uint16 = 17
 )
 
 // ReasonFor maps an engine error onto the wire vocabulary.
@@ -46,6 +53,10 @@ func ReasonFor(err error) uint16 {
 		return ReasonUnknownOrder
 	case errors.Is(err, types.ErrDuplicateClientOrderID):
 		return ReasonDuplicateClOrd
+	case errors.Is(err, types.ErrInvalidQuantity):
+		return ReasonInvalidQuantity
+	case errors.Is(err, types.ErrCancelTooSoon):
+		return ReasonTooSoon
 	case errors.Is(err, types.ErrOrderBelowMinQty), errors.Is(err, types.ErrOrderBelowMinNotional):
 		return ReasonTooSmall
 	case errors.Is(err, types.ErrOrderExceedsMaxQty),

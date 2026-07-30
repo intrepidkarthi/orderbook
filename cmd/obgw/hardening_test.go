@@ -206,6 +206,8 @@ func TestReasonCodesAgreeAcrossPackages(t *testing.T) {
 		{"NotAuthorised", wire.ReasonNotAuthorised, orderentry.ReasonNotAuthorised},
 		{"Malformed", wire.ReasonMalformed, orderentry.ReasonMalformed},
 		{"ShuttingDown", wire.ReasonShuttingDown, orderentry.ReasonShuttingDown},
+		{"InvalidQuantity", wire.ReasonInvalidQuantity, orderentry.ReasonInvalidQuantity},
+		{"TooSoon", wire.ReasonTooSoon, orderentry.ReasonTooSoon},
 	}
 	for _, p := range pairs {
 		if p.wireVal != p.entryVal {

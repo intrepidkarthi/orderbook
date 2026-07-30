@@ -99,6 +99,33 @@ func DecodeCancel(src []byte) (Cancel, error) {
 	return Cancel{Version: src[1], ClOrdID: getFixed(src[2 : 2+ClOrdIDLen])}, nil
 }
 
+// --- Reduce ---
+
+// EncodeReduce appends a Reduce payload to dst.
+func EncodeReduce(dst []byte, m Reduce) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, ReduceLen)...)
+	b := dst[base:]
+	off := header(b, MsgReduce, m.Version)
+	if err := putFixed(b[off:off+ClOrdIDLen], m.ClOrdID); err != nil {
+		return nil, err
+	}
+	binary.BigEndian.PutUint64(b[off+ClOrdIDLen:], uint64(m.Quantity))
+	return dst, nil
+}
+
+// DecodeReduce reads a Reduce payload from src.
+func DecodeReduce(src []byte) (Reduce, error) {
+	if err := checkHeader(src, ReduceLen, MsgReduce); err != nil {
+		return Reduce{}, err
+	}
+	return Reduce{
+		Version:  src[1],
+		ClOrdID:  getFixed(src[2 : 2+ClOrdIDLen]),
+		Quantity: int64(binary.BigEndian.Uint64(src[2+ClOrdIDLen:])),
+	}, nil
+}
+
 // --- Accepted ---
 
 // EncodeAccepted appends an Accepted payload to dst.

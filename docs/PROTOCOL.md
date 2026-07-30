@@ -152,6 +152,45 @@ of your own orders.
 
 **Cancel** — MsgType `C` (1) + Version (1) + ClOrdID (20).
 
+**Reduce** — MsgType `M` (1) + Version (1) + ClOrdID (20) + Quantity (8). Shrinks
+a resting order **in place, keeping its queue position**, and is answered by a
+`Replaced`.
+
+This is the one order-entry operation a client provably cannot build for itself.
+Cancel-then-new is the obvious substitute and it is wrong: it sends the order to
+the back of its price level, which for a maker managing size is a material loss.
+
+Three properties are load-bearing:
+
+- **`Quantity` is the new total, not a delta.** A delta cannot be made safe
+  against a concurrent fill — the venue and the client would be subtracting from
+  different numbers, and the resulting size would depend on which of the two the
+  venue believed. A total is unambiguous whatever arrived in between.
+- **It is a reduction only.** An increase, or a price change, forfeits priority;
+  a resting order that could grow ahead of the queue would let a participant
+  reserve a place in line. Those remain cancel-then-new and are refused here
+  rather than silently reinterpreted.
+- **Zero is not a cancel.** A client that means to cancel must send a `Cancel`.
+  Reinterpreting a reduce-to-zero would give one message two meanings.
+
+Unlike a cancel, a refused reduce is always reported, because it fails for reasons
+the client caused and can correct: asking to grow (`14` invalid quantity), asking
+to shrink below what is already filled (also `14`), or naming an order that is not
+yours or no longer live (`2` unknown order). A client that heard nothing could not
+distinguish a refusal from a reduce still in flight.
+
+**A reduce is subject to the venue's minimum resting time**, exactly as a cancel
+is, and is refused with `17` until the order has met it. That control targets the
+spoofing pattern of posting size and pulling it before it can fill; a reduce from
+1000 lots to 1 withdraws 999 of them, so exempting it would have left the pattern
+available behind a different verb. Retry once the floor has elapsed. The floor is
+off unless the venue configures one.
+
+Reduce is durable: the command is written to the WAL before it is applied, so the
+size a client was told is the size the venue holds after a restart. This was not
+true when `Engine.Reduce` was first added — the log recorded submits and cancels
+only, so recovery silently restored the pre-reduce size.
+
 **Query** — MsgType `Q` (1) + Version (1). Carries nothing: the account is the
 session's and the gateway serves one instrument.
 
@@ -179,6 +218,10 @@ retries the wrong things.
 filling, an IOC remainder, and an operator kill switch all remove orders you did
 not cancel.
 
+`Replaced` likewise has two causes: a `Reduce` you sent, and self-trade-prevention
+DECREMENT shrinking a maker you did not touch. A client that assumes it only ever
+follows its own `Reduce` will drift on the second.
+
 **`LeavesQty` is trustworthy** because the engine's event stream is proven to
 reconstruct per-order remaining quantity — see `TestEventStreamReconstructsBook`.
 Without that proof the field would have been a guess, and once the golden vectors
@@ -196,6 +239,15 @@ were committed it could never have been added.
 | 5 | Too large | | 13 | Not authorised |
 | 6 | Price band | | 14 | Malformed |
 | 7 | Self-trade | | 15 | Shutting down |
+| | | | 16 | Invalid quantity |
+| | | | 17 | Too soon |
+
+Code `16` is distinct from `14`: malformed means the venue would not look at the
+message, invalid quantity means it looked at a real order of yours and the size
+you asked for is not one it can take.
+
+Code `17` is the only refusal here worth simply retrying. It means the venue runs a
+minimum resting time and the order has not met it yet — see below.
 
 The vocabulary is deliberately narrow and lossy. Mirroring the engine's internal
 error set would mean that adding a sentinel — an ordinary, non-breaking change —
@@ -246,9 +298,22 @@ is applied, group-committed every 20ms, and replayed on start. With `-snapshot`
 and `-checkpoint` it also snapshots on a cadence, so a restart replays only the
 tail after the last checkpoint rather than all history.
 
+Every command that mutates the book is logged: Enter, Cancel, Reduce, and the
+operator's account-wide cancel. That list is the whole contract — a mutating
+command missing from it is not "not yet logged", it is a book the log cannot
+reproduce, which is exactly how a reduced order used to come back at its original
+size and a pulled account used to get its book handed back.
+
 Without `-wal` the gateway runs with no durability at all and says so on startup.
 That is a legitimate configuration for a test harness and an indefensible one for
 anything else.
+
+**A recovered order cannot yet be named by `ClOrdID`.** Recovery rebuilds the
+book, but not the session layer's `ClOrdID` → order-id index, so after a restart a
+client can see its resting orders via `Query` and cannot `Cancel` or `Reduce` them
+until it enters new ones — the venue answers `2` (unknown order). This is a real
+gap rather than a design position, it predates `Reduce` and affects `Cancel`
+identically, and the fix is to seed the index from the recovered book on start.
 
 ## Backpressure
 

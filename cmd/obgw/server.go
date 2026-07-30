@@ -429,6 +429,8 @@ func (sess *session) apply(payload []byte) {
 		sess.enter(payload)
 	case wire.MsgCancel:
 		sess.cancel(payload)
+	case wire.MsgReduce:
+		sess.reduce(payload)
 	case wire.MsgQuery:
 		go sess.reportOpenOrders() // reads the book and drains the pump; not on the read loop
 	default:
@@ -507,6 +509,61 @@ func (sess *session) cancel(payload []byte) {
 	if err := sess.srv.runner.TryEnqueueCancel(id, sess.account); err != nil {
 		sess.reject(m.ClOrdID, orderentry.ReasonOverloaded)
 	}
+}
+
+// reduce shrinks a resting order in place, keeping its queue position.
+//
+// The enqueue happens here on the read loop rather than in a goroutine, so a
+// reduce stays behind the order it names: dispatching it concurrently would let
+// it overtake its own Enter and be refused for an order that does not exist yet.
+// Only the wait for the outcome is moved off the read loop, because the matcher
+// must never be able to stall a connection's ingress.
+//
+// Unlike a cancel, the outcome is reported. A reduce fails for reasons the client
+// caused and can correct — asking to grow, or to shrink below what is already
+// filled — and a client that hears nothing cannot tell that from a reduce still
+// in flight.
+func (sess *session) reduce(payload []byte) {
+	m, err := wire.DecodeReduce(payload)
+	if err != nil || m.Version != wire.Version {
+		sess.reject("", orderentry.ReasonMalformed)
+		return
+	}
+	// A non-positive size is refused here rather than passed down: the engine
+	// would reject it anyway, and there is no reason to spend a queue slot and a
+	// log record on a message that cannot succeed.
+	if m.Quantity <= 0 {
+		sess.reject(m.ClOrdID, orderentry.ReasonInvalidQuantity)
+		return
+	}
+	id, ok := sess.srv.reg.OrderIDFor(sess.account, m.ClOrdID)
+	if !ok {
+		sess.reject(m.ClOrdID, orderentry.ReasonUnknownOrder)
+		return
+	}
+	// The account is the session's, so the engine's own (orderID, userID) check
+	// makes naming another client's order impossible rather than merely refused.
+	done, err := sess.srv.runner.TryReduceAsync(id, m.Quantity, sess.account)
+	if err != nil {
+		reason := orderentry.ReasonOverloaded
+		if errors.Is(err, matching.ErrShuttingDown) {
+			reason = orderentry.ReasonShuttingDown
+		}
+		sess.reject(m.ClOrdID, reason)
+		return
+	}
+	go func() {
+		select {
+		case rerr := <-done:
+			if rerr != nil {
+				sess.reject(m.ClOrdID, orderentry.ReasonFor(rerr))
+			}
+			// Success needs nothing here: the engine emits Replaced, which reaches
+			// this client over its own stream like every other outcome.
+		case <-sess.closed:
+		case <-sess.srv.quit:
+		}
+	}()
 }
 
 // reportOpenOrders answers a Query with the venue's authoritative view of the

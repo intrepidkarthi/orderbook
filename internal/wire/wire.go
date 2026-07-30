@@ -65,6 +65,7 @@ const (
 	MsgEnter  uint8 = 'E' // inbound: new order
 	MsgCancel uint8 = 'C' // inbound: cancel by ClOrdID
 	MsgQuery  uint8 = 'Q' // inbound: report my open orders
+	MsgReduce uint8 = 'M' // inbound: shrink a resting order, keeping queue position
 
 	MsgAccepted  uint8 = 'A' // outbound: order is live
 	MsgRejected  uint8 = 'R' // outbound: order refused
@@ -117,6 +118,16 @@ const (
 	ReasonNotAuthorised  uint16 = 13
 	ReasonMalformed      uint16 = 14
 	ReasonShuttingDown   uint16 = 15
+	// ReasonInvalidQuantity refuses a size the engine will not accept for an
+	// order that does exist — a reduce that is not a reduction, or one below what
+	// is already filled. Distinct from ReasonMalformed, which says the venue would
+	// not look at the message: here it looked, and the client's own model of the
+	// order is wrong.
+	ReasonInvalidQuantity uint16 = 16
+	// ReasonTooSoon refuses a withdrawal of displayed size before the venue's
+	// minimum resting time has elapsed. It is the one refusal here that a client
+	// should simply retry, which is why it is not folded into Other.
+	ReasonTooSoon uint16 = 17
 )
 
 var (
@@ -155,6 +166,31 @@ type Cancel struct {
 
 // CancelLen is the encoded width of a Cancel payload.
 const CancelLen = 1 + 1 + ClOrdIDLen
+
+// Reduce shrinks a resting order in place, keeping its queue position. It is the
+// one order-entry operation a client provably cannot build for itself:
+// cancel-then-new is the obvious substitute and it sends the order to the back of
+// its price level, which for a maker managing size is a material loss.
+//
+// It is a reduction only. A size increase or a price change forfeits priority —
+// otherwise a participant could reserve a place in line and grow into it — so
+// those remain cancel-then-new, and are refused here rather than silently
+// reinterpreted as something the client did not ask for.
+//
+// Quantity is the new TOTAL, matching how the order was submitted, not a delta to
+// subtract. A delta cannot be made safe against a concurrent fill: the venue and
+// the client would be subtracting from different numbers, and the resulting size
+// would depend on which of the two the venue believed.
+type Reduce struct {
+	Version  uint8
+	ClOrdID  string
+	Quantity int64
+}
+
+// ReduceLen is the encoded width of a Reduce payload. It is deliberately allowed
+// to equal ReplacedLen: identical widths in opposite directions are safe now that
+// the type byte, not the length, decides what a payload is.
+const ReduceLen = 1 + 1 + ClOrdIDLen + 8
 
 // --- outbound payloads ---
 
@@ -207,8 +243,10 @@ type Canceled struct {
 // CanceledLen is the encoded width of a Canceled payload.
 const CanceledLen = 1 + 1 + ClOrdIDLen + 2
 
-// Replaced reports an in-place size change that kept queue position — today,
-// self-trade-prevention DECREMENT.
+// Replaced reports an in-place size change that kept queue position: either a
+// Reduce the client asked for, or self-trade-prevention DECREMENT shrinking a
+// maker it did not. A client must handle both — the second arrives unsolicited,
+// like Canceled.
 type Replaced struct {
 	Version   uint8
 	ClOrdID   string

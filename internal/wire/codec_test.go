@@ -127,6 +127,7 @@ func TestShortBufferIsAnError(t *testing.T) {
 		"rejected":  func(b []byte) error { _, err := DecodeRejected(b); return err },
 		"canceled":  func(b []byte) error { _, err := DecodeCanceled(b); return err },
 		"replaced":  func(b []byte) error { _, err := DecodeReplaced(b); return err },
+		"reduce":    func(b []byte) error { _, err := DecodeReduce(b); return err },
 		"cmdreject": func(b []byte) error { _, err := DecodeCmdReject(b); return err },
 		"login":     func(b []byte) error { _, err := DecodeLoginRequest(b); return err },
 		"query":     func(b []byte) error { _, err := DecodeQuery(b); return err },
@@ -164,6 +165,60 @@ func TestWrongMessageTypeIsRefused(t *testing.T) {
 	}
 	if _, err := DecodeRejected(rej); err != nil {
 		t.Errorf("a Rejected failed to decode as itself: %v", err)
+	}
+}
+
+// TestReduceAndReplacedShareAWidth is the type byte earning its keep a second
+// time. Reduce (inbound) and Replaced (outbound) encode to the same number of
+// bytes with the same field at the same offset; under v1's length-based dispatch
+// one of them could not have been added at all without renaming the other's
+// layout. Each must decode as itself and refuse the other.
+func TestReduceAndReplacedShareAWidth(t *testing.T) {
+	if ReduceLen != ReplacedLen {
+		t.Fatalf("ReduceLen %d, ReplacedLen %d — this test is about the case where they match", ReduceLen, ReplacedLen)
+	}
+	red, err := EncodeReduce(nil, Reduce{Version: Version, ClOrdID: "cl-1", Quantity: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := EncodeReplaced(nil, Replaced{Version: Version, ClOrdID: "cl-1", LeavesQty: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(red, rep) {
+		t.Fatal("Reduce and Replaced encoded identically — the type byte is not being written")
+	}
+	if _, err := DecodeReplaced(red); !errors.Is(err, ErrBadType) {
+		t.Errorf("a Reduce decoded as Replaced: err = %v, want ErrBadType", err)
+	}
+	if _, err := DecodeReduce(rep); !errors.Is(err, ErrBadType) {
+		t.Errorf("a Replaced decoded as Reduce: err = %v, want ErrBadType", err)
+	}
+}
+
+// TestReduceRoundTrip — Quantity is the new total, and it must survive the wire
+// exactly: a size that arrived wrong would resize a live order to a number the
+// client never sent.
+func TestReduceRoundTrip(t *testing.T) {
+	// 30 = type(1) + version(1) + ClOrdID(20) + Quantity(8), derived from the
+	// field list rather than read back from the constant.
+	if ReduceLen != 30 {
+		t.Errorf("ReduceLen = %d, want 30", ReduceLen)
+	}
+	want := Reduce{Version: Version, ClOrdID: "cl-reduce", Quantity: 40}
+	b, err := EncodeReduce(nil, want)
+	if err != nil {
+		t.Fatalf("EncodeReduce: %v", err)
+	}
+	if len(b) != ReduceLen {
+		t.Fatalf("encoded %d bytes, want %d", len(b), ReduceLen)
+	}
+	got, err := DecodeReduce(b)
+	if err != nil {
+		t.Fatalf("DecodeReduce: %v", err)
+	}
+	if got != want {
+		t.Errorf("round trip\n got %+v\nwant %+v", got, want)
 	}
 }
 
@@ -334,6 +389,7 @@ func goldenCases(t *testing.T) map[string][]byte {
 			PostOnly: true, Price: 2000, Quantity: 1,
 		})),
 		"cancel":    must(EncodeCancel(nil, Cancel{Version: Version, ClOrdID: "cl-1"})),
+		"reduce":    must(EncodeReduce(nil, Reduce{Version: Version, ClOrdID: "cl-1", Quantity: 40})),
 		"accepted":  must(EncodeAccepted(nil, Accepted{Version: Version, ClOrdID: "cl-1", Price: 30000, Quantity: 250, Side: SideBuy})),
 		"rejected":  must(EncodeRejected(nil, Rejected{Version: Version, ClOrdID: "cl-1", Reason: ReasonPriceBand})),
 		"executed":  must(EncodeExecuted(nil, Executed{Version: Version, ClOrdID: "cl-1", Price: 30000, Quantity: 100, LeavesQty: 150, Aggressor: SideSell})),

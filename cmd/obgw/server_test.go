@@ -129,6 +129,40 @@ func (c *client) cancel(clOrdID string) {
 	}
 }
 
+func (c *client) reduce(clOrdID string, qty int64) {
+	c.t.Helper()
+	b, err := wire.EncodeReduce(nil, wire.Reduce{Version: wire.Version, ClOrdID: clOrdID, Quantity: qty})
+	if err != nil {
+		c.t.Fatalf("EncodeReduce: %v", err)
+	}
+	if err := wire.WritePacket(c.conn, wire.PacketUnsequenced, b); err != nil {
+		c.t.Fatalf("send reduce: %v", err)
+	}
+}
+
+// awaitType reads until a message of the given type arrives. Matching on the type
+// byte rather than the payload length is necessary once two messages share a width
+// — Rejected, Canceled and CmdReject already do, and Replaced now shares one with
+// inbound Reduce.
+func (c *client) awaitType(t *testing.T, msgType uint8, timeout time.Duration) ([]byte, bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_ = c.conn.SetReadDeadline(deadline)
+		pkt, err := wire.ReadPacket(c.conn, c.buf)
+		if err != nil {
+			return nil, false
+		}
+		if pkt.Type != wire.PacketSequencedData || len(pkt.Payload) < 2 || pkt.Payload[0] != msgType {
+			continue
+		}
+		out := make([]byte, len(pkt.Payload))
+		copy(out, pkt.Payload)
+		return out, true
+	}
+	return nil, false
+}
+
 // awaitPayloadLen reads until a payload of the given length arrives, which is how
 // this protocol distinguishes message types on the outbound side.
 func (c *client) await(t *testing.T, wantLen int, timeout time.Duration) ([]byte, bool) {
