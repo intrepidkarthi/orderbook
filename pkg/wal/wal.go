@@ -9,15 +9,25 @@
 // Recovery is bounded to O(recent) by snapshotting and replaying only the WAL tail
 // after the snapshot's sequence.
 //
-// Records are length-prefixed JSON, written write-ahead (before the engine
-// applies the command) so no acknowledged command is lost. A crash mid-write
-// leaves a torn tail, which the reader stops at cleanly.
+// Records are length-prefixed, CRC-32C-checksummed JSON, written write-ahead
+// (before the engine applies the command) so no acknowledged command is lost.
+//
+// The two failure modes are treated differently on purpose. A crash mid-write
+// leaves a torn tail — a short final record — which the reader stops at cleanly,
+// because that record was never acknowledged. A record that is complete but fails
+// its checksum is media corruption: the bytes changed after they were written, and
+// recovery refuses rather than stopping, since a quiet stop there is
+// indistinguishable from a clean end of log while silently discarding every
+// command after it.
 package wal
 
 import (
 	"bufio"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -54,6 +64,40 @@ type Entry struct {
 	NewQty int64 `json:"new_qty,omitempty"`
 }
 
+// Header, record framing and the bounds that make a corrupt file safe to read.
+//
+// A file written by this package begins with Magic. Records after it are
+// [4-byte length][4-byte CRC-32C of the payload][payload]. A file with no header
+// is a v1 log — written before checksums existed — and is read without them; see
+// ReadAll.
+const (
+	// Magic identifies the format and carries its version in the final byte, so a
+	// future framing change is detectable rather than misread.
+	Magic = "OBWAL\x01"
+
+	// MaxRecordBytes bounds a record payload. The length prefix is four bytes read
+	// off disk, so without a ceiling a single flipped bit in it asks for an
+	// allocation of up to 4 GiB during recovery — the moment a venue can least
+	// afford one. A command record is a few hundred bytes; 8 MiB is far beyond any
+	// legitimate one and still small enough to refuse safely.
+	MaxRecordBytes = 8 << 20
+)
+
+// ErrCorrupt reports a record that is present and complete but whose bytes do not
+// match their checksum, or whose declared length is impossible.
+//
+// This is deliberately distinct from a torn tail. A crash mid-write leaves a short
+// final record, which ReadAll stops at cleanly because the read comes up short —
+// no checksum is involved. A COMPLETE record whose CRC disagrees means the bytes on
+// disk were altered after they were written, and silently truncating there would
+// discard acknowledged commands while looking like an ordinary clean stop. Recovery
+// refuses instead: serving a book that does not match the log is worse than not
+// starting.
+var ErrCorrupt = errors.New("wal: corrupt record")
+
+// crcTable is Castagnoli, which has hardware support on amd64 and arm64.
+var crcTable = crc32.MakeTable(crc32.Castagnoli)
+
 // Writer is an append-only, durable command log. It is safe for concurrent use,
 // but write it write-ahead — append (and Sync) before the engine applies the
 // command — so a crash never loses an acknowledged order. Batch Sync (group
@@ -63,11 +107,23 @@ type Writer struct {
 	f   *os.File
 	w   *bufio.Writer
 	seq int64
+	// checksummed is false when appending to a headerless v1 file. Records keep
+	// that file's framing rather than switching mid-file, which would leave a log
+	// no reader could parse. Rotate to get checksums on an old file.
+	checksummed bool
 }
 
 // Open opens (creating if needed) a WAL file for appending, recovering the last
 // sequence number so new entries continue monotonically.
+//
+// A new or empty file gets the header and checksummed records. An existing file
+// keeps whichever framing it already has: appending checksummed records to a
+// headerless log would produce a file that is neither format.
 func Open(path string) (*Writer, error) {
+	checksummed, err := hasHeader(path)
+	if err != nil {
+		return nil, err
+	}
 	last, err := lastSeq(path)
 	if err != nil {
 		return nil, err
@@ -76,7 +132,54 @@ func Open(path string) (*Writer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Writer{f: f, w: bufio.NewWriter(f), seq: last}, nil
+	w := &Writer{f: f, w: bufio.NewWriter(f), seq: last, checksummed: checksummed}
+	if checksummed {
+		// Only a brand-new file needs the header written; hasHeader reports true for
+		// an empty file precisely so this happens once.
+		st, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		if st.Size() == 0 {
+			if _, err := w.w.WriteString(Magic); err != nil {
+				_ = f.Close()
+				return nil, err
+			}
+		}
+	}
+	return w, nil
+}
+
+// hasHeader reports whether new records in path should carry checksums: true for a
+// missing or empty file (a fresh log) and for one already carrying the header,
+// false for a headerless v1 log.
+func hasHeader(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, nil // a log that does not exist yet is written in the current format
+		}
+		return false, err
+	}
+	defer f.Close()
+	buf := make([]byte, len(Magic))
+	n, err := io.ReadFull(f, buf)
+	if err == io.EOF || (err == io.ErrUnexpectedEOF && n == 0) {
+		return true, nil // empty file
+	}
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return false, err
+	}
+	return n == len(Magic) && string(buf) == Magic, nil
+}
+
+// Checksummed reports whether records this writer appends carry a CRC. It is false
+// only when appending to a log written before checksums existed.
+func (w *Writer) Checksummed() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.checksummed
 }
 
 func (w *Writer) append(e Entry) (int64, error) {
@@ -89,9 +192,18 @@ func (w *Writer) append(e Entry) (int64, error) {
 		w.seq--
 		return 0, err
 	}
-	var lenbuf [4]byte
-	binary.BigEndian.PutUint32(lenbuf[:], uint32(len(b)))
-	if _, err := w.w.Write(lenbuf[:]); err != nil {
+	if len(b) > MaxRecordBytes {
+		w.seq--
+		return 0, fmt.Errorf("%w: record of %d bytes exceeds the %d-byte maximum", ErrCorrupt, len(b), MaxRecordBytes)
+	}
+	var hdr [8]byte
+	binary.BigEndian.PutUint32(hdr[0:4], uint32(len(b)))
+	n := 4
+	if w.checksummed {
+		binary.BigEndian.PutUint32(hdr[4:8], crc32.Checksum(b, crcTable))
+		n = 8
+	}
+	if _, err := w.w.Write(hdr[:n]); err != nil {
 		return 0, err
 	}
 	if _, err := w.w.Write(b); err != nil {
@@ -170,19 +282,61 @@ func ReadAll(path string) ([]Entry, error) {
 	}
 	defer f.Close()
 	r := bufio.NewReader(f)
+
+	// Detect the framing. A header means every record carries a CRC; its absence
+	// means a v1 log, which is read without checksums so an upgrade does not lose
+	// the ability to recover — those records simply cannot be verified.
+	checksummed := false
+	if hdr, err := r.Peek(len(Magic)); err == nil && string(hdr) == Magic {
+		if _, err := r.Discard(len(Magic)); err != nil {
+			return nil, err
+		}
+		checksummed = true
+	}
+
 	var out []Entry
 	for {
 		var lenbuf [4]byte
 		if _, err := io.ReadFull(r, lenbuf[:]); err != nil {
 			break // clean EOF or torn length prefix — stop at the last complete record
 		}
-		buf := make([]byte, binary.BigEndian.Uint32(lenbuf[:]))
+		n := binary.BigEndian.Uint32(lenbuf[:])
+		// Bound before allocating: this length came off disk and a flipped bit in it
+		// must not turn recovery into a multi-gigabyte allocation.
+		if n == 0 || n > MaxRecordBytes {
+			return out, fmt.Errorf("%w: record %d declares %d bytes (limit %d)", ErrCorrupt, len(out)+1, n, MaxRecordBytes)
+		}
+
+		var want uint32
+		if checksummed {
+			var crcbuf [4]byte
+			if _, err := io.ReadFull(r, crcbuf[:]); err != nil {
+				break // torn checksum — the record was never completely written
+			}
+			want = binary.BigEndian.Uint32(crcbuf[:])
+		}
+
+		buf := make([]byte, n)
 		if _, err := io.ReadFull(r, buf); err != nil {
 			break // torn record body
 		}
+		if checksummed {
+			if got := crc32.Checksum(buf, crcTable); got != want {
+				// Complete on disk and altered since it was written. Stopping quietly
+				// here would look identical to a clean end of log while discarding
+				// everything after it.
+				return out, fmt.Errorf("%w: record %d checksum %08x, want %08x", ErrCorrupt, len(out)+1, got, want)
+			}
+		}
 		var e Entry
 		if err := json.Unmarshal(buf, &e); err != nil {
-			break // corrupt record — stop
+			if checksummed {
+				// The checksum passed, so these are the bytes that were written and
+				// they are not a record. That is a bug or a format mismatch, not
+				// media corruption, and it must not be swallowed.
+				return out, fmt.Errorf("%w: record %d passed its checksum but does not decode: %v", ErrCorrupt, len(out)+1, err)
+			}
+			break // v1 log: unverifiable, so an undecodable record is treated as the tail
 		}
 		out = append(out, e)
 	}

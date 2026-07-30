@@ -9,6 +9,35 @@ versions may include breaking changes).
 
 ### Fixed
 
+- **The write-ahead log had no checksums, so silent corruption was replayed as
+  truth.** `ReadAll` stopped at a record that failed to *parse*, which meant a
+  record altered on disk but still valid JSON — a flipped digit inside a price —
+  was handed to the engine and booked. The recovered venue was wrong about what
+  had happened and nothing anywhere said so.
+
+  Records now carry a CRC-32C, and the file carries a magic header so the framing
+  is identifiable rather than guessed. The two failure modes are deliberately
+  separated: a **torn tail** (a short final record from a crash mid-write) still
+  stops cleanly, because that command was never acknowledged, while a **complete
+  record whose checksum disagrees** is refused with `ErrCorrupt`. Stopping quietly
+  on the second would be indistinguishable from a clean end of log while discarding
+  every acknowledged command after it. A venue that cannot trust its log should
+  refuse to start, not serve a book that does not match it.
+
+- **A corrupt length prefix could ask recovery for a 4 GiB allocation.** The
+  4-byte record length was read off disk and passed straight to `make([]byte, n)`,
+  so one flipped bit requested up to 4 GiB at the moment a venue can least afford
+  it. Bounded by `MaxRecordBytes` (8 MiB, far beyond any real record), and a zero
+  length is refused rather than looping.
+
+  Logs written before this change have no header and are still read — without
+  verification, since there is nothing to verify against — and appending to one
+  keeps its original framing rather than switching format mid-file. Rotate to get
+  checksums on an existing log; `Writer.Checksummed` reports which framing is in
+  use.
+
+  Found by reading `joaquinbejar/OrderBook-rs`, which checksums its journal.
+
 - **Published benchmark figures that did not reproduce.** Re-measured every number
   in [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and the README on the stated hardware
   (median of 5 runs, idle machine, `go1.23.5`), and corrected what disagreed. The

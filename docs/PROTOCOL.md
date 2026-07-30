@@ -298,6 +298,12 @@ is applied, group-committed every 20ms, and replayed on start. With `-snapshot`
 and `-checkpoint` it also snapshots on a cadence, so a restart replays only the
 tail after the last checkpoint rather than all history.
 
+Records are CRC-32C-checksummed behind a magic header. A crash mid-write leaves a
+torn tail and recovery stops at it cleanly; a complete record whose checksum
+disagrees is media corruption and recovery **refuses to start** rather than serving
+a book that does not match its log. The record length is bounded, so a corrupted
+prefix cannot turn a restart into a multi-gigabyte allocation.
+
 Every command that mutates the book is logged: Enter, Cancel, Reduce, and the
 operator's account-wide cancel. That list is the whole contract — a mutating
 command missing from it is not "not yet logged", it is a book the log cannot
