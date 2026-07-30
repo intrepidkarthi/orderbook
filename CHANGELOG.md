@@ -7,6 +7,40 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-30
+
+Completes the client's order lifecycle, makes the log trustworthy, and doubles
+cancel throughput.
+
+**The protocol.** A client can now express every order type the engine implements
+and every operation it supports: six order types (stop, stop-limit, OCO, iceberg,
+pegged, trailing joining limit and market), atomic cancel/replace, mass cancel, and
+cancel-on-disconnect. Before this release the wire carried two of six order types and
+had no replace, so a reprice meant two messages with the client naked in between.
+Fourteen new message types, and the protocol stays at **version 2** — every golden
+vector from a released version is byte-identical, which is the third dividend from
+the type byte v0.11.0 spent a version freeze on.
+
+**The log.** It was not recording five commands that mutate the book — every
+conditional order type — so a stop entered after the last checkpoint did not survive
+a restart. And it had no checksums at all: a record altered on disk but still valid
+JSON was replayed as truth, silently. Both fixed, with the torn-tail and
+media-corruption cases now treated differently on purpose.
+
+**The speed.** Cancel went from ~47 ns to ~22 ns and the match path lost 27%, from
+profiling this engine against a C++ one and two other Go books. Reading the wall
+clock was 46% of the match path; a stop cascade ran over an empty stop book after
+every match; and the order index was a Go map where a purpose-built one is 12×
+faster. On the same machine and the same 200,000-order book, cancel is now ~3×
+faster than liquibook's C++ book and at parity with `geseq/orderbook`.
+
+**A note on how most of this was found.** Six of the ten fixes below came from
+building the next feature and asking what it would be sitting on, not from testing
+the feature itself: `QueryEnd.Seq` asserting a boundary the client had not reached,
+two message types assigned the same byte, five commands missing from the log, an
+accessor that raced. The comparison work in particular paid for itself twice — the
+WAL checksum gap came from reading a Rust order book's dependency list.
+
 ### Performance
 
 - **Cancel is ~2× faster: the order index is no longer a Go map.** A
@@ -245,6 +279,19 @@ the third time that has paid for itself.
 
 - `README.md` linked no protocol documentation, and described the release history
   as "v0.1.0 → v0.8.0".
+
+### Changed
+
+- **Breaking (embedders):** `matching.CommandLog` gained six methods —
+  `AppendReduce`, `AppendCancelAll`, `AppendReplace`, `AppendStop`, `AppendOCO`,
+  `AppendIceberg`, `AppendPegged` and `AppendTrailing`. `pkg/wal.Writer` implements
+  all of them; a custom log will not compile until it does, which is the intended
+  outcome — silently continuing to drop those commands is the bug being fixed.
+- **Breaking (embedders):** `Engine.Reduce` and `Runner.Reduce` now fail with
+  `ErrCancelTooSoon` inside a configured `MinRestingTime`, as does the new
+  `Engine.Replace`. Venues that leave the floor at zero — the default — see no change.
+- `Engine.TrailingStopCount` is documented as single-writer only; use
+  `Runner.TrailingStopCount` from any other goroutine.
 
 ## [0.12.0] - 2026-07-30
 
