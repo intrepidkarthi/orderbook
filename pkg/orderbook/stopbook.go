@@ -1,7 +1,8 @@
 package orderbook
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"sync"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -63,7 +64,9 @@ func (sb *StopBook) All() []*types.StopOrder {
 	for _, s := range sb.orders {
 		out = append(out, s)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Order.ID < out[j].Order.ID })
+	slices.SortFunc(out, func(a, b *types.StopOrder) int {
+		return cmp.Compare(a.Order.ID, b.Order.ID)
+	})
 	return out
 }
 
@@ -75,14 +78,22 @@ func (sb *StopBook) CheckTriggers(marketPrice int64) []*types.StopOrder {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 
+	if len(sb.orders) == 0 {
+		return nil
+	}
+
 	var fired []*types.StopOrder
 	for _, s := range sb.orders {
 		if s.ShouldTrigger(marketPrice) {
 			fired = append(fired, s)
 		}
 	}
-	sort.Slice(fired, func(i, j int) bool {
-		return fired[i].Order.ID < fired[j].Order.ID
+	// slices.SortFunc rather than sort.Slice: the latter goes through reflection
+	// (reflectlite.Swapper) and costs ~8ns even when the slice is empty, which it
+	// usually is. Sorting is still required — map iteration order is random and
+	// firing order must be deterministic for replay.
+	slices.SortFunc(fired, func(a, b *types.StopOrder) int {
+		return cmp.Compare(a.Order.ID, b.Order.ID)
 	})
 	for _, s := range fired {
 		s.Trigger()
