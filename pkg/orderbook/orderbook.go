@@ -29,6 +29,16 @@ type node struct {
 	// user is the interned account id, stored here so a cancel never has to hash
 	// the account string again. See userTable in index.go.
 	user int32
+	// contributed is how much this node currently adds to its level's TotalQty.
+	//
+	// It exists because the level total cannot be derived from order.RemainingQty at
+	// removal time: the matching engine fills an order (dropping RemainingQty to 0)
+	// and only then removes it, so an unlink that subtracted RemainingQty would
+	// subtract nothing and leave the maker's original size in the level forever.
+	// That was a real bug — depth over-reported after every full fill — and it was
+	// caused by the level total being a discipline the caller had to maintain at
+	// every removal site rather than a property the book kept for itself.
+	contributed int64
 }
 
 // PriceLevel is the FIFO queue of resting orders at one price. Price is in ticks
@@ -43,6 +53,7 @@ type PriceLevel struct {
 
 // push appends a node at the tail (time priority) and grows the aggregate.
 func (pl *PriceLevel) push(n *node) {
+	n.contributed = n.order.RemainingQty
 	n.prev = pl.tail
 	n.next = nil
 	if pl.tail != nil {
@@ -52,7 +63,7 @@ func (pl *PriceLevel) push(n *node) {
 	}
 	pl.tail = n
 	pl.count++
-	pl.TotalQty += n.order.RemainingQty
+	pl.TotalQty += n.contributed
 }
 
 // unlink removes a node in O(1) and decrements the aggregate.
@@ -68,7 +79,10 @@ func (pl *PriceLevel) unlink(n *node) {
 		pl.tail = n.prev
 	}
 	pl.count--
-	pl.TotalQty -= n.order.RemainingQty
+	// What this node actually contributed, NOT order.RemainingQty: a filled order is
+	// removed with RemainingQty already at zero.
+	pl.TotalQty -= n.contributed
+	n.contributed = 0
 	n.prev, n.next = nil, nil
 }
 
@@ -112,7 +126,7 @@ func (ob *OrderBook) getNode(order *types.Order, level *PriceLevel) *node {
 
 // putNode clears and recycles a node.
 func (ob *OrderBook) putNode(nd *node) {
-	nd.order, nd.level, nd.prev, nd.next, nd.user = nil, nil, nil, nil, 0
+	nd.order, nd.level, nd.prev, nd.next, nd.user, nd.contributed = nil, nil, nil, nil, 0, 0
 	ob.nodePool = append(ob.nodePool, nd)
 }
 
@@ -398,6 +412,7 @@ func (ob *OrderBook) UpdateOrderQuantity(orderID int64, filledQty int64) {
 	defer ob.mu.Unlock()
 	if n, ok := ob.nodes.get(orderID); ok {
 		n.level.TotalQty -= filledQty
+		n.contributed -= filledQty
 	}
 }
 
@@ -408,6 +423,7 @@ func (ob *OrderBook) RestoreOrderQuantity(orderID int64, qty int64) {
 	defer ob.mu.Unlock()
 	if n, ok := ob.nodes.get(orderID); ok {
 		n.level.TotalQty += qty
+		n.contributed += qty
 	}
 }
 

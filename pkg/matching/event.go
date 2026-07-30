@@ -22,9 +22,9 @@ const (
 	EventRejected                   // order refused (with Reason)
 	EventTrade                      // an execution (a fill)
 	EventCanceled                   // order removed: cancelled, or terminated without resting
-	EventTriggered                  // reserved: a stop/trailing fired
+	EventTriggered                  // a stop or trailing stop fired and became a live order
 	EventReplaced                   // order changed size in place, keeping queue position
-	EventBookDelta                  // reserved: an aggregated L2 level change
+	EventBookDelta                  // DEPRECATED and never emitted; see the note below
 	EventHalted                     // engine entered Halted (guardrail trip or band-breach pause)
 	EventResumed                    // engine returned to Open (e.g. band-breach pause elapsed)
 )
@@ -70,6 +70,20 @@ type Event struct {
 	Trade   *types.Trade // set for Trade
 	Reason  error        // set for Rejected
 }
+
+// EventBookDelta is retained only so the numbering of the kinds after it does not
+// shift, and it is never emitted.
+//
+// It was reserved for an aggregated L2 level change, and the engine is the wrong
+// place to produce one. L2 is a pure function of L3, and this stream is tested to
+// reconstruct the L3 book exactly (TestEventStreamReconstructsBook, 22 scenarios) —
+// so a consumer that wants level deltas can derive them, and marketdata.NewL2Feed
+// does. Emitting them from the matching goroutine would add work to the hot path to
+// compute something a consumer can compute for itself, off it.
+//
+// Left declared rather than deleted because a consumer may have persisted these
+// values, and removing a constant from the middle of an iota block silently
+// renumbers every kind after it.
 
 // EventSink receives batches of engine events in strict Seq order. Implementations
 // MUST return quickly and MUST NOT block the matching goroutine — push the batch

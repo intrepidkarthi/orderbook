@@ -49,11 +49,18 @@ per seed:
 
 | seed | λ (ticks/lot) | R² | depth (lots) | trades |
 |---|---|---|---|---|
-| 1 | 0.15508 | 0.1733 | 333.7 | 2479 |
-| 2 | 0.15406 | 0.1808 | 424.4 | 2468 |
-| 3 | 0.15332 | 0.1764 | 336.2 | 2412 |
-| 4 | 0.14560 | 0.1782 | 475.7 | 2395 |
-| 5 | 0.15154 | 0.1725 | 408.3 | 2371 |
+| 1 | 0.15508 | 0.1733 | 299.4 | 2479 |
+| 2 | 0.15406 | 0.1808 | 385.4 | 2468 |
+| 3 | 0.15332 | 0.1764 | 306.5 | 2412 |
+| 4 | 0.14560 | 0.1782 | 437.7 | 2395 |
+| 5 | 0.15154 | 0.1725 | 378.0 | 2371 |
+
+> **Depth re-measured 2026-07-30.** The depth column changed when a bug was fixed in
+> the engine's aggregated level total: a level was not reduced when a resting order
+> was fully consumed, so L2 depth was over-reported after every complete fill. λ, R²
+> and trade counts are byte-identical — λ is estimated from trades and price changes,
+> not from depth — so only the depth column and the λ·depth product below moved, and
+> the finding that λ·depth is roughly flat is unaffected.
 
 λ lands near 0.15 ticks per lot and is stable across seeds. R² ≈ 0.17: signed
 flow explains about a sixth of the variance in mid-price change.
@@ -73,17 +80,17 @@ than assumed, so the x-axis is observed liquidity, not the knob:
 
 | scale | depth (lots) | λ (ticks/lot) | R² | λ·depth |
 |---|---|---|---|---|
-| 1 | 333.7 | 0.15508 | 0.1733 | 51.7 |
-| 2 | 867.4 | 0.07321 | 0.1751 | 63.5 |
-| 4 | 1361.4 | 0.03825 | 0.1822 | 52.1 |
-| 8 | 2430.7 | 0.02065 | 0.1865 | 50.2 |
+| 1 | 299.4 | 0.15508 | 0.1733 | 46.4 |
+| 2 | 803.3 | 0.07321 | 0.1751 | 58.8 |
+| 4 | 1258.2 | 0.03825 | 0.1822 | 48.1 |
+| 8 | 2264.8 | 0.02065 | 0.1865 | 46.8 |
 
-Depth rises 7.3×; λ falls 7.5×. **λ ∝ 1/depth holds.** λ·depth shows no
+Depth rises 7.6×; λ falls 7.5×. **λ ∝ 1/depth holds.** λ·depth shows no
 systematic trend across the sweep, and λ falls monotonically with depth in every
 seed tested.
 
-The honest caveat: λ·depth is not *constant*, it wanders between roughly 42 and
-69 across seeds and rungs — about ±25%. On an integer-tick book, small price
+The honest caveat: λ·depth is not *constant*. Across the four rungs above it runs
+from roughly 46 to 59, and it moves further than that across seeds. On an integer-tick book, small price
 moves are quantized away, which biases λ at the deep end where the true moves
 are smallest. The proportionality is real; the constant is approximate.
 

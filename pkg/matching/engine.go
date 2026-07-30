@@ -634,6 +634,18 @@ func (e *Engine) emitCancel(order *types.Order) {
 	e.pending = append(e.pending, Event{Kind: EventCanceled, OrderID: order.ID, UserID: order.UserID, Order: order})
 }
 
+// emitTriggered announces that a conditional order's trigger has been reached and it
+// is about to enter the book as a live order.
+//
+// It carries the order so a consumer can see which one fired without keeping its own
+// map of pending stops.
+func (e *Engine) emitTriggered(order *types.Order) {
+	if e.sink == nil {
+		return
+	}
+	e.pending = append(e.pending, Event{Kind: EventTriggered, OrderID: order.ID, UserID: order.UserID, Order: order})
+}
+
 // emitReplaced announces an in-place size change that no trade explains — today,
 // a maker shrunk by self-trade-prevention DECREMENT.
 func (e *Engine) emitReplaced(order *types.Order) {
@@ -808,11 +820,16 @@ func (e *Engine) cascadeStops(dst []types.Trade) []types.Trade {
 		for _, s := range fired {
 			// If this stop is an OCO leg, cancel its primary before it executes.
 			e.cancelOCOCounterpart(s.Order.ID)
+			// Triggered before Accepted: a consumer that saw only the Accepted would
+			// have no way to tell this order from one a client had just submitted, and
+			// "a stop fired" is the event a risk system actually wants to see.
+			e.emitTriggered(s.Order)
 			e.emitAdd(s.Order) // the stop is now a live order; announce it before it trades
 			dst, _, _ = e.settleInto(s.Order, dst)
 			e.emitTerminalIfDone(s.Order)
 		}
 		for _, ts := range trailing {
+			e.emitTriggered(ts.Order)
 			e.emitAdd(ts.Order)
 			dst, _, _ = e.settleInto(ts.Order, dst)
 			e.emitTerminalIfDone(ts.Order)
@@ -840,6 +857,9 @@ func (e *Engine) submitStopInto(stop *types.StopOrder, dst []types.Trade) ([]typ
 
 	if mp := e.book.LastTradePrice(); mp > 0 && stop.ShouldTrigger(mp) {
 		stop.Trigger()
+		// A stop that fires on arrival is still a stop that fired, and a consumer
+		// should not have to infer that from the absence of a PendingTrigger.
+		e.emitTriggered(stop.Order)
 		var status types.OrderStatus
 		var reason error
 		dst, status, reason = e.settleInto(stop.Order, dst)

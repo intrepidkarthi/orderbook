@@ -7,6 +7,73 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A price level's aggregate quantity was wrong after every full fill, and nothing
+  checked it.** The matching engine fills a maker — dropping `RemainingQty` to zero —
+  and only then removes it from the book, and `PriceLevel.unlink` subtracted
+  `RemainingQty`. So it subtracted nothing, and the maker's entire original size
+  stayed in the level total forever. Three sell orders of 5 at one price, swept by a
+  12-lot buy, left the level reporting **13** lots with a single 3-lot order resting
+  at it.
+
+  `Snapshot` is the read model for `pkg/signals`, the research studies, the WASM demo
+  and any L2 feed, so **all of them saw over-reported depth**. Present at least as far
+  back as v0.12.0 — confirmed by running the same check against that tag.
+
+  Fixed by making the total the book's own property: each node records what it
+  contributed (`node.contributed`), and `unlink` subtracts that. The level total was
+  previously a discipline every removal site had to remember, and forgetting it at two
+  sites is precisely what this bug was.
+
+  No test caught it because every existing assertion checked the orders *or* the
+  level, never that the two agreed. There is now an invariant — level total equals the
+  sum of the `RemainingQty` resting at it — asserted after a full fill, after a
+  removal with no prior update, and after every step of a 2,000-operation churn. It
+  was verified to fail against the old code, after a first attempt at it passed for
+  the wrong reason: with a single order at the level, the emptied level is deleted
+  outright and takes the error with it.
+
+- **The research numbers were re-measured, and two of the three studies moved.**
+  Order-flow imbalance is computed from level depth, so it was affected: mean
+  contemporaneous R² was published as 0.1685 and is **0.2357**, with the gap to the
+  predictive figure going from ~540× to ~577×. The conclusion is *strengthened* —
+  OFI explains more of the same-interval move than reported and still essentially
+  none of the next one. Kyle's λ study keeps λ, R² and trade counts byte-identical
+  (λ is estimated from trades, not depth) and only its depth column and λ·depth
+  product moved. The delta/CVD study is unchanged: it reads trades and aggressor
+  inference, and never touches depth.
+
+  `cmd/ofistudy` carried its verdict as literal text — "~17% … a ~540x gap" — and so
+  printed numbers its own table contradicted the moment the measurement changed. It
+  now computes them from its results, and prints the slope columns the write-up
+  needs so the table can be regenerated from the program rather than assembled by
+  hand.
+
+### Added
+
+- **`marketdata.L2Feed`** — an incremental depth feed derived from the event stream:
+  aggregated level changes, coalesced per command, with absolute quantities so a
+  subscriber that misses one recovers on the next rather than staying wrong.
+
+  This is where `matching.EventBookDelta` was heading, and the engine was the wrong
+  place for it. L2 is a pure function of L3, the event stream is already tested to
+  reconstruct the L3 book exactly, and computing deltas on the matching goroutine
+  would add work to a path whose whole design goal is to allocate nothing and return.
+  The constant stays declared but unemitted, with that reasoning attached, because
+  removing a value from the middle of an iota block silently renumbers every kind
+  after it.
+
+  The test that matters compares the derived levels against the engine's own
+  `Snapshot` after every command of a 3,000-command random tape — the two views
+  cannot drift without it failing. It is also what found the depth bug above.
+
+- **`EventTriggered` is now emitted**, on both paths where a conditional order fires:
+  the cascade after a trade, and the immediate fire when a stop arrives already
+  through its trigger. It precedes the `Accepted`, because a consumer seeing only the
+  `Accepted` cannot tell a fired stop from an order a client just submitted, and "a
+  stop fired" is the event a risk system actually wants.
+
 ## [0.13.0] - 2026-07-30
 
 Completes the client's order lifecycle, makes the log trustworthy, and doubles

@@ -280,7 +280,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [BENCHMARKS.md](docs/BENCHMARKS.md) | Performance results, methodology, and how to reproduce. |
 | [LEARN.md](docs/LEARN.md) | Order books and market making from first principles. |
 | [research-roadmap.md](docs/research-roadmap.md) | The microstructure research agenda: OFI, Kyle's λ, Avellaneda–Stoikov, delta/CVD — and [what data it runs on](docs/research-roadmap.md#0-data-and-scope). |
-| [research/ofi.md](docs/research/ofi.md) | Does order-flow imbalance predict the next move? Contemporaneous R² ≈ 0.17, predictive R² ≈ 0.0003 — a ~540× gap, and the little that remains points the other way. |
+| [research/ofi.md](docs/research/ofi.md) | Does order-flow imbalance predict the next move? Contemporaneous R² ≈ 0.24, predictive R² ≈ 0.0004 — a ~577× gap, and the little that remains points the other way. |
 | [research/kyle-lambda.md](docs/research/kyle-lambda.md) | Price impact measured end to end: the λ a real book produces, why it scales as 1/depth, and what a block order costs against working the same quantity. |
 | [research/order-flow.md](docs/research/order-flow.md) | Delta, CVD, and absorption against ground truth: a 94.5%-accurate aggressor rule builds a CVD wrong by 169%, and CVD divergence loses to a price-only control. |
 | [PROTOCOL.md](docs/PROTOCOL.md) | The binary order-entry protocol `cmd/obgw` speaks: framing, session and resume, every message, the reason-code vocabulary, and what is deliberately absent from the wire. |

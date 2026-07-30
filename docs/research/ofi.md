@@ -39,19 +39,30 @@ Ten seeds, N = 4,999 intervals each:
 
 | seed | contemporaneous R² | predictive R² | contemporaneous slope | predictive slope |
 |---|---|---|---|---|
-| 1 | 0.2199 | 0.0003 | +0.15718 | −0.00549 |
-| 2 | 0.2397 | 0.0005 | +0.14886 | −0.00708 |
-| 3 | 0.1567 | 0.0000 | +0.15985 | −0.00155 |
-| 4 | 0.1355 | 0.0000 | +0.09388 | −0.00147 |
-| 5 | 0.1058 | 0.0008 | +0.12494 | −0.01054 |
-| 6 | 0.1544 | 0.0004 | +0.10496 | +0.00545 |
-| 7 | 0.2364 | 0.0007 | +0.15394 | −0.00844 |
-| 8 | 0.0704 | 0.0003 | +0.10824 | −0.00655 |
-| 9 | 0.1935 | 0.0001 | +0.11295 | −0.00246 |
-| 10 | 0.1728 | 0.0000 | +0.10967 | −0.00029 |
-| **mean** | **0.1685** | **0.0003** | | |
+| 1 | 0.2697 | 0.0003 | +0.20506 | −0.00670 |
+| 2 | 0.2941 | 0.0001 | +0.19483 | −0.00392 |
+| 3 | 0.1968 | 0.0000 | +0.21388 | +0.00038 |
+| 4 | 0.2406 | 0.0001 | +0.18006 | −0.00434 |
+| 5 | 0.1621 | 0.0000 | +0.20644 | −0.00243 |
+| 6 | 0.2457 | 0.0005 | +0.18167 | +0.00774 |
+| 7 | 0.2770 | 0.0020 | +0.19458 | −0.01634 |
+| 8 | 0.1193 | 0.0003 | +0.19767 | −0.01051 |
+| 9 | 0.2813 | 0.0007 | +0.17843 | −0.00863 |
+| 10 | 0.2700 | 0.0001 | +0.18671 | +0.00377 |
+| **mean** | **0.2357** | **0.0004** | | |
 
-Contemporaneous R² beats predictive R² by roughly **540×**.
+Contemporaneous R² beats predictive R² by roughly **577×**.
+
+> **Re-measured 2026-07-30.** These numbers changed when a bug was fixed in the
+> engine's aggregated depth: a price level's total was not reduced when a resting
+> order was fully consumed, so L2 depth was over-reported after every complete fill.
+> OFI is computed from level depth, so the contemporaneous figure was affected —
+> mean R² was previously reported as 0.1685 with a ~540× gap. The predictive figure
+> is unchanged at ~0.0004, and the conclusion is *strengthened* rather than
+> weakened: OFI explains more of the same-interval move than we thought, and still
+> essentially none of the next one. `cmd/ofistudy` now computes the verdict from its
+> own results instead of carrying them as literal text, which is what allowed the
+> printed summary to drift from the table above it.
 
 **The contemporaneous relation is real and correctly signed.** The slope is
 positive in all ten seeds: net buying pressure at the touch coincides with the
