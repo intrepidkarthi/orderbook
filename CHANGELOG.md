@@ -7,6 +7,27 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-30
+
+Completes the client's side of the order lifecycle, and repairs three things found
+underneath it.
+
+v0.11.0 spent a version freeze on a message-type byte. This release is what that
+bought: four new message types, no bump, every pre-existing golden vector
+byte-identical. `Query` / `OpenOrder` / `QueryEnd` give a client a way back to a
+correct picture in-protocol, and `Reduce` lets it shrink an order without going to
+the back of the queue — a capability the engine has had since v0.10.0 and no client
+could ask for.
+
+The three repairs are the more interesting half, and all three were found by asking
+what the new message would be sitting on rather than whether it worked. The command
+log was not recording two commands that mutate the book. The anti-spoofing floor
+guarded `Cancel` and not `Reduce`, which would have handed the Coscia pattern to
+every authenticated client the moment the wire carried a reduce. And recovery
+rebuilt the book without the index over it, so a restart left recovered orders
+unreachable and — quietly, with nothing logged anywhere — stopped reporting their
+fills to the makers who owned them.
+
 ### Fixed
 
 - **Two mutating commands were never written to the log.** `Reduce` and
@@ -133,6 +154,8 @@ derived by hand.
 `Replaced`, with the same field at the same offset, and the two vectors differ in
 exactly one byte — the type. Under v1's length-based dispatch they could not have
 coexisted at all.
+
+The protocol stays at **version 2**.
 
 ## [0.11.0] - 2026-07-29
 

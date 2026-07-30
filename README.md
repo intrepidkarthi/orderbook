@@ -100,6 +100,11 @@ you build on are correct, tested, and honest about their edges.
   outlive a connection, and gap-free resume — reconnect with your cursor and
   receive the fills that landed while you were disconnected. A client can never
   name another account's order, because the wire has no field for it.
+
+  The full client lifecycle is on the wire: enter, cancel, **reduce in place
+  keeping queue position**, and **query your open orders** when resume is not
+  available. Orders that outlive a restart stay nameable and keep reporting their
+  fills.
 - **Market data.** L1 / L2 / L3 (market-by-order) snapshots with sequence
   numbers.
 - **Tested and benchmarked.** Race, fuzz, soak, and replay-recovery suites;
@@ -159,8 +164,9 @@ Or run the reference gateway and talk to it over a socket:
 go run ./cmd/obgw -addr 127.0.0.1:9000 -symbol BTC-USD -accounts alice:s3cret
 ```
 
-`cmd/obgw/server_test.go` is a working client — login, enter, cancel, resume —
-and is the most useful reference for writing another one.
+`cmd/obgw`'s tests are a working client — login, enter, cancel, reduce, query,
+resume — and are the most useful reference for writing another one. The protocol
+helpers live in `server_test.go`.
 
 Runnable, testable examples render on
 [pkg.go.dev](https://pkg.go.dev/github.com/intrepidkarthi/orderbook/pkg/matching#pkg-examples).
@@ -262,7 +268,8 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [research/ofi.md](docs/research/ofi.md) | Does order-flow imbalance predict the next move? Contemporaneous R² ≈ 0.17, predictive R² ≈ 0.0003 — a ~540× gap, and the little that remains points the other way. |
 | [research/kyle-lambda.md](docs/research/kyle-lambda.md) | Price impact measured end to end: the λ a real book produces, why it scales as 1/depth, and what a block order costs against working the same quantity. |
 | [research/order-flow.md](docs/research/order-flow.md) | Delta, CVD, and absorption against ground truth: a 94.5%-accurate aggressor rule builds a CVD wrong by 169%, and CVD divergence loses to a price-only control. |
-| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.8.0) with breaking-change notes. |
+| [PROTOCOL.md](docs/PROTOCOL.md) | The binary order-entry protocol `cmd/obgw` speaks: framing, session and resume, every message, the reason-code vocabulary, and what is deliberately absent from the wire. |
+| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.12.0) with breaking-change notes. |
 
 ---
 
