@@ -7,6 +7,39 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-30
+
+A depth bug that had been wrong in public, and the measurements that found it.
+
+**The bug.** A price level's aggregate quantity was not reduced when a resting order
+was fully consumed, so L2 depth was over-reported after every complete fill — three
+sells of 5 swept by a 12-lot buy left the level reporting 13 lots with a single 3-lot
+order at it. `Snapshot` is the read model for `pkg/signals`, the research studies, the
+WASM demo and any L2 feed, so all of them saw inflated depth. It was present at least
+as far back as v0.12.0.
+
+**How it was found, which is the part worth repeating.** Not by testing the book. By
+building an incremental L2 feed above the engine and asserting the derived levels
+equalled the engine's own `Snapshot` after every command of a random tape. Two views
+of the same state, forced to agree. Every existing test checked the orders *or* the
+level; none checked that the two matched, which is exactly the gap a bug like this
+lives in.
+
+**What it cost.** Order-flow imbalance is computed from depth, so the published study
+moved: mean contemporaneous R² was 0.1685 and is 0.2357, with the predictive gap going
+from ~540× to ~577×. The conclusion is *strengthened* — OFI explains more of the
+same-interval move than reported and still essentially none of the next one. Kyle's λ
+keeps λ, R² and trade counts identical and moved only its depth column. The delta/CVD
+study is untouched. `cmd/ofistudy` also carried its verdict as literal text and printed
+figures its own table contradicted; it now computes them.
+
+**Two claims corrected by measuring them.** Publishing one tail-latency scenario
+understated the tail by ~30×, and the mass cancel — never measured — blocks the
+matching goroutine for ~872 µs per 5,000 orders, which makes the kill switch a
+venue-wide pause. And recovery was documented as "bounded to O(recent)": true of the
+replay, false of the restart, since loading a 100,000-order snapshot is ~174 ms
+against ~21 ms for a 10,000-record tail. Restart is O(book) + O(tail).
+
 ### Fixed
 
 - **A price level's aggregate quantity was wrong after every full fill, and nothing

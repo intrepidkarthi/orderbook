@@ -106,8 +106,12 @@ you build on are correct, tested, and honest about their edges.
   position**, **atomic cancel/replace**, **mass cancel**, cancel-on-disconnect, and
   **query your open orders** when resume is not available. Orders that outlive a
   restart stay nameable and keep reporting their fills.
-- **Market data.** L1 / L2 / L3 (market-by-order) snapshots with sequence
-  numbers.
+- **Market data.** L1 / L2 / L3 (market-by-order) snapshots with sequence numbers,
+  plus `marketdata.L2Feed` — incremental aggregated depth derived from the event
+  stream, coalesced per command, with absolute quantities so a subscriber that misses
+  an update recovers on the next one. Its test asserts the derived levels equal the
+  engine's own snapshot after every command, which is how a long-standing depth bug
+  was found.
 - **Tested and benchmarked.** Race, fuzz, soak, and replay-recovery suites;
   microbenchmarks run in CI on every push.
 
@@ -284,7 +288,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [research/kyle-lambda.md](docs/research/kyle-lambda.md) | Price impact measured end to end: the λ a real book produces, why it scales as 1/depth, and what a block order costs against working the same quantity. |
 | [research/order-flow.md](docs/research/order-flow.md) | Delta, CVD, and absorption against ground truth: a 94.5%-accurate aggressor rule builds a CVD wrong by 169%, and CVD divergence loses to a price-only control. |
 | [PROTOCOL.md](docs/PROTOCOL.md) | The binary order-entry protocol `cmd/obgw` speaks: framing, session and resume, every message, the reason-code vocabulary, and what is deliberately absent from the wire. |
-| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.13.0) with breaking-change notes. |
+| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.14.0) with breaking-change notes. |
 
 ---
 
