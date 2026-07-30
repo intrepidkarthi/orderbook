@@ -52,6 +52,38 @@ versions may include breaking changes).
 
 ### Added
 
+- **Tail latency for six more scenarios, and the mass cancel measured for the first
+  time.** One scenario was published — a cancel-heavy mix — and it was the friendliest
+  of the six. Its p99.9 is 958 ns; an aggressive sweep's is 6,875 ns with a p99.99 of
+  31 µs, so **publishing only that one understated the tail by roughly 30×**. Each
+  scenario now states its preload, reports out to p99.99, and covers the operations
+  that were never measured: a thin-book walk, all five self-trade-prevention modes
+  (all cheap), and the bulk cancel.
+
+  The mass cancel is the one worth knowing: pulling one account's 5,000 resting orders
+  takes **~872 µs at p50 and ~1.26 ms at p99**, on the matching goroutine, so nobody
+  else's orders are processed for that whole time. The kill switch is a venue-wide
+  pause proportional to the account's book. It scales, so a 100,000-order account is
+  on the order of 18 ms.
+
+  Methodology borrowed from `joaquinbejar/OrderBook-rs`, whose HDR bench suite does
+  this properly: name the scenario, state the preload, report the upper quantiles.
+
+- **Recovery time, which was claimed and never measured.** A 100,000-order book
+  restarts in **~174 ms** from a checkpoint; a 10,000-record tail on top adds ~21 ms,
+  at ~2.1 µs per record.
+
+  That corrects a claim rather than confirming one. The package doc said recovery is
+  "bounded to O(recent)", which is true of the *replay* and not of the restart:
+  loading the snapshot is O(book) and dominates by an order of magnitude. Restart is
+  O(book) + O(tail). The doc now says so.
+
+  It also locates the cost: **reading the log is ~90% of replay** — 2.1 µs of 2.3 µs
+  per record, at ~15 allocations per record, because records are JSON. A binary record
+  format would not help write throughput, which is fsync-dominated, but it would cut
+  restart time. That is a better-founded reason to consider one than the encode
+  benchmark that first suggested it.
+
 - **`marketdata.L2Feed`** — an incremental depth feed derived from the event stream:
   aggregated level changes, coalesced per command, with absolute quantities so a
   subscriber that misses one recovers on the next rather than staying wrong.

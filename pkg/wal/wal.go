@@ -6,8 +6,11 @@
 // conditional order types (stop, OCO, iceberg, pegged, trailing). A fresh engine
 // replays the log — optionally starting from a snapshot — to reach identical book state, the same recovery contract LMAX (journal +
 // snapshot + replay) and Binance (hourly snapshot + sequential replay) rely on.
-// Recovery is bounded to O(recent) by snapshotting and replaying only the WAL tail
-// after the snapshot's sequence.
+// Snapshotting bounds the REPLAY to O(recent) — only the WAL tail after the
+// snapshot's sequence is applied, at roughly 2µs per record. It does not bound the
+// restart: loading the snapshot itself is O(book), and at a 100,000-order book that
+// is ~174ms against ~21ms for a 10,000-record tail. Restart time is therefore
+// O(book) + O(tail), dominated by the first term. See docs/BENCHMARKS.md.
 //
 // Records are length-prefixed, CRC-32C-checksummed JSON, written write-ahead
 // (before the engine applies the command) so no acknowledged command is lost.

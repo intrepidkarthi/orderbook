@@ -88,6 +88,88 @@ six runs reported exactly those three values; the sixth gave p99 208 / p999 334.
 Under a concurrent test suite the same benchmark reports p999 417, which is worth
 stating because it is what an unquiesced machine will show you.
 
+### Tail latency by scenario
+
+One scenario was published before — a cancel-heavy mix — and it is the *friendliest*
+one. Each row below states its preload, because for a book-level operation the book
+size is part of the result. Median of one run each, `-benchtime=200000x`, same machine.
+
+| Scenario | preload | p50 | p99 | p99.9 | p99.99 |
+|---|---:|---:|---:|---:|---:|
+| `CancelOnly` — drain a preloaded book | 201 K | **83** | 209 | 833 | 3,541 |
+| `CancelHeavy` — 90% cancel / 10% new | 20 K | **83** | 292 | 958 | — |
+| `Mixed_70_20_10` — submit / cancel / aggress | 20 K | 125 | 875 | 2,834 | 12,750 |
+| `ThinBook` — one order per level, 10-level walk | 5 K | 125 | 584 | 2,750 | 11,792 |
+| `AddOnly` — passive insertion into a growing book | 20 K | 167 | 1,167 | 2,875 | 21,875 |
+| `AggressiveWalk` — 5-lot takers sweeping levels | 20 K | 416 | 1,958 | 6,875 | 31,250 |
+
+All figures ns, from one `-benchtime=200000x` run each so the rows are comparable to
+each other. The `CancelHeavy` row therefore differs from the median-of-five figure
+quoted above it (p99 167 / p999 250): more samples reach further into the tail, and a
+fixed 200,000-iteration run is a different measurement from whatever Go's default
+timing chooses. Both are real; neither is the other's correction.
+
+**Publishing only the cancel-heavy scenario understated the tail by
+roughly 30×**: its p99.9 is 958 ns, and an aggressive sweep's is 6,875 ns with a
+p99.99 of 31 µs. Neither is alarming for a Go engine — but a venue writes its SLO on
+p99.9, and the previously published number was the best of six.
+
+Self-trade prevention, all five modes, never measured before and all cheap:
+
+| STP mode | p50 | p99 | p99.9 |
+|---|---:|---:|---:|
+| `ALLOW` | 125 | 875 | 958 |
+| `CANCEL_NEWEST` | 83 | 167 | 750 |
+| `CANCEL_OLDEST` | 125 | 833 | 958 |
+| `CANCEL_BOTH` | 83 | 208 | 834 |
+| `DECREMENT` | 84 | 209 | 875 |
+
+**The mass cancel is the one to know about.** Pulling a single account's 5,000 resting
+orders takes **~872 µs at p50 and ~1.26 ms at p99** — and it runs on the matching
+goroutine, so for that whole time no other participant's orders are processed. The
+kill switch is a venue-wide pause proportional to the account's book: budget roughly
+0.9 ms per 5,000 orders, and note that it scales, so a 100,000-order account is on the
+order of 18 ms.
+
+`allocs/op` on these rows includes the harness building each `*types.Order` inside the
+measured loop, which the zero-allocation rows above deliberately do not. Read them as
+scenario cost, not as engine allocation.
+
+### Recovery time — how long a restart takes
+
+Previously unpublished, while the package doc claimed recovery was "bounded to
+O(recent)". That claim is about the *replay* and it is true; it is also not what
+dominates a restart.
+
+| Operation | 1 K | 10 K | 100 K |
+|---|---:|---:|---:|
+| `ReadAll` — read + CRC-verify the log | 3.7 ms | 21.4 ms | 214 ms |
+| `ReplayTail` — full recovery, no snapshot | 4.3 ms | 25.1 ms | 234 ms |
+| `WriteSnapshot` — the checkpoint pause | 10.9 ms | 15.2 ms | 82.4 ms |
+| `RestoreSnapshot` — load a checkpoint, empty tail | 2.7 ms | 18.4 ms | 171 ms |
+
+Recovering a **100,000-order book**, which is what a real restart looks like:
+
+| tail after the snapshot | total recovery |
+|---:|---:|
+| 0 records | 174 ms |
+| 1,000 records | 177 ms |
+| 10,000 records | 195 ms |
+
+Three things fall out of this, and the third corrects a claim:
+
+1. **A tail record costs ~2.1 µs**, so 10,000 of them add ~21 ms. Snapshotting really
+   does bound the replay.
+2. **Reading the log is ~90% of replay cost** — 2.1 µs of the 2.3 µs per record — at
+   ~15 allocations per record, because records are JSON. This is where a binary record
+   format would pay. It would *not* help write throughput, which is fsync-dominated;
+   it would cut restart time.
+3. **Restart is dominated by the snapshot, not the tail.** Loading a 100,000-order
+   checkpoint is ~174 ms; the tail on top of it is tens of milliseconds. So recovery
+   is O(book) for the snapshot **plus** O(tail) for the replay, and describing it as
+   "bounded to O(recent)" understates it. The snapshot is what makes the *replay*
+   cheap, not what makes the restart cheap.
+
 ### Against the spec targets (§7)
 
 | Metric | Target | Measured | |
