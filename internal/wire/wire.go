@@ -62,19 +62,23 @@ const (
 // the type explicitly rather than inferring it from length is what lets the
 // protocol grow: a new message is a new type byte, not a length nobody may reuse.
 const (
-	MsgEnter  uint8 = 'E' // inbound: new order
-	MsgCancel uint8 = 'C' // inbound: cancel by ClOrdID
-	MsgQuery  uint8 = 'Q' // inbound: report my open orders
-	MsgReduce uint8 = 'M' // inbound: shrink a resting order, keeping queue position
+	MsgEnter              uint8 = 'E' // inbound: new order
+	MsgCancel             uint8 = 'C' // inbound: cancel by ClOrdID
+	MsgQuery              uint8 = 'Q' // inbound: report my open orders
+	MsgReduce             uint8 = 'M' // inbound: shrink a resting order, keeping queue position
+	MsgMassCancel         uint8 = 'F' // inbound: cancel everything I have resting
+	MsgCancelOnDisconnect uint8 = 'B' // inbound: pull my book if this session drops
 
-	MsgAccepted  uint8 = 'A' // outbound: order is live
-	MsgRejected  uint8 = 'R' // outbound: order refused
-	MsgExecuted  uint8 = 'X' // outbound: a fill
-	MsgCanceled  uint8 = 'D' // outbound: order removed
-	MsgReplaced  uint8 = 'P' // outbound: size changed in place, queue position kept
-	MsgCmdReject uint8 = 'K' // outbound: the command itself was refused
-	MsgOpenOrder uint8 = 'O' // outbound: one live order, in reply to a Query
-	MsgQueryEnd  uint8 = 'T' // outbound: the Query reply is complete
+	MsgAccepted      uint8 = 'A' // outbound: order is live
+	MsgRejected      uint8 = 'R' // outbound: order refused
+	MsgExecuted      uint8 = 'X' // outbound: a fill
+	MsgCanceled      uint8 = 'D' // outbound: order removed
+	MsgReplaced      uint8 = 'P' // outbound: size changed in place, queue position kept
+	MsgCmdReject     uint8 = 'K' // outbound: the command itself was refused
+	MsgOpenOrder     uint8 = 'O' // outbound: one live order, in reply to a Query
+	MsgQueryEnd      uint8 = 'T' // outbound: the Query reply is complete
+	MsgMassCancelAck uint8 = 'G' // outbound: the mass cancel is complete
+	MsgCODAck        uint8 = 'V' // outbound: cancel-on-disconnect setting accepted
 )
 
 // Field widths. ClOrdIDLen bounds a client identifier; SymbolLen is 16 rather
@@ -267,6 +271,67 @@ type CmdReject struct {
 
 // CmdRejectLen is the encoded width of a CmdReject payload.
 const CmdRejectLen = 1 + 1 + ClOrdIDLen + 2
+
+// MassCancel pulls every order the account has resting. It carries nothing: the
+// account is the session's and the gateway serves one instrument.
+//
+// This is the control a market maker reaches for when its own state is wrong or it
+// needs out of the market immediately, and it is the reason a venue is quotable
+// rather than merely testable. Engine.CancelAllForUser has existed since v0.9.0 with
+// no way for a client to invoke it.
+//
+// Each removed order still produces its own Canceled on the account's stream — the
+// sweep is not a substitute for those. MassCancelAck follows them and says how many
+// there were.
+type MassCancel struct {
+	Version uint8
+}
+
+// MassCancelLen is the encoded width of a MassCancel payload.
+const MassCancelLen = 1 + 1
+
+// MassCancelAck terminates a mass cancel. Count is how many orders were removed and
+// Seq is the point in the account's stream the sweep is consistent with, so a client
+// can tell a completed sweep of zero orders from a connection that died mid-sweep —
+// the same reason QueryEnd exists.
+type MassCancelAck struct {
+	Version uint8
+	Count   uint32
+	Seq     uint64
+}
+
+// MassCancelAckLen is the encoded width of a MassCancelAck payload.
+const MassCancelAckLen = 1 + 1 + 4 + 8
+
+// CancelOnDisconnect asks the venue to pull the account's book if this session
+// drops. Enabled is idempotent, so a client may set it at any point after login and
+// re-assert it freely.
+//
+// It is deliberately a message rather than a LoginRequest field: adding a field to
+// LoginRequest would move every byte after it and invalidate a committed golden
+// vector, which is exactly what the type byte exists to avoid.
+//
+// Scope caveat, stated because it can surprise: orders are not tagged with the
+// session that entered them, so the sweep is account-wide. An account holding two
+// connections, one with this enabled, loses its whole book when that one drops —
+// including orders entered on the other.
+type CancelOnDisconnect struct {
+	Version uint8
+	Enabled bool
+}
+
+// CancelOnDisconnectLen is the encoded width of a CancelOnDisconnect payload.
+const CancelOnDisconnectLen = 1 + 1 + 1
+
+// CODAck confirms the cancel-on-disconnect setting now in force, so a client is
+// never guessing about a control that decides whether its book survives.
+type CODAck struct {
+	Version uint8
+	Enabled bool
+}
+
+// CODAckLen is the encoded width of a CODAck payload.
+const CODAckLen = 1 + 1 + 1
 
 // Query asks the venue to report the account's live orders. It carries nothing:
 // the account is the session's, and the gateway serves one instrument.

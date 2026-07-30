@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/intrepidkarthi/orderbook/internal/wire"
@@ -300,6 +301,13 @@ type session struct {
 	out     chan []byte
 	closed  chan struct{}
 	once    sync.Once
+	// cancelOnDisconnect is read by the handler after the connection drops and
+	// written by the read loop, so it is atomic rather than a plain bool.
+	cancelOnDisconnect atomic.Bool
+	// emitted is the highest stream sequence followStream has queued for this
+	// connection. Anything that claims "everything up to Seq has reached you" has to
+	// wait on this, not merely on the publisher — see waitForStream.
+	emitted atomic.Uint64
 }
 
 func (s *Server) handle(conn net.Conn) {
@@ -369,6 +377,11 @@ func (s *Server) handle(conn net.Conn) {
 		closed:  make(chan struct{}),
 	}
 	defer sess.close()
+	// The sweep runs after the read loop returns, i.e. once the connection is
+	// genuinely gone, so a client that logs out cleanly still gets it — dropping the
+	// socket and logging out are the same thing to a book that must not keep quoting
+	// on behalf of somebody who can no longer manage it.
+	defer sess.pullBookIfRequested()
 
 	go sess.writeLoop()
 	go sess.heartbeat()
@@ -437,6 +450,10 @@ func (sess *session) apply(payload []byte) {
 		sess.cancel(payload)
 	case wire.MsgReduce:
 		sess.reduce(payload)
+	case wire.MsgMassCancel:
+		sess.massCancel(payload)
+	case wire.MsgCancelOnDisconnect:
+		sess.setCancelOnDisconnect(payload)
 	case wire.MsgQuery:
 		go sess.reportOpenOrders() // reads the book and drains the pump; not on the read loop
 	default:
@@ -572,6 +589,134 @@ func (sess *session) reduce(payload []byte) {
 	}()
 }
 
+// waitForStream blocks until this connection has queued every stream message up to
+// target, so a message asserting "everything through Seq has reached you" is true
+// when it is written rather than merely true of the publisher.
+//
+// Draining the publisher is not enough on its own. That only moves events into the
+// account's stream; the connection receives them from a separate polling goroutine
+// (followStream), so a reply written directly to the outbound queue can overtake
+// stream messages it claims to come after. A client applying them in arrival order
+// would then apply the same execution twice — the exact failure the drain was
+// introduced to prevent.
+//
+// Bounded: a client that is not being served within the timeout gets the message
+// anyway rather than never getting one, since a late boundary is recoverable and a
+// missing terminator is not.
+func (sess *session) waitForStream(target uint64, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for sess.emitted.Load() < target {
+		select {
+		case <-sess.closed:
+			return
+		case <-sess.srv.quit:
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			log.Printf("obgw: %s stream lagged past %v waiting for seq %d", sess.account, timeout, target)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// massCancel pulls everything the account has resting.
+//
+// The enqueue is on the read loop so the sweep cannot overtake an order entered
+// immediately before it — the ordering argument that applies to reduce applies with
+// more force here, since a sweep that ran early would leave behind the very order
+// the client was trying to get rid of.
+//
+// The acknowledgement is written only after the publisher has been drained, so every
+// Canceled the sweep produced has already reached the client. Without that, an ack
+// saying "12 orders cancelled" could arrive before any of the twelve Canceled
+// messages, and a client applying them in order would briefly believe it had a book
+// the venue had already emptied.
+func (sess *session) massCancel(payload []byte) {
+	if _, err := wire.DecodeMassCancel(payload); err != nil {
+		sess.reject("", orderentry.ReasonMalformed)
+		return
+	}
+	done, err := sess.srv.runner.TryCancelAllAsync(sess.account)
+	if err != nil {
+		reason := orderentry.ReasonOverloaded
+		if errors.Is(err, matching.ErrShuttingDown) {
+			reason = orderentry.ReasonShuttingDown
+		}
+		sess.reject("", reason)
+		return
+	}
+	go func() {
+		var n int
+		select {
+		case n = <-done:
+		case <-sess.closed:
+			return
+		case <-sess.srv.quit:
+			return
+		}
+		sess.srv.pub.Wait()
+		seq := sess.srv.reg.Stream(sess.account).Seq()
+		sess.waitForStream(seq, 5*time.Second)
+		b, encErr := wire.EncodeMassCancelAck(nil, wire.MassCancelAck{
+			Version: wire.Version, Count: uint32(n), Seq: seq,
+		})
+		if encErr != nil {
+			log.Printf("obgw: encode mass cancel ack: %v", encErr)
+			return
+		}
+		sess.send(b)
+	}()
+}
+
+// setCancelOnDisconnect turns the account's book into something that does not
+// outlive this connection.
+//
+// Acknowledged explicitly because a client must never be guessing about a control
+// that decides whether its orders survive: silence would leave "enabled" and
+// "message ignored" indistinguishable.
+func (sess *session) setCancelOnDisconnect(payload []byte) {
+	m, err := wire.DecodeCancelOnDisconnect(payload)
+	if err != nil {
+		sess.reject("", orderentry.ReasonMalformed)
+		return
+	}
+	sess.cancelOnDisconnect.Store(m.Enabled)
+	b, encErr := wire.EncodeCODAck(nil, wire.CODAck{Version: wire.Version, Enabled: m.Enabled})
+	if encErr != nil {
+		return
+	}
+	sess.send(b)
+}
+
+// pullBookIfRequested runs the cancel-on-disconnect sweep. It is called once the
+// connection is gone, so there is nobody to acknowledge to and nothing to wait for;
+// the point is that the book does not keep quoting on behalf of a client that can no
+// longer manage it.
+//
+// The sweep is account-wide because orders are not tagged with the session that
+// entered them. An account holding a second connection loses those orders too, which
+// is documented on the wire type rather than left to be discovered.
+func (sess *session) pullBookIfRequested() {
+	if !sess.cancelOnDisconnect.Load() {
+		return
+	}
+	// Not when the VENUE is the one going away. A graceful shutdown drops every
+	// connection at once, and firing the sweep here would journal a cancel for every
+	// order held by every cancel-on-disconnect session — permanently destroying books
+	// that are supposed to come back after the restart. The control means "if I lose
+	// my session", not "if the venue closes for the day".
+	select {
+	case <-sess.srv.quit:
+		return
+	default:
+	}
+	if _, err := sess.srv.runner.TryCancelAllAsync(sess.account); err != nil {
+		log.Printf("obgw: cancel-on-disconnect for %s: %v", sess.account, err)
+	}
+}
+
 // reportOpenOrders answers a Query with the venue's authoritative view of the
 // account's live orders.
 //
@@ -592,6 +737,12 @@ func (sess *session) reportOpenOrders() {
 	sess.srv.pub.Wait()
 
 	stream := sess.srv.reg.Stream(sess.account)
+	// Draining the publisher put those events in the stream; this waits until they
+	// have actually been queued for THIS connection. Without it the report could
+	// overtake them and QueryEnd.Seq would assert a boundary the client had not
+	// reached.
+	reportSeq := stream.Seq()
+	sess.waitForStream(reportSeq, 5*time.Second)
 	for _, o := range orders {
 		side := wire.SideBuy
 		if o.Side == types.SideSell {
@@ -612,7 +763,7 @@ func (sess *session) reportOpenOrders() {
 	// client cannot tell "you have nothing open" from "the report was cut short",
 	// which are opposite conclusions.
 	b, encErr := wire.EncodeQueryEnd(nil, wire.QueryEnd{
-		Version: wire.Version, Count: uint32(len(orders)), Seq: stream.Seq(),
+		Version: wire.Version, Count: uint32(len(orders)), Seq: reportSeq,
 	})
 	if encErr != nil {
 		return
@@ -691,9 +842,11 @@ func (sess *session) writeLoop() {
 // variable. It is called out here rather than left for a reader to discover.
 func (sess *session) followStream(stream *orderentry.Stream, from uint64, backlog []orderentry.Msg) {
 	cursor := from
+	sess.emitted.Store(from)
 	for _, m := range backlog {
 		sess.emit(m)
 		cursor = m.Seq
+		sess.emitted.Store(m.Seq)
 	}
 	tick := time.NewTicker(2 * time.Millisecond)
 	defer tick.Stop()
@@ -712,6 +865,7 @@ func (sess *session) followStream(stream *orderentry.Stream, from uint64, backlo
 			for _, m := range msgs {
 				sess.emit(m)
 				cursor = m.Seq
+				sess.emitted.Store(m.Seq)
 			}
 		}
 	}

@@ -346,3 +346,80 @@ func DecodeQueryEnd(src []byte) (QueryEnd, error) {
 		Seq:     binary.BigEndian.Uint64(src[6:]),
 	}, nil
 }
+
+// --- MassCancel / MassCancelAck / CancelOnDisconnect / CODAck ---
+
+// EncodeMassCancel appends a MassCancel payload to dst.
+func EncodeMassCancel(dst []byte, m MassCancel) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, MassCancelLen)...)
+	header(dst[base:], MsgMassCancel, m.Version)
+	return dst, nil
+}
+
+// DecodeMassCancel reads a MassCancel payload from src.
+func DecodeMassCancel(src []byte) (MassCancel, error) {
+	if err := checkHeader(src, MassCancelLen, MsgMassCancel); err != nil {
+		return MassCancel{}, err
+	}
+	return MassCancel{Version: src[1]}, nil
+}
+
+// EncodeMassCancelAck appends a MassCancelAck payload to dst.
+func EncodeMassCancelAck(dst []byte, m MassCancelAck) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, MassCancelAckLen)...)
+	b := dst[base:]
+	off := header(b, MsgMassCancelAck, m.Version)
+	binary.BigEndian.PutUint32(b[off:], m.Count)
+	binary.BigEndian.PutUint64(b[off+4:], m.Seq)
+	return dst, nil
+}
+
+// DecodeMassCancelAck reads a MassCancelAck payload from src.
+func DecodeMassCancelAck(src []byte) (MassCancelAck, error) {
+	if err := checkHeader(src, MassCancelAckLen, MsgMassCancelAck); err != nil {
+		return MassCancelAck{}, err
+	}
+	return MassCancelAck{
+		Version: src[1],
+		Count:   binary.BigEndian.Uint32(src[2:]),
+		Seq:     binary.BigEndian.Uint64(src[6:]),
+	}, nil
+}
+
+// EncodeCancelOnDisconnect appends a CancelOnDisconnect payload to dst.
+func EncodeCancelOnDisconnect(dst []byte, m CancelOnDisconnect) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, CancelOnDisconnectLen)...)
+	b := dst[base:]
+	off := header(b, MsgCancelOnDisconnect, m.Version)
+	b[off] = putBool(m.Enabled)
+	return dst, nil
+}
+
+// DecodeCancelOnDisconnect reads a CancelOnDisconnect payload from src.
+func DecodeCancelOnDisconnect(src []byte) (CancelOnDisconnect, error) {
+	if err := checkHeader(src, CancelOnDisconnectLen, MsgCancelOnDisconnect); err != nil {
+		return CancelOnDisconnect{}, err
+	}
+	return CancelOnDisconnect{Version: src[1], Enabled: src[2] != 0}, nil
+}
+
+// EncodeCODAck appends a CODAck payload to dst.
+func EncodeCODAck(dst []byte, m CODAck) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, CODAckLen)...)
+	b := dst[base:]
+	off := header(b, MsgCODAck, m.Version)
+	b[off] = putBool(m.Enabled)
+	return dst, nil
+}
+
+// DecodeCODAck reads a CODAck payload from src.
+func DecodeCODAck(src []byte) (CODAck, error) {
+	if err := checkHeader(src, CODAckLen, MsgCODAck); err != nil {
+		return CODAck{}, err
+	}
+	return CODAck{Version: src[1], Enabled: src[2] != 0}, nil
+}

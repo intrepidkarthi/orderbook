@@ -520,6 +520,44 @@ func (r *Runner) TryEnqueueCancel(orderID int64, userID string) error {
 	return r.tryEnqueue(command{kind: cmdCancel, cancelID: orderID, userID: userID})
 }
 
+// TryCancelAllAsync enqueues an account-wide cancel without waiting for it to be
+// applied, and returns a channel carrying how many orders were removed.
+//
+// Same shape and same reasons as TryReduceAsync: the enqueue happens on the
+// caller's goroutine so the sweep cannot overtake an order submitted just before
+// it, while the wait moves off that goroutine so the matcher cannot stall a
+// connection's ingress. Only the count crosses the channel — the removed orders are
+// engine-owned, and a client learns which ones they were from the Canceled events
+// on its own stream.
+func (r *Runner) TryCancelAllAsync(userID string) (<-chan int, error) {
+	select {
+	case <-r.quit:
+		return nil, ErrShuttingDown
+	default:
+	}
+	reply := make(chan cmdReply, 1)
+	select {
+	case r.queue <- command{kind: cmdCancelAll, userID: userID, reply: reply}:
+	default:
+		return nil, ErrQueueFull
+	}
+	out := make(chan int, 1)
+	go func() {
+		select {
+		case rep := <-reply:
+			out <- len(rep.orders)
+		case <-r.done:
+			select {
+			case rep := <-reply:
+				out <- len(rep.orders)
+			default:
+				out <- 0
+			}
+		}
+	}()
+	return out, nil
+}
+
 // TryReduceAsync enqueues a reduce without waiting for it to be applied, and
 // returns a channel carrying only its error — nil on success.
 //

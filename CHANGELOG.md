@@ -36,7 +36,46 @@ versions may include breaking changes).
   beating this one at the same operation was the signal; both did it with a
   purpose-built index rather than the language's map.
 
+### Added
+
+- **Mass cancel on the wire.** `MassCancel` / `MassCancelAck` (`F` / `G`).
+  `Engine.CancelAllForUser` has existed since v0.9.0 with no way for a client to
+  invoke it, which is the difference between a venue you can test against and one you
+  would quote on. Each removed order still produces its own `Canceled`; the ack
+  follows them and carries the count, so a completed sweep of zero is distinguishable
+  from a connection that died mid-sweep.
+
+- **Cancel-on-disconnect.** `CancelOnDisconnect` / `CODAck` (`B` / `V`), a message
+  rather than a `LoginRequest` field because adding a field there would move every
+  byte after it and invalidate a committed vector. Acknowledged explicitly: a client
+  must never be guessing about a control that decides whether its book survives.
+
+  A **venue** shutdown deliberately does not fire it. A graceful shutdown drops every
+  connection at once, and sweeping there would journal a cancel for every order of
+  every enabled session, permanently destroying books that are meant to come back
+  after the restart. There is a test for exactly that.
+
+- `matching.Runner.TryCancelAllAsync`, the ingress-shaped path for the sweep: the
+  enqueue happens on the caller's goroutine so it cannot overtake an order submitted
+  just before it, while the wait moves off that goroutine.
+
+Four more message types, still **no version bump** — every pre-existing golden
+vector is byte-identical. `MassCancel` shares `Query`'s exact layout and
+`MassCancelAck` shares `QueryEnd`'s, separated by nothing but the type byte, which is
+the third time that has paid for itself.
+
 ### Fixed
+
+- **`QueryEnd.Seq` asserted a boundary the client had not reached.** Draining the
+  publisher only moves events into the account's *stream*; the connection receives
+  them from a separate polling goroutine, so a report written straight to the
+  outbound queue could overtake stream messages it claimed to come after. A client
+  applying them in arrival order would apply the same execution twice — the exact
+  failure the drain was introduced to prevent.
+
+  Found while building the mass-cancel ack, whose test asserted the ordering
+  directly and failed. Both paths now wait until the connection has actually queued
+  everything through the reported sequence.
 
 - **The write-ahead log had no checksums, so silent corruption was replayed as
   truth.** `ReadAll` stopped at a record that failed to *parse*, which meant a

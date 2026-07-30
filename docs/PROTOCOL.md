@@ -191,6 +191,38 @@ size a client was told is the size the venue holds after a restart. This was not
 true when `Engine.Reduce` was first added — the log recorded submits and cancels
 only, so recovery silently restored the pre-reduce size.
 
+**MassCancel** — MsgType `F` (1) + Version (1). Cancels every order the account has
+resting, and is answered by a **MassCancelAck** `G` (Count, Seq).
+
+This is the control a market maker reaches for when its own state is wrong or it
+needs out of the market now, and it is the difference between a venue you can test
+against and one you would quote on. Each removed order still produces its own
+`Canceled` on the stream; the ack follows them all and says how many there were, so
+a completed sweep of zero orders is distinguishable from a connection that died
+mid-sweep.
+
+The ack is written only after every `Canceled` it accounts for has been queued for
+your connection. An ack that overtook them would have you briefly believing you hold
+a book the venue has already emptied.
+
+**CancelOnDisconnect** — MsgType `B` (1) + Version (1) + Enabled (1), answered by
+**CODAck** `V`. Asks the venue to pull your book if this session drops. Idempotent,
+so re-assert it freely.
+
+It is a message rather than a `LoginRequest` field because adding a field there would
+move every byte after it and invalidate a committed golden vector — which is what the
+type byte exists to avoid.
+
+Two caveats worth knowing before you enable it:
+
+- **The sweep is account-wide.** Orders are not tagged with the session that entered
+  them, so an account holding two connections — one with this enabled — loses its
+  whole book when that one drops, including orders entered on the other.
+- **A venue shutdown does not trigger it.** A graceful shutdown drops every
+  connection at once, and firing the sweep there would permanently destroy books that
+  are meant to come back after the restart. The control means "if I lose my session",
+  not "if the venue closes".
+
 **Query** — MsgType `Q` (1) + Version (1). Carries nothing: the account is the
 session's and the gateway serves one instrument.
 
@@ -206,6 +238,8 @@ session's and the gateway serves one instrument.
 | **CmdReject** `K` | ClOrdID, Reason | the venue would not look at the command |
 | **OpenOrder** `O` | ClOrdID, Price, LeavesQty, Side | one live order, in reply to a Query |
 | **QueryEnd** `T` | Count, Seq | the Query reply is complete |
+| **MassCancelAck** `G` | Count, Seq | the mass cancel is complete |
+| **CODAck** `V` | Enabled | the cancel-on-disconnect setting in force |
 
 Each is preceded by its type byte and the version, as above.
 

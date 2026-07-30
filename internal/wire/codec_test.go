@@ -120,19 +120,23 @@ func TestOverlongFieldIsAnError(t *testing.T) {
 // whatever a client sent.
 func TestShortBufferIsAnError(t *testing.T) {
 	cases := map[string]func([]byte) error{
-		"enter":     func(b []byte) error { _, err := DecodeEnter(b); return err },
-		"cancel":    func(b []byte) error { _, err := DecodeCancel(b); return err },
-		"accepted":  func(b []byte) error { _, err := DecodeAccepted(b); return err },
-		"executed":  func(b []byte) error { _, err := DecodeExecuted(b); return err },
-		"rejected":  func(b []byte) error { _, err := DecodeRejected(b); return err },
-		"canceled":  func(b []byte) error { _, err := DecodeCanceled(b); return err },
-		"replaced":  func(b []byte) error { _, err := DecodeReplaced(b); return err },
-		"reduce":    func(b []byte) error { _, err := DecodeReduce(b); return err },
-		"cmdreject": func(b []byte) error { _, err := DecodeCmdReject(b); return err },
-		"login":     func(b []byte) error { _, err := DecodeLoginRequest(b); return err },
-		"query":     func(b []byte) error { _, err := DecodeQuery(b); return err },
-		"openorder": func(b []byte) error { _, err := DecodeOpenOrder(b); return err },
-		"queryend":  func(b []byte) error { _, err := DecodeQueryEnd(b); return err },
+		"enter":         func(b []byte) error { _, err := DecodeEnter(b); return err },
+		"cancel":        func(b []byte) error { _, err := DecodeCancel(b); return err },
+		"accepted":      func(b []byte) error { _, err := DecodeAccepted(b); return err },
+		"executed":      func(b []byte) error { _, err := DecodeExecuted(b); return err },
+		"rejected":      func(b []byte) error { _, err := DecodeRejected(b); return err },
+		"canceled":      func(b []byte) error { _, err := DecodeCanceled(b); return err },
+		"replaced":      func(b []byte) error { _, err := DecodeReplaced(b); return err },
+		"reduce":        func(b []byte) error { _, err := DecodeReduce(b); return err },
+		"masscancel":    func(b []byte) error { _, err := DecodeMassCancel(b); return err },
+		"masscancelack": func(b []byte) error { _, err := DecodeMassCancelAck(b); return err },
+		"cod":           func(b []byte) error { _, err := DecodeCancelOnDisconnect(b); return err },
+		"codack":        func(b []byte) error { _, err := DecodeCODAck(b); return err },
+		"cmdreject":     func(b []byte) error { _, err := DecodeCmdReject(b); return err },
+		"login":         func(b []byte) error { _, err := DecodeLoginRequest(b); return err },
+		"query":         func(b []byte) error { _, err := DecodeQuery(b); return err },
+		"openorder":     func(b []byte) error { _, err := DecodeOpenOrder(b); return err },
+		"queryend":      func(b []byte) error { _, err := DecodeQueryEnd(b); return err },
 	}
 	// 0 and 1 bytes are shorter than every message, including the 2-byte Query.
 	// Larger sizes are not universally "short" — a 5-byte buffer is long enough
@@ -399,10 +403,14 @@ func goldenCases(t *testing.T) map[string][]byte {
 		"login_request": must(EncodeLoginRequest(nil, LoginRequest{
 			Username: "alice", Password: "s3cret", Session: "INC0000001", Sequence: 42,
 		})),
-		"login_accepted": must(EncodeLoginAccepted(nil, LoginAccepted{Session: "INC0000001", Sequence: 42})),
-		"query":          must(EncodeQuery(nil, Query{Version: Version})),
-		"open_order":     must(EncodeOpenOrder(nil, OpenOrder{Version: Version, ClOrdID: "cl-1", Price: 30000, LeavesQty: 150, Side: SideBuy})),
-		"query_end":      must(EncodeQueryEnd(nil, QueryEnd{Version: Version, Count: 2, Seq: 77})),
+		"login_accepted":  must(EncodeLoginAccepted(nil, LoginAccepted{Session: "INC0000001", Sequence: 42})),
+		"query":           must(EncodeQuery(nil, Query{Version: Version})),
+		"mass_cancel":     must(EncodeMassCancel(nil, MassCancel{Version: Version})),
+		"mass_cancel_ack": must(EncodeMassCancelAck(nil, MassCancelAck{Version: Version, Count: 4, Seq: 88})),
+		"cod_on":          must(EncodeCancelOnDisconnect(nil, CancelOnDisconnect{Version: Version, Enabled: true})),
+		"cod_ack_on":      must(EncodeCODAck(nil, CODAck{Version: Version, Enabled: true})),
+		"open_order":      must(EncodeOpenOrder(nil, OpenOrder{Version: Version, ClOrdID: "cl-1", Price: 30000, LeavesQty: 150, Side: SideBuy})),
+		"query_end":       must(EncodeQueryEnd(nil, QueryEnd{Version: Version, Count: 2, Seq: 77})),
 	}
 }
 
@@ -434,6 +442,62 @@ func TestGoldenVectors(t *testing.T) {
 		}
 		if got := strings.TrimSpace(string(b)); got != want {
 			t.Errorf("%s: wire layout changed\n  now:    %s\n  golden: %s\nA field moved. Bump Version and add vectors; do not edit these.", name, want, got)
+		}
+	}
+}
+
+// TestMassCancelAndCODRoundTrips covers the two controls added for market makers.
+// MassCancelAck shares QueryEnd's exact layout and MassCancel shares Query's, so
+// these are another pair separated by nothing but the type byte.
+func TestMassCancelAndCODRoundTrips(t *testing.T) {
+	if MassCancelLen != QueryLen || MassCancelAckLen != QueryEndLen {
+		t.Errorf("widths drifted: MassCancel %d/Query %d, Ack %d/QueryEnd %d",
+			MassCancelLen, QueryLen, MassCancelAckLen, QueryEndLen)
+	}
+	mc := MassCancel{Version: Version}
+	b, err := EncodeMassCancel(nil, mc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeMassCancel(b); err != nil || got != mc {
+		t.Errorf("mass cancel: got %+v err %v", got, err)
+	}
+	if _, err := DecodeQuery(b); !errors.Is(err, ErrBadType) {
+		t.Errorf("a MassCancel decoded as a Query: err = %v, want ErrBadType", err)
+	}
+
+	ack := MassCancelAck{Version: Version, Count: 12, Seq: 4096}
+	ab, err := EncodeMassCancelAck(nil, ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeMassCancelAck(ab); err != nil || got != ack {
+		t.Errorf("ack: got %+v err %v", got, err)
+	}
+	if _, err := DecodeQueryEnd(ab); !errors.Is(err, ErrBadType) {
+		t.Errorf("a MassCancelAck decoded as a QueryEnd: err = %v, want ErrBadType", err)
+	}
+
+	for _, enabled := range []bool{true, false} {
+		cod := CancelOnDisconnect{Version: Version, Enabled: enabled}
+		cb, err := EncodeCancelOnDisconnect(nil, cod)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := DecodeCancelOnDisconnect(cb); err != nil || got != cod {
+			t.Errorf("cod %v: got %+v err %v", enabled, got, err)
+		}
+		ca := CODAck{Version: Version, Enabled: enabled}
+		cab, err := EncodeCODAck(nil, ca)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := DecodeCODAck(cab); err != nil || got != ca {
+			t.Errorf("cod ack %v: got %+v err %v", enabled, got, err)
+		}
+		// Identical widths, opposite directions — the type byte is the only separator.
+		if _, err := DecodeCODAck(cb); !errors.Is(err, ErrBadType) {
+			t.Errorf("a CancelOnDisconnect decoded as a CODAck: err = %v", err)
 		}
 	}
 }
