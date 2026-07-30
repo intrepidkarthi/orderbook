@@ -177,6 +177,8 @@ func (r *Runner) dispatch(cmd command) {
 		rep.order, rep.err = r.engine.Reduce(cmd.cancelID, cmd.reduceQty, cmd.userID)
 	case cmdCancelAll:
 		rep.orders = r.engine.CancelAllForUser(cmd.userID)
+	case cmdOpenOrders:
+		rep.orders = r.engine.OpenOrdersFor(cmd.userID)
 	case cmdCheckpoint:
 		snap := r.engine.TakeSnapshot()
 		snap.WALSeq = r.lastApplied
@@ -429,6 +431,17 @@ func (r *Runner) Reduce(orderID, newQty int64, userID string) (*types.Order, err
 		return nil, ErrShuttingDown
 	}
 	return rep.order, rep.err
+}
+
+// OpenOrdersFor returns the account's resting orders, read on the matching
+// goroutine so the answer is a coherent instant rather than a smear across
+// concurrent updates.
+func (r *Runner) OpenOrdersFor(userID string) ([]*types.Order, error) {
+	rep, ok := r.send(command{kind: cmdOpenOrders, userID: userID})
+	if !ok {
+		return nil, ErrShuttingDown
+	}
+	return rep.orders, nil
 }
 
 // CancelAllForUser pulls every resting order, pending stop and trailing stop

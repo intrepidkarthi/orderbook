@@ -1570,6 +1570,27 @@ func (e *Engine) Reduce(orderID int64, newQty int64, userID string) (*types.Orde
 	return order, nil
 }
 
+// OpenOrdersFor returns deep copies of every resting order belonging to userID,
+// in book order. Copies, because the originals are engine-owned and the matching
+// goroutine keeps mutating them.
+//
+// This is the authoritative answer to "what do I have live?" — taken from the
+// book itself rather than from any consumer's shadow view, which is the point: a
+// client asks precisely because it no longer trusts its own picture.
+//
+// Pending stops and trailing stops are excluded. They are not resting orders and
+// a client reconciling its book should not see them as such; report them
+// separately if you need to.
+func (e *Engine) OpenOrdersFor(userID string) []*types.Order {
+	var out []*types.Order
+	for _, o := range e.book.Orders() {
+		if o.UserID == userID && o.IsActive() {
+			out = append(out, copyOrder(o))
+		}
+	}
+	return out
+}
+
 // CancelAllForUser cancels every resting order, pending stop and trailing stop
 // belonging to userID, returning what it removed. This is the operator kill
 // switch, so it deliberately ignores MinRestingTime: an anti-spoofing floor that

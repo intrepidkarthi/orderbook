@@ -7,6 +7,32 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- **In-band reconciliation.** A `Query` message returns one `OpenOrder` per live
+  order followed by a `QueryEnd`. Resume can legitimately fail — an evicted
+  cursor or a restarted venue — and a client refused at login previously had no
+  in-protocol way back to a correct picture; "reconcile out of band" is telling
+  someone to build a second integration.
+
+  The report is read from the book on the matching goroutine, and the publisher
+  is drained before it is written, so every event up to that instant has already
+  reached the client. `QueryEnd.Seq` names that point: everything after it is a
+  change to apply on top. Reading the book without draining first would let an
+  execution from before the read arrive after the report, and the client would
+  apply it twice.
+
+  `QueryEnd.Count` exists so a truncated report cannot look like a complete one —
+  otherwise "you have nothing open" and "the connection died mid-report" are
+  indistinguishable.
+
+- `Engine.OpenOrdersFor` / `Runner.OpenOrdersFor`, returning deep copies read on
+  the matching goroutine.
+
+Adding three message types required **no version bump**, which is what the type
+byte introduced in v0.11.0 bought: every existing golden vector is byte-identical
+and a test pins the eight existing payload widths against hand-derived values.
+
 ## [0.11.0] - 2026-07-29
 
 A hostile re-read of v0.10.0, and the repairs. Everything below was found by

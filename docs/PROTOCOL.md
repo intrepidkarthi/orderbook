@@ -152,6 +152,9 @@ of your own orders.
 
 **Cancel** — MsgType `C` (1) + Version (1) + ClOrdID (20).
 
+**Query** — MsgType `Q` (1) + Version (1). Carries nothing: the account is the
+session's and the gateway serves one instrument.
+
 ### Outbound
 
 | Message | Payload | Carries |
@@ -162,6 +165,8 @@ of your own orders.
 | **Canceled** `D` | ClOrdID, Reason | the order left the book |
 | **Replaced** `P` | ClOrdID, LeavesQty | size changed in place, queue kept |
 | **CmdReject** `K` | ClOrdID, Reason | the venue would not look at the command |
+| **OpenOrder** `O` | ClOrdID, Price, LeavesQty, Side | one live order, in reply to a Query |
+| **QueryEnd** `T` | Count, Seq | the Query reply is complete |
 
 Each is preceded by its type byte and the version, as above.
 
@@ -198,6 +203,31 @@ silently became a protocol change. Anything unrecognised maps to `Other`, which 
 client must already handle.
 
 ---
+
+## Reconciliation, when resume is not available
+
+Resume can legitimately fail: an evicted cursor (`Q`) or a restarted venue (`S`).
+Send a **Query** and the server replies with one **OpenOrder** per live order,
+then a **QueryEnd**.
+
+The report is the venue's authoritative view, read from the book on the matching
+goroutine — not from any consumer's shadow copy, which is the point, since you are
+asking precisely because you no longer trust your own picture.
+
+Two details that make it usable rather than merely present:
+
+- **The terminator is not optional.** `QueryEnd.Count` lets you verify you
+  received the whole report. Without it you cannot distinguish "you have nothing
+  open" from "the connection died mid-report" — opposite conclusions.
+- **`QueryEnd.Seq` names the point in your own stream the report is consistent
+  with.** The server reads the book, drains its publisher, and only then writes
+  the report, so every event up to that instant has already reached you.
+  Everything after `Seq` is a change to apply on top. Reading the book without
+  draining first would let an execution from before the read arrive after the
+  report, and you would apply it twice.
+
+Pending stops and trailing stops are not included. They are not resting orders
+and a client reconciling its book should not treat them as such.
 
 ## Session liveness
 

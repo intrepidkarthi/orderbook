@@ -214,3 +214,139 @@ func TestReasonCodesAgreeAcrossPackages(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenOrderReport is the in-band recovery path. Resume can legitimately
+// fail — an evicted cursor, or a restarted venue — and without this a client
+// refused at login has no way back to a correct picture except building a second
+// integration.
+func TestOpenOrderReport(t *testing.T) {
+	srv := testServer(t)
+	c := dial(t, srv)
+	c.mustLogin("alice", "pw1")
+
+	// Three orders; one is then cancelled, so the report must show two.
+	for _, id := range []string{"a1", "a2", "a3"} {
+		c.enter(id, wire.SideBuy, wire.TypeLimit, wire.TIFGoodTillCancel, 100, 5)
+		if _, ok := c.await(t, wire.AcceptedLen, 3*time.Second); !ok {
+			t.Fatalf("%s not accepted", id)
+		}
+	}
+	c.cancel("a2")
+	if _, ok := c.await(t, wire.CanceledLen, 3*time.Second); !ok {
+		t.Fatal("cancel not confirmed")
+	}
+
+	q, err := wire.EncodeQuery(nil, wire.Query{Version: wire.Version})
+	if err != nil {
+		t.Fatalf("EncodeQuery: %v", err)
+	}
+	if err := wire.WritePacket(c.conn, wire.PacketUnsequenced, q); err != nil {
+		t.Fatalf("send query: %v", err)
+	}
+
+	seen := map[string]int64{}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("query never terminated")
+		}
+		_ = c.conn.SetReadDeadline(deadline)
+		pkt, err := wire.ReadPacket(c.conn, c.buf)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if pkt.Type != wire.PacketSequencedData || len(pkt.Payload) < 2 {
+			continue
+		}
+		switch pkt.Payload[0] {
+		case wire.MsgOpenOrder:
+			oo, err := wire.DecodeOpenOrder(pkt.Payload)
+			if err != nil {
+				t.Fatalf("DecodeOpenOrder: %v", err)
+			}
+			seen[oo.ClOrdID] = oo.LeavesQty
+		case wire.MsgQueryEnd:
+			end, err := wire.DecodeQueryEnd(pkt.Payload)
+			if err != nil {
+				t.Fatalf("DecodeQueryEnd: %v", err)
+			}
+			if int(end.Count) != len(seen) {
+				t.Errorf("terminator says %d orders, %d arrived — a truncated report would look complete", end.Count, len(seen))
+			}
+			if end.Seq == 0 {
+				t.Error("terminator carries no stream position, so the client cannot tell what to apply on top")
+			}
+			if len(seen) != 2 {
+				t.Errorf("report lists %v, want a1 and a3 (a2 was cancelled)", seen)
+			}
+			if _, gone := seen["a2"]; gone {
+				t.Error("a cancelled order appeared in the open-order report")
+			}
+			if seen["a1"] != 5 {
+				t.Errorf("a1 leaves %d, want 5", seen["a1"])
+			}
+			return
+		}
+	}
+}
+
+// TestOpenOrderReportIsEmptyNotSilent — "you have nothing open" must be an
+// answer, not an absence of one.
+func TestOpenOrderReportWhenNothingOpen(t *testing.T) {
+	srv := testServer(t)
+	c := dial(t, srv)
+	c.mustLogin("alice", "pw1")
+
+	q, err := wire.EncodeQuery(nil, wire.Query{Version: wire.Version})
+	if err != nil {
+		t.Fatalf("EncodeQuery: %v", err)
+	}
+	if err := wire.WritePacket(c.conn, wire.PacketUnsequenced, q); err != nil {
+		t.Fatalf("send query: %v", err)
+	}
+	raw, ok := c.await(t, wire.QueryEndLen, 3*time.Second)
+	if !ok {
+		t.Fatal("no terminator for an empty report")
+	}
+	end, err := wire.DecodeQueryEnd(raw)
+	if err != nil {
+		t.Fatalf("DecodeQueryEnd: %v", err)
+	}
+	if end.Count != 0 {
+		t.Errorf("count = %d, want 0", end.Count)
+	}
+}
+
+// TestOpenOrderReportIsPerAccount — the report is the session's account, never
+// the venue's book.
+func TestOpenOrderReportIsPerAccount(t *testing.T) {
+	srv := testServer(t)
+
+	bob := dial(t, srv)
+	bob.mustLogin("bob", "pw2")
+	bob.enter("b1", wire.SideBuy, wire.TypeLimit, wire.TIFGoodTillCancel, 90, 5)
+	if _, ok := bob.await(t, wire.AcceptedLen, 3*time.Second); !ok {
+		t.Fatal("bob's order not accepted")
+	}
+
+	alice := dial(t, srv)
+	alice.mustLogin("alice", "pw1")
+	q, err := wire.EncodeQuery(nil, wire.Query{Version: wire.Version})
+	if err != nil {
+		t.Fatalf("EncodeQuery: %v", err)
+	}
+	if err := wire.WritePacket(alice.conn, wire.PacketUnsequenced, q); err != nil {
+		t.Fatalf("send query: %v", err)
+	}
+	raw, ok := alice.await(t, wire.QueryEndLen, 3*time.Second)
+	if !ok {
+		t.Fatal("no terminator")
+	}
+	end, err := wire.DecodeQueryEnd(raw)
+	if err != nil {
+		t.Fatalf("DecodeQueryEnd: %v", err)
+	}
+	if end.Count != 0 {
+		t.Errorf("alice sees %d orders; bob's book leaked into her report", end.Count)
+	}
+}

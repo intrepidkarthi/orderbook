@@ -129,13 +129,41 @@ func TestShortBufferIsAnError(t *testing.T) {
 		"replaced":  func(b []byte) error { _, err := DecodeReplaced(b); return err },
 		"cmdreject": func(b []byte) error { _, err := DecodeCmdReject(b); return err },
 		"login":     func(b []byte) error { _, err := DecodeLoginRequest(b); return err },
+		"query":     func(b []byte) error { _, err := DecodeQuery(b); return err },
+		"openorder": func(b []byte) error { _, err := DecodeOpenOrder(b); return err },
+		"queryend":  func(b []byte) error { _, err := DecodeQueryEnd(b); return err },
 	}
+	// 0 and 1 bytes are shorter than every message, including the 2-byte Query.
+	// Larger sizes are not universally "short" — a 5-byte buffer is long enough
+	// for a Query and fails the type check instead, which is the header doing its
+	// job rather than a bounds failure.
 	for name, dec := range cases {
-		for _, n := range []int{0, 1, 5} {
+		for _, n := range []int{0, 1} {
 			if err := dec(make([]byte, n)); !errors.Is(err, ErrShort) {
 				t.Errorf("%s with %d bytes: err = %v, want ErrShort", name, n, err)
 			}
 		}
+	}
+}
+
+// TestWrongMessageTypeIsRefused — a payload long enough but carrying another
+// message's type must not be decoded as this one. Before the type byte existed,
+// two messages of equal length were indistinguishable.
+func TestWrongMessageTypeIsRefused(t *testing.T) {
+	// Rejected, Canceled and CmdReject share a layout exactly; only the type
+	// separates them, which makes them the sharpest test of it.
+	rej, err := EncodeRejected(nil, Rejected{Version: Version, ClOrdID: "r-1", Reason: ReasonPriceBand})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeCanceled(rej); !errors.Is(err, ErrBadType) {
+		t.Errorf("a Rejected decoded as Canceled: err = %v, want ErrBadType", err)
+	}
+	if _, err := DecodeCmdReject(rej); !errors.Is(err, ErrBadType) {
+		t.Errorf("a Rejected decoded as CmdReject: err = %v, want ErrBadType", err)
+	}
+	if _, err := DecodeRejected(rej); err != nil {
+		t.Errorf("a Rejected failed to decode as itself: %v", err)
 	}
 }
 
@@ -219,6 +247,62 @@ func TestLoginRoundTrip(t *testing.T) {
 	}
 }
 
+// TestQueryRoundTrips covers the reconciliation messages.
+func TestQueryRoundTrips(t *testing.T) {
+	q := Query{Version: Version}
+	qb, err := EncodeQuery(nil, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeQuery(qb); err != nil || got != q {
+		t.Errorf("query: got %+v err %v", got, err)
+	}
+
+	oo := OpenOrder{Version: Version, ClOrdID: "o-1", Price: 100, LeavesQty: 7, Side: SideSell}
+	ob, err := EncodeOpenOrder(nil, oo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeOpenOrder(ob); err != nil || got != oo {
+		t.Errorf("open order: got %+v err %v", got, err)
+	}
+
+	qe := QueryEnd{Version: Version, Count: 3, Seq: 99}
+	eb, err := EncodeQueryEnd(nil, qe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeQueryEnd(eb); err != nil || got != qe {
+		t.Errorf("query end: got %+v err %v", got, err)
+	}
+}
+
+// TestNewMessagesDidNotDisturbExistingLayouts is the reason the type byte was
+// worth a version bump: adding a message must be additive. If this fails, the new
+// types moved something a deployed client already parses.
+func TestNewMessagesDidNotDisturbExistingLayouts(t *testing.T) {
+	if Version != 2 {
+		t.Errorf("Version = %d; adding message types must not require a bump", Version)
+	}
+	widths := map[string]int{
+		"Enter": EnterLen, "Cancel": CancelLen, "Accepted": AcceptedLen,
+		"Rejected": RejectedLen, "Executed": ExecutedLen, "Canceled": CanceledLen,
+		"Replaced": ReplacedLen, "CmdReject": CmdRejectLen,
+	}
+	// Derived by hand from the field lists in wire.go, not copied from the
+	// constants — a test that reads the value it is checking proves nothing.
+	want := map[string]int{
+		"Enter": 58, "Cancel": 22, "Accepted": 39,
+		"Rejected": 24, "Executed": 47, "Canceled": 24,
+		"Replaced": 30, "CmdReject": 24,
+	}
+	for name, got := range widths {
+		if got != want[name] {
+			t.Errorf("%s is %d bytes, was %d — an existing layout moved", name, got, want[name])
+		}
+	}
+}
+
 // --- the freeze ---
 
 // goldenCases are byte-exact vectors. Once committed these must never change:
@@ -260,6 +344,9 @@ func goldenCases(t *testing.T) map[string][]byte {
 			Username: "alice", Password: "s3cret", Session: "INC0000001", Sequence: 42,
 		})),
 		"login_accepted": must(EncodeLoginAccepted(nil, LoginAccepted{Session: "INC0000001", Sequence: 42})),
+		"query":          must(EncodeQuery(nil, Query{Version: Version})),
+		"open_order":     must(EncodeOpenOrder(nil, OpenOrder{Version: Version, ClOrdID: "cl-1", Price: 30000, LeavesQty: 150, Side: SideBuy})),
+		"query_end":      must(EncodeQueryEnd(nil, QueryEnd{Version: Version, Count: 2, Seq: 77})),
 	}
 }
 

@@ -247,3 +247,75 @@ func DecodeReplaced(src []byte) (Replaced, error) {
 		LeavesQty: int64(binary.BigEndian.Uint64(src[2+ClOrdIDLen:])),
 	}, nil
 }
+
+// --- Query / OpenOrder / QueryEnd ---
+
+// EncodeQuery appends a Query payload to dst.
+func EncodeQuery(dst []byte, m Query) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, QueryLen)...)
+	header(dst[base:], MsgQuery, m.Version)
+	return dst, nil
+}
+
+// DecodeQuery reads a Query payload from src.
+func DecodeQuery(src []byte) (Query, error) {
+	if err := checkHeader(src, QueryLen, MsgQuery); err != nil {
+		return Query{}, err
+	}
+	return Query{Version: src[1]}, nil
+}
+
+// EncodeOpenOrder appends an OpenOrder payload to dst.
+func EncodeOpenOrder(dst []byte, m OpenOrder) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, OpenOrderLen)...)
+	b := dst[base:]
+	off := header(b, MsgOpenOrder, m.Version)
+	if err := putFixed(b[off:off+ClOrdIDLen], m.ClOrdID); err != nil {
+		return nil, err
+	}
+	off += ClOrdIDLen
+	binary.BigEndian.PutUint64(b[off:], uint64(m.Price))
+	binary.BigEndian.PutUint64(b[off+8:], uint64(m.LeavesQty))
+	b[off+16] = m.Side
+	return dst, nil
+}
+
+// DecodeOpenOrder reads an OpenOrder payload from src.
+func DecodeOpenOrder(src []byte) (OpenOrder, error) {
+	if err := checkHeader(src, OpenOrderLen, MsgOpenOrder); err != nil {
+		return OpenOrder{}, err
+	}
+	off := 2 + ClOrdIDLen
+	return OpenOrder{
+		Version:   src[1],
+		ClOrdID:   getFixed(src[2:off]),
+		Price:     int64(binary.BigEndian.Uint64(src[off:])),
+		LeavesQty: int64(binary.BigEndian.Uint64(src[off+8:])),
+		Side:      src[off+16],
+	}, nil
+}
+
+// EncodeQueryEnd appends a QueryEnd payload to dst.
+func EncodeQueryEnd(dst []byte, m QueryEnd) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, QueryEndLen)...)
+	b := dst[base:]
+	off := header(b, MsgQueryEnd, m.Version)
+	binary.BigEndian.PutUint32(b[off:], m.Count)
+	binary.BigEndian.PutUint64(b[off+4:], m.Seq)
+	return dst, nil
+}
+
+// DecodeQueryEnd reads a QueryEnd payload from src.
+func DecodeQueryEnd(src []byte) (QueryEnd, error) {
+	if err := checkHeader(src, QueryEndLen, MsgQueryEnd); err != nil {
+		return QueryEnd{}, err
+	}
+	return QueryEnd{
+		Version: src[1],
+		Count:   binary.BigEndian.Uint32(src[2:]),
+		Seq:     binary.BigEndian.Uint64(src[6:]),
+	}, nil
+}

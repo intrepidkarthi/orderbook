@@ -429,6 +429,8 @@ func (sess *session) apply(payload []byte) {
 		sess.enter(payload)
 	case wire.MsgCancel:
 		sess.cancel(payload)
+	case wire.MsgQuery:
+		go sess.reportOpenOrders() // reads the book and drains the pump; not on the read loop
 	default:
 		sess.reject("", orderentry.ReasonMalformed)
 	}
@@ -505,6 +507,54 @@ func (sess *session) cancel(payload []byte) {
 	if err := sess.srv.runner.TryEnqueueCancel(id, sess.account); err != nil {
 		sess.reject(m.ClOrdID, orderentry.ReasonOverloaded)
 	}
+}
+
+// reportOpenOrders answers a Query with the venue's authoritative view of the
+// account's live orders.
+//
+// The ordering here is the whole point. The book is read on the matching
+// goroutine, then the publisher is drained, and only then is the report written.
+// That sequence guarantees every event up to the instant of the read has already
+// reached the client, so the report and the stream cannot contradict each other:
+// everything after the reported Seq is a change to apply on top of it.
+//
+// Reading the book without draining first would let an execution that happened
+// before the read arrive after the report, and the client would apply it twice.
+func (sess *session) reportOpenOrders() {
+	orders, err := sess.srv.runner.OpenOrdersFor(sess.account)
+	if err != nil {
+		sess.reject("", orderentry.ReasonShuttingDown)
+		return
+	}
+	sess.srv.pub.Wait()
+
+	stream := sess.srv.reg.Stream(sess.account)
+	for _, o := range orders {
+		side := wire.SideBuy
+		if o.Side == types.SideSell {
+			side = wire.SideSell
+		}
+		b, encErr := wire.EncodeOpenOrder(nil, wire.OpenOrder{
+			Version: wire.Version, ClOrdID: o.ClientOrderID,
+			Price: o.Price, LeavesQty: o.RemainingQty, Side: side,
+		})
+		if encErr != nil {
+			log.Printf("obgw: encode open order: %v", encErr)
+			continue
+		}
+		sess.send(b)
+	}
+
+	// The terminator carries the count and the stream position. Without it a
+	// client cannot tell "you have nothing open" from "the report was cut short",
+	// which are opposite conclusions.
+	b, encErr := wire.EncodeQueryEnd(nil, wire.QueryEnd{
+		Version: wire.Version, Count: uint32(len(orders)), Seq: stream.Seq(),
+	})
+	if encErr != nil {
+		return
+	}
+	sess.send(b)
 }
 
 // reject reports that the command itself was refused, as distinct from an order

@@ -20,6 +20,7 @@ const (
 	cmdSetMark
 	cmdCancelAll
 	cmdReduce
+	cmdOpenOrders
 	cmdCheckpoint
 )
 

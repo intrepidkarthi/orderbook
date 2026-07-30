@@ -64,6 +64,7 @@ const (
 const (
 	MsgEnter  uint8 = 'E' // inbound: new order
 	MsgCancel uint8 = 'C' // inbound: cancel by ClOrdID
+	MsgQuery  uint8 = 'Q' // inbound: report my open orders
 
 	MsgAccepted  uint8 = 'A' // outbound: order is live
 	MsgRejected  uint8 = 'R' // outbound: order refused
@@ -71,6 +72,8 @@ const (
 	MsgCanceled  uint8 = 'D' // outbound: order removed
 	MsgReplaced  uint8 = 'P' // outbound: size changed in place, queue position kept
 	MsgCmdReject uint8 = 'K' // outbound: the command itself was refused
+	MsgOpenOrder uint8 = 'O' // outbound: one live order, in reply to a Query
+	MsgQueryEnd  uint8 = 'T' // outbound: the Query reply is complete
 )
 
 // Field widths. ClOrdIDLen bounds a client identifier; SymbolLen is 16 rather
@@ -226,6 +229,49 @@ type CmdReject struct {
 
 // CmdRejectLen is the encoded width of a CmdReject payload.
 const CmdRejectLen = 1 + 1 + ClOrdIDLen + 2
+
+// Query asks the venue to report the account's live orders. It carries nothing:
+// the account is the session's, and the gateway serves one instrument.
+//
+// It exists because resume can legitimately fail — an evicted cursor or a new
+// venue incarnation — and without this a client refused at login has no
+// in-protocol way back to a correct picture. Telling it to "reconcile out of
+// band" is telling it to go and build a second integration.
+type Query struct {
+	Version uint8
+}
+
+// QueryLen is the encoded width of a Query payload.
+const QueryLen = 1 + 1
+
+// OpenOrder is one live order in reply to a Query. Quantity is what remains, not
+// what was submitted: a client reconciling wants the current picture.
+type OpenOrder struct {
+	Version   uint8
+	ClOrdID   string
+	Price     int64
+	LeavesQty int64
+	Side      uint8
+}
+
+// OpenOrderLen is the encoded width of an OpenOrder payload.
+const OpenOrderLen = 1 + 1 + ClOrdIDLen + 8 + 8 + 1
+
+// QueryEnd terminates a Query reply. Count lets a client verify it received the
+// whole report rather than a truncated one, and Seq names the point in its own
+// stream the report is consistent with — everything after Seq is a change the
+// client must apply on top.
+//
+// Without the terminator a client cannot distinguish "you have no open orders"
+// from "the connection died mid-report", which are opposite conclusions.
+type QueryEnd struct {
+	Version uint8
+	Count   uint32
+	Seq     uint64
+}
+
+// QueryEndLen is the encoded width of a QueryEnd payload.
+const QueryEndLen = 1 + 1 + 4 + 8
 
 // --- encoding helpers ---
 
