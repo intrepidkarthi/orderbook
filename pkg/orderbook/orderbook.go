@@ -26,6 +26,9 @@ type node struct {
 	prev  *node
 	next  *node
 	level *PriceLevel
+	// user is the interned account id, stored here so a cancel never has to hash
+	// the account string again. See userTable in index.go.
+	user int32
 }
 
 // PriceLevel is the FIFO queue of resting orders at one price. Price is in ticks
@@ -77,10 +80,10 @@ type OrderBook struct {
 	symbol         string
 	bids           map[int64]*PriceLevel // price ticks -> level
 	asks           map[int64]*PriceLevel
-	nodes          map[int64]*node // orderID -> node, for O(1) cancel
-	perUser        map[string]int  // resting-order count per user, for admission caps
-	bidPrices      []int64         // sorted descending (best first)
-	askPrices      []int64         // sorted ascending (best first)
+	nodes          *orderIndex // orderID -> node, for O(1) cancel
+	perUser        *userTable  // resting-order count per interned account
+	bidPrices      []int64     // sorted descending (best first)
+	askPrices      []int64     // sorted ascending (best first)
 	lastTradePrice int64
 	lastTradeTime  time.Time
 	sequenceNum    uint64 // book version, bumped on each add
@@ -109,7 +112,7 @@ func (ob *OrderBook) getNode(order *types.Order, level *PriceLevel) *node {
 
 // putNode clears and recycles a node.
 func (ob *OrderBook) putNode(nd *node) {
-	nd.order, nd.level, nd.prev, nd.next = nil, nil, nil, nil
+	nd.order, nd.level, nd.prev, nd.next, nd.user = nil, nil, nil, nil, 0
 	ob.nodePool = append(ob.nodePool, nd)
 }
 
@@ -153,8 +156,8 @@ func New(config Config) *OrderBook {
 		symbol:    config.Symbol,
 		bids:      make(map[int64]*PriceLevel),
 		asks:      make(map[int64]*PriceLevel),
-		nodes:     make(map[int64]*node),
-		perUser:   make(map[string]int),
+		nodes:     newOrderIndex(config.MaxOrders),
+		perUser:   newUserTable(),
 		bidPrices: make([]int64, 0),
 		askPrices: make([]int64, 0),
 		maxOrders: config.MaxOrders,
@@ -172,7 +175,7 @@ func (ob *OrderBook) Add(order *types.Order) error {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 
-	if len(ob.nodes) >= ob.maxOrders {
+	if ob.nodes.len() >= ob.maxOrders {
 		return types.ErrOrderBookFull
 	}
 
@@ -181,7 +184,7 @@ func (ob *OrderBook) Add(order *types.Order) error {
 		ob.orderSeq++
 		order.ID = ob.orderSeq
 	}
-	if _, exists := ob.nodes[order.ID]; exists {
+	if _, exists := ob.nodes.get(order.ID); exists {
 		return nil
 	}
 
@@ -207,8 +210,9 @@ func (ob *OrderBook) Add(order *types.Order) error {
 
 	n := ob.getNode(order, level)
 	level.push(n)
-	ob.nodes[order.ID] = n
-	ob.perUser[order.UserID]++
+	n.user = ob.perUser.intern(order.UserID)
+	ob.nodes.put(order.ID, n)
+	ob.perUser.incr(n.user)
 	return nil
 }
 
@@ -218,20 +222,16 @@ func (ob *OrderBook) Remove(orderID int64) (*types.Order, error) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 
-	n, exists := ob.nodes[orderID]
+	n, exists := ob.nodes.get(orderID)
 	if !exists {
 		return nil, types.ErrOrderNotFound
 	}
 	order := n.order
 	level := n.level
 	level.unlink(n)
-	delete(ob.nodes, orderID)
+	ob.nodes.del(orderID)
+	ob.perUser.decr(n.user)
 	ob.putNode(n)
-	if c := ob.perUser[order.UserID]; c <= 1 {
-		delete(ob.perUser, order.UserID)
-	} else {
-		ob.perUser[order.UserID] = c - 1
-	}
 
 	if level.isEmpty() {
 		price := order.Price
@@ -251,7 +251,7 @@ func (ob *OrderBook) Remove(orderID int64) (*types.Order, error) {
 func (ob *OrderBook) Get(orderID int64) (*types.Order, bool) {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
-	n, ok := ob.nodes[orderID]
+	n, ok := ob.nodes.get(orderID)
 	if !ok {
 		return nil, false
 	}
@@ -396,7 +396,7 @@ func (ob *OrderBook) GetOrdersAtPrice(side types.Side, price int64) []*types.Ord
 func (ob *OrderBook) UpdateOrderQuantity(orderID int64, filledQty int64) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
-	if n, ok := ob.nodes[orderID]; ok {
+	if n, ok := ob.nodes.get(orderID); ok {
 		n.level.TotalQty -= filledQty
 	}
 }
@@ -406,7 +406,7 @@ func (ob *OrderBook) UpdateOrderQuantity(orderID int64, filledQty int64) {
 func (ob *OrderBook) RestoreOrderQuantity(orderID int64, qty int64) {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
-	if n, ok := ob.nodes[orderID]; ok {
+	if n, ok := ob.nodes.get(orderID); ok {
 		n.level.TotalQty += qty
 	}
 }
@@ -415,7 +415,7 @@ func (ob *OrderBook) RestoreOrderQuantity(orderID int64, qty int64) {
 func (ob *OrderBook) Count() int {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
-	return len(ob.nodes)
+	return ob.nodes.len()
 }
 
 // OrdersByUser returns how many resting orders belong to userID — the basis for a
@@ -425,7 +425,7 @@ func (ob *OrderBook) Count() int {
 func (ob *OrderBook) OrdersByUser(userID string) int {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
-	return ob.perUser[userID]
+	return ob.perUser.countOf(userID)
 }
 
 // DepthWithin returns the total resting quantity (lots) across both sides at
@@ -454,7 +454,7 @@ func (ob *OrderBook) DepthWithin(lo, hi int64) int64 {
 func (ob *OrderBook) Orders() []*types.Order {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
-	out := make([]*types.Order, 0, len(ob.nodes))
+	out := make([]*types.Order, 0, ob.nodes.len())
 	appendSide := func(prices []int64, levels map[int64]*PriceLevel) {
 		for _, p := range prices {
 			for n := levels[p].head; n != nil; n = n.next {

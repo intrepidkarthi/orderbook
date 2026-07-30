@@ -7,6 +7,35 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Performance
+
+- **Cancel is ~2× faster: the order index is no longer a Go map.** A
+  `map[int64]*node` was the largest single cost in a cancel. It is now a
+  purpose-built table using Fibonacci (multiplicative) hashing over power-of-two
+  buckets, with chained entries recycled through a free list.
+
+  Go's map is general-purpose: it hashes arbitrary key types through a runtime
+  call, keeps tophash bytes for probing, and handles concurrent-access detection
+  and incremental growth. None of that is needed for a dense, monotonically
+  increasing `int64` assigned by the book itself, in a structure already serialised
+  by the book's own mutex. Measured in isolation, get + delete + put costs ~45 ns
+  through Go's map and ~3.7 ns through this.
+
+  Book-level cancel, measured by alternating baseline and patched builds in one
+  session: **~47.7 ns → ~23.3 ns**. All ten patched measurements came in below all
+  ten baseline ones.
+
+- **A cancel no longer hashes an account string.** The per-account admission
+  counter was a `map[string]int`, hashed on every add *and* every cancel. Accounts
+  are now interned to a dense `int32` on first sight and the id is cached on the
+  book node, so a cancel reads it off the node it already holds. An add still hashes
+  once, which is unavoidable — the order arrives carrying a string.
+
+  Prompted by measuring against `geseq/orderbook` (15–21 ns cancel) and
+  `joaquinbejar/OrderBook-rs` (41 ns at a 1 M book). Two independent libraries
+  beating this one at the same operation was the signal; both did it with a
+  purpose-built index rather than the language's map.
+
 ### Fixed
 
 - **The write-ahead log had no checksums, so silent corruption was replayed as
