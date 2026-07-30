@@ -1610,6 +1610,27 @@ func (e *Engine) OpenOrdersFor(userID string) []*types.Order {
 	return out
 }
 
+// RestingOrders returns deep copies of every active resting order, across all
+// accounts, in book order.
+//
+// It exists for the layer above to rebuild whatever per-order state it keeps after
+// a recovery — a session layer's client-order-id index, say. Without it, an engine
+// restored from a snapshot and log tail holds orders that nothing outside can name.
+//
+// Copies, for the same reason OpenOrdersFor makes them: the originals are
+// engine-owned. Like OpenOrdersFor, this excludes pending stops and trailing stops,
+// which are not resting orders.
+func (e *Engine) RestingOrders() []*types.Order {
+	orders := e.book.Orders()
+	out := make([]*types.Order, 0, len(orders))
+	for _, o := range orders {
+		if o.IsActive() {
+			out = append(out, copyOrder(o))
+		}
+	}
+	return out
+}
+
 // CancelAllForUser cancels every resting order, pending stop and trailing stop
 // belonging to userID, returning what it removed. This is the operator kill
 // switch, so it deliberately ignores MinRestingTime: an anti-spoofing floor that

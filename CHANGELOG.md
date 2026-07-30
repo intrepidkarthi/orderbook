@@ -22,6 +22,27 @@ versions may include breaking changes).
   what makes replay correct — the log is written before the sweep, so the same
   point in the command stream holds the same book and removes the same set.
 
+- **Recovery restored the book and nothing else, so recovered orders were
+  unreachable — and their fills went unreported.** The session layer's `ClOrdID` →
+  order-id index started empty against a non-empty venue. A client could see its
+  recovered orders in a `Query` reply and be told `2` (unknown order) for every
+  `Cancel` or `Reduce` naming one, which are contradictory answers from the same
+  venue about the same order.
+
+  The severe consequence was quieter. With no record of the order, `publishTrade`
+  found nothing to attribute a fill to and dropped the execution report entirely: a
+  maker whose resting order filled while the venue was down would never have been
+  told, and its position would have been wrong with no way to notice. That is
+  precisely the failure the stream-outliving-the-connection design exists to
+  prevent, reintroduced through recovery.
+
+  `Registry.Adopt` and `Engine.RestingOrders` now rebuild the index on start.
+  Adoption seeds from `RemainingQty`, not `Quantity` — a recovered order can be
+  partly filled and `fill()` decrements from that number, so the original size would
+  over-report `LeavesQty` by exactly what had already traded. It delivers nothing to
+  any stream: those orders were acknowledged in a previous incarnation, and
+  replaying them into a fresh sequence space would be inventing history.
+
 - **`Reduce` bypassed the minimum resting time.** `Cancel` enforces it; `Reduce`
   did not. The control targets the Coscia pattern — post size, pull it before it
   can fill — and a reduce from 1000 lots to 1 withdraws 999 of them, so the whole
@@ -66,6 +87,14 @@ versions may include breaking changes).
 - `ReasonTooSoon` (17), the one refusal in the vocabulary a client should simply
   retry.
 
+- `Engine.RestingOrders`, returning deep copies of every active resting order
+  across all accounts. `OpenOrdersFor` could not serve recovery: it is scoped to one
+  account, and a recovering venue does not know the accounts until it has read the
+  book.
+
+- `orderentry.Registry.Adopt`, which rebuilds the client-order-id index over a
+  recovered book.
+
 - **In-band reconciliation.** A `Query` message returns one `OpenOrder` per live
   order followed by a `QueryEnd`. Resume can legitimately fail — an evicted
   cursor or a restarted venue — and a client refused at login previously had no
@@ -92,15 +121,6 @@ versions may include breaking changes).
   `AppendCancelAll`. `pkg/wal.Writer` implements both; a custom log will not
   compile until it does, which is the intended outcome — silently continuing to
   drop those commands is the bug being fixed.
-
-### Known gaps
-
-- **A recovered order cannot be named by `ClOrdID`.** Recovery rebuilds the book
-  but not the session layer's `ClOrdID` → order-id index, so after a restart a
-  client sees its resting orders via `Query` and cannot cancel or reduce them.
-  This predates `Reduce` and affects `Cancel` identically; documented in
-  [docs/PROTOCOL.md](docs/PROTOCOL.md#durability) rather than left to be
-  discovered.
 
 ### On the version
 

@@ -117,6 +117,12 @@ func NewServer(cfg Config) (*Server, error) {
 		if n := recovered.OrderCount(); n > 0 {
 			log.Printf("obgw: recovered %d resting orders from %s", n, cfg.WALPath)
 		}
+		// Rebuild the session layer's index over the recovered book. Recovery used
+		// to restore the book and nothing else, which left every recovered order
+		// unnameable: a client could see them in a Query reply and could not cancel
+		// or reduce them, and a fill against one produced no execution report at all
+		// because the publisher had no record of the order.
+		reg.Adopt(recovered.RestingOrders())
 		// Only now does the publisher go on, so live events are published and
 		// replayed history is not.
 		recovered.SetEventSink(pub)

@@ -308,12 +308,22 @@ Without `-wal` the gateway runs with no durability at all and says so on startup
 That is a legitimate configuration for a test harness and an indefensible one for
 anything else.
 
-**A recovered order cannot yet be named by `ClOrdID`.** Recovery rebuilds the
-book, but not the session layer's `ClOrdID` → order-id index, so after a restart a
-client can see its resting orders via `Query` and cannot `Cancel` or `Reduce` them
-until it enters new ones — the venue answers `2` (unknown order). This is a real
-gap rather than a design position, it predates `Reduce` and affects `Cancel`
-identically, and the fix is to seed the index from the recovered book on start.
+**Recovery restores the session layer's index too, not just the book.** On start
+the gateway seeds its `ClOrdID` → order-id map from the recovered book, so an order
+that outlived a restart can still be named in a `Cancel` or a `Reduce`, and a fill
+against it still produces an execution report.
+
+That last one is why this matters most. Without the index the publisher held no
+record of a recovered order, so a trade against it was dropped rather than
+reported: a maker whose resting order filled while the venue was down would never
+have been told, and its position would have been wrong with no way to notice. It is
+the same failure the [stream-outliving-the-connection](#resume-and-why-a-session-id-is-not-decoration)
+design exists to prevent, and recovery had been reintroducing it.
+
+Adoption restores the index, not the conversation. Nothing is re-announced on any
+stream: those orders were acknowledged in a previous incarnation, and replaying
+them into a fresh sequence space would be inventing history. A client that wants
+the current picture asks for it with a `Query`.
 
 ## Backpressure
 

@@ -313,6 +313,46 @@ func (r *Registry) track(o *types.Order) {
 	}
 }
 
+// Adopt seeds the registry from a recovered book, so orders that outlived a
+// restart can still be named and still generate execution reports.
+//
+// Recovery rebuilt the book and nothing else. Without this the registry starts
+// empty against a non-empty venue, and three things follow, in increasing order of
+// severity: a client cannot cancel a recovered order, it cannot reduce one, and —
+// worst — when one of those orders fills, `publishTrade` finds no entry for it and
+// drops the execution report entirely. A maker whose resting order filled while the
+// venue was down would never be told. That is the failure the whole stream-outlives-
+// the-connection design exists to prevent, reintroduced through the back door.
+//
+// It delivers nothing to any stream. These orders were accepted in a previous
+// incarnation and acknowledged there; re-announcing them now would replay history
+// into a fresh sequence space, and a client cannot resume across incarnations
+// anyway. Adoption restores the index, not the conversation.
+//
+// remaining is seeded from RemainingQty rather than Quantity, which is the whole
+// subtlety: track() may use Quantity because at accept time nothing is filled, but
+// a recovered order can be partially filled, and fill() decrements from this
+// number. Seeding it with the original size would report a LeavesQty too high by
+// exactly what was already filled before the restart.
+//
+// Call it once, after recovery and before serving.
+func (r *Registry) Adopt(orders []*types.Order) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.orders == nil {
+		r.orders = map[int64]*live{}
+	}
+	for _, o := range orders {
+		if o == nil {
+			continue
+		}
+		r.orders[o.ID] = &live{account: o.UserID, clOrdID: o.ClientOrderID, remaining: o.RemainingQty}
+		if o.ClientOrderID != "" {
+			r.byClOrd[clOrdKey(o.UserID, o.ClientOrderID)] = o.ID
+		}
+	}
+}
+
 // clOrdKey scopes a client order id to its account. Scoping is the security
 // boundary: without it one client could name another's order simply by guessing
 // a common identifier like "1".
