@@ -7,7 +7,39 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two mutating commands were never written to the log.** `Reduce` and
+  `CancelAllForUser` both change the book, and `CommandLog` recorded only submits
+  and cancels — so recovery restored a reduced order at its original size, and
+  handed a pulled account its whole book back. Neither failed loudly; the
+  recovered venue was simply wrong about what was resting.
+
+  `KindReduce` and `KindCancelAll` now exist in the log, and the interface
+  documents the rule the omission broke: a mutating command missing from
+  `CommandLog` is not "not yet logged", it is a book the log cannot reproduce.
+  `CancelAllForUser` logs the *intent* rather than the ids it removed, which is
+  what makes replay correct — the log is written before the sweep, so the same
+  point in the command stream holds the same book and removes the same set.
+
+- **`Reduce` bypassed the minimum resting time.** `Cancel` enforces it; `Reduce`
+  did not. The control targets the Coscia pattern — post size, pull it before it
+  can fill — and a reduce from 1000 lots to 1 withdraws 999 of them, so the whole
+  pattern was available behind a different verb. Now refused with
+  `ErrCancelTooSoon`, with the same exemptions `Cancel` has (replay, and
+  privileged liquidation orders).
+
+  **Behaviour change for embedders:** `Engine.Reduce` and `Runner.Reduce` now fail
+  inside a configured `MinRestingTime`. Venues that leave the floor at zero — the
+  default — see no change.
+
 ### Added
+
+- `matching.Runner.TryReduceAsync`, the shape a network ingress needs and neither
+  existing path had: the enqueue happens on the caller's goroutine so a reduce
+  cannot overtake the order it names, while only the wait for the outcome moves
+  off it so the matcher can never stall a connection's ingress. Only the error
+  crosses the channel — the applied order is engine-owned.
 
 - **In-band reconciliation.** A `Query` message returns one `OpenOrder` per live
   order followed by a `QueryEnd`. Resume can legitimately fail — an evicted
@@ -28,6 +60,13 @@ versions may include breaking changes).
 
 - `Engine.OpenOrdersFor` / `Runner.OpenOrdersFor`, returning deep copies read on
   the matching goroutine.
+
+### Changed
+
+- **Breaking (embedders):** `matching.CommandLog` gained `AppendReduce` and
+  `AppendCancelAll`. `pkg/wal.Writer` implements both; a custom log will not
+  compile until it does, which is the intended outcome — silently continuing to
+  drop those commands is the bug being fixed.
 
 Adding three message types required **no version bump**, which is what the type
 byte introduced in v0.11.0 bought: every existing golden vector is byte-identical

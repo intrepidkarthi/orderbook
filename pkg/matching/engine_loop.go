@@ -67,9 +67,16 @@ type Runner struct {
 // Append is called on the matching goroutine, so a slow log slows matching. Use a
 // buffered writer and batch the fsync (group commit) rather than syncing per
 // command.
+//
+// Every method here corresponds to a command that mutates the book. A mutating
+// command missing from this interface is not "not yet logged", it is a book the
+// log cannot reproduce — which is how Reduce came to be applied but not recorded,
+// so a restart brought the order back at its original size.
 type CommandLog interface {
 	AppendSubmit(o *types.Order) (int64, error)
 	AppendCancel(orderID int64, userID string) (int64, error)
+	AppendReduce(orderID, newQty int64, userID string) (int64, error)
+	AppendCancelAll(userID string) (int64, error)
 }
 
 // RunnerConfig configures a Runner.
@@ -206,6 +213,10 @@ func (r *Runner) logCommand(cmd command) {
 		seq, err = r.log.AppendSubmit(cmd.order)
 	case cmdCancel:
 		seq, err = r.log.AppendCancel(cmd.cancelID, cmd.userID)
+	case cmdReduce:
+		seq, err = r.log.AppendReduce(cmd.cancelID, cmd.reduceQty, cmd.userID)
+	case cmdCancelAll:
+		seq, err = r.log.AppendCancelAll(cmd.userID)
 	default:
 		return // control commands carry no book state; the snapshot covers them
 	}
@@ -507,6 +518,54 @@ func (r *Runner) TryEnqueue(order *types.Order) error {
 // TryEnqueueCancel is the cancel counterpart of TryEnqueue.
 func (r *Runner) TryEnqueueCancel(orderID int64, userID string) error {
 	return r.tryEnqueue(command{kind: cmdCancel, cancelID: orderID, userID: userID})
+}
+
+// TryReduceAsync enqueues a reduce without waiting for it to be applied, and
+// returns a channel carrying only its error — nil on success.
+//
+// It exists because a reduce needs both properties at once, and neither
+// fire-and-forget nor the synchronous Reduce has both. Enqueueing happens on the
+// caller's goroutine, so a reduce issued after an order stays behind it in the
+// queue; a network ingress that dispatched it from a fresh goroutine could have
+// the reduce overtake the very order it names. And unlike a cancel, a reduce can
+// fail for a reason the client caused and can fix — asking to grow rather than
+// shrink, or to shrink below what is already filled — so discarding the outcome
+// would leave that client waiting for a reply that is never coming.
+//
+// Only the error crosses the channel. The applied *types.Order is engine-owned
+// and the matching goroutine keeps mutating it, so handing it to a connection
+// goroutine would be the race TryEnqueue exists to avoid.
+func (r *Runner) TryReduceAsync(orderID, newQty int64, userID string) (<-chan error, error) {
+	select {
+	case <-r.quit:
+		return nil, ErrShuttingDown
+	default:
+	}
+	reply := make(chan cmdReply, 1)
+	cmd := command{kind: cmdReduce, cancelID: orderID, reduceQty: newQty, userID: userID, reply: reply}
+	select {
+	case r.queue <- cmd:
+	default:
+		return nil, ErrQueueFull
+	}
+	out := make(chan error, 1)
+	go func() {
+		select {
+		case rep := <-reply:
+			out <- rep.err
+		case <-r.done:
+			// The loop drains before exiting, so an applied reduce may already
+			// have replied; reporting a shutdown over a real result would be a
+			// silent lie about whether the book changed.
+			select {
+			case rep := <-reply:
+				out <- rep.err
+			default:
+				out <- ErrShuttingDown
+			}
+		}
+	}()
+	return out, nil
 }
 
 // tryEnqueue posts a command with no reply channel. dispatch already tolerates a

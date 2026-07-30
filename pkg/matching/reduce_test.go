@@ -1,7 +1,9 @@
 package matching
 
 import (
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
@@ -152,6 +154,82 @@ func TestReduceAnnouncesReplaced(t *testing.T) {
 	}
 }
 
+// TestReduceRespectsMinRestingTime — MinRestingTime targets the Coscia pattern:
+// post size, pull it before it can fill. A reduce from 1000 lots to 1 withdraws
+// 999 of them, so a floor that guarded Cancel and not Reduce would leave the whole
+// pattern available behind a different verb. It mattered little while only an
+// embedder could call Reduce; it matters now that the wire carries it.
+func TestReduceRespectsMinRestingTime(t *testing.T) {
+	cfg := DefaultConfig("X")
+	cfg.MinRestingTime = time.Hour
+	e := NewEngine(cfg)
+
+	o := redOrder(t, "spoofer", types.SideBuy, 100, 1000)
+	e.Process(o)
+
+	// The cancel route is closed...
+	if _, err := e.Cancel(o.ID, "spoofer"); !errors.Is(err, types.ErrCancelTooSoon) {
+		t.Fatalf("Cancel err = %v, want ErrCancelTooSoon — the premise of this test", err)
+	}
+	// ...and so must the reduce route be.
+	if _, err := e.Reduce(o.ID, 1, "spoofer"); !errors.Is(err, types.ErrCancelTooSoon) {
+		t.Errorf("Reduce err = %v, want ErrCancelTooSoon — 999 lots of displayed size were withdrawn inside the resting floor", err)
+	}
+	if _, qty, _ := e.BestBid(); qty != 1000 {
+		t.Errorf("depth = %d, want 1000 — the refused reduce still shrank the book", qty)
+	}
+}
+
+// TestReduceRejectsIncreaseBeforeCheckingTheClock — an impossible request must
+// always get the same answer, not one that depends on how long the order has
+// rested. A clock-dependent error is a client bug that reproduces only sometimes.
+func TestReduceRejectsIncreaseBeforeCheckingTheClock(t *testing.T) {
+	cfg := DefaultConfig("X")
+	cfg.MinRestingTime = time.Hour
+	e := NewEngine(cfg)
+
+	o := redOrder(t, "mm", types.SideBuy, 100, 10)
+	e.Process(o)
+
+	if _, err := e.Reduce(o.ID, 50, "mm"); !errors.Is(err, types.ErrInvalidQuantity) {
+		t.Errorf("err = %v, want ErrInvalidQuantity", err)
+	}
+}
+
+// TestPrivilegedReduceIgnoresRestingFloor — the floor must not block a
+// liquidation, for the same reason the operator kill switch ignores it.
+func TestPrivilegedReduceIgnoresRestingFloor(t *testing.T) {
+	cfg := DefaultConfig("X")
+	cfg.MinRestingTime = time.Hour
+	e := NewEngine(cfg)
+
+	o := redOrder(t, "liq", types.SideBuy, 100, 1000)
+	o.Privileged = true
+	e.Process(o)
+
+	if _, err := e.Reduce(o.ID, 10, "liq"); err != nil {
+		t.Errorf("Reduce: %v — the resting floor blocked a privileged order", err)
+	}
+}
+
+// TestReplayReduceIgnoresRestingFloor — replay must not re-litigate a command the
+// log already records as accepted. Re-checking it against replay-time timestamps
+// would refuse an accepted reduce and diverge the recovered book.
+func TestReplayReduceIgnoresRestingFloor(t *testing.T) {
+	cfg := DefaultConfig("X")
+	cfg.MinRestingTime = time.Hour
+	e := NewEngine(cfg)
+	e.SetReplaying(true)
+	defer e.SetReplaying(false)
+
+	o := redOrder(t, "mm", types.SideBuy, 100, 1000)
+	e.Process(o)
+
+	if _, err := e.Reduce(o.ID, 10, "mm"); err != nil {
+		t.Errorf("Reduce during replay: %v", err)
+	}
+}
+
 // TestRunnerReduce drives it through the concurrency front.
 func TestRunnerReduce(t *testing.T) {
 	r := NewRunner(RunnerConfig{Engine: DefaultConfig("X")})
@@ -172,3 +250,157 @@ func TestRunnerReduce(t *testing.T) {
 		t.Errorf("aggregate depth = %d, want 4", qty)
 	}
 }
+
+// TestTryReduceAsyncReportsSuccess — the channel carries nil, not a zero value a
+// caller has to interpret.
+func TestTryReduceAsyncReportsSuccess(t *testing.T) {
+	r := NewRunner(RunnerConfig{Engine: DefaultConfig("X")})
+	defer r.Close()
+
+	res := r.Process(redOrder(t, "mm", types.SideBuy, 100, 10))
+	done, err := r.TryReduceAsync(res.Order.ID, 4, "mm")
+	if err != nil {
+		t.Fatalf("TryReduceAsync: %v", err)
+	}
+	select {
+	case rerr := <-done:
+		if rerr != nil {
+			t.Fatalf("reduce failed: %v", rerr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no outcome; a client would wait forever for a reply")
+	}
+	if _, qty, _ := r.BestBid(); qty != 4 {
+		t.Errorf("aggregate depth = %d, want 4", qty)
+	}
+}
+
+// TestTryReduceAsyncReportsFailure is the reason this path exists rather than a
+// fire-and-forget enqueue. A reduce can fail for a reason the client caused and
+// can correct, and silence is indistinguishable from a reduce still in flight.
+func TestTryReduceAsyncReportsFailure(t *testing.T) {
+	r := NewRunner(RunnerConfig{Engine: DefaultConfig("X")})
+	defer r.Close()
+
+	res := r.Process(redOrder(t, "mm", types.SideBuy, 100, 10))
+
+	cases := map[string]struct {
+		id     int64
+		qty    int64
+		user   string
+		reason error
+	}{
+		"an increase":       {res.Order.ID, 50, "mm", types.ErrInvalidQuantity},
+		"another account":   {res.Order.ID, 4, "someone-else", types.ErrOrderNotFound},
+		"no such order":     {res.Order.ID + 999, 4, "mm", types.ErrOrderNotFound},
+		"same size is a no": {res.Order.ID, 10, "mm", types.ErrInvalidQuantity},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			done, err := r.TryReduceAsync(c.id, c.qty, c.user)
+			if err != nil {
+				t.Fatalf("TryReduceAsync: %v", err)
+			}
+			select {
+			case rerr := <-done:
+				if !errors.Is(rerr, c.reason) {
+					t.Errorf("err = %v, want %v", rerr, c.reason)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("no outcome reported")
+			}
+		})
+	}
+	// The order must be untouched by every refusal above.
+	if _, qty, _ := r.BestBid(); qty != 10 {
+		t.Errorf("aggregate depth = %d, want 10 — a refused reduce changed the book", qty)
+	}
+}
+
+// TestTryReduceAsyncEnqueuesInOrder is why the enqueue is synchronous while only
+// the wait is not. A reduce dispatched from its own goroutine could overtake the
+// order it names and be refused for an order that does not exist yet.
+func TestTryReduceAsyncEnqueuesInOrder(t *testing.T) {
+	r := NewRunner(RunnerConfig{Engine: DefaultConfig("X"), QueueSize: 64})
+	defer r.Close()
+
+	// Submit fire-and-forget, then reduce immediately, exactly as a connection's
+	// read loop does when both messages arrive in one burst.
+	o := redOrder(t, "mm", types.SideBuy, 100, 10)
+	if err := r.TryEnqueue(o); err != nil {
+		t.Fatalf("TryEnqueue: %v", err)
+	}
+	// The id is assigned by the engine, so a real ingress resolves it from its own
+	// registry; here the order carries it once accepted. Wait for that, then reduce
+	// with no further synchronisation.
+	deadline := time.Now().Add(2 * time.Second)
+	for r.OrderCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	done, err := r.TryReduceAsync(o.ID, 4, "mm")
+	if err != nil {
+		t.Fatalf("TryReduceAsync: %v", err)
+	}
+	select {
+	case rerr := <-done:
+		if rerr != nil {
+			t.Fatalf("reduce lost the race with its own order: %v", rerr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no outcome reported")
+	}
+}
+
+// TestTryReduceAsyncAfterCloseIsRefused — a producer racing shutdown gets an
+// error, not a channel that never delivers.
+func TestTryReduceAsyncAfterCloseIsRefused(t *testing.T) {
+	r := NewRunner(RunnerConfig{Engine: DefaultConfig("X")})
+	res := r.Process(redOrder(t, "mm", types.SideBuy, 100, 10))
+	id := res.Order.ID
+	r.Close()
+
+	if _, err := r.TryReduceAsync(id, 4, "mm"); !errors.Is(err, ErrShuttingDown) {
+		t.Errorf("err = %v, want ErrShuttingDown", err)
+	}
+}
+
+// TestReduceIsWrittenToTheLog — the durability of this command is proven end to
+// end in pkg/wal; this pins the seam itself, since a CommandLog that is never
+// called is the shape the bug took.
+func TestReduceIsWrittenToTheLog(t *testing.T) {
+	log := &countingLog{}
+	r := NewRunner(RunnerConfig{Engine: DefaultConfig("X"), Log: log})
+	defer r.Close()
+
+	res := r.Process(redOrder(t, "mm", types.SideBuy, 100, 10))
+	if _, err := r.Reduce(res.Order.ID, 4, "mm"); err != nil {
+		t.Fatalf("Reduce: %v", err)
+	}
+	if _, err := r.CancelAllForUser("mm"); err != nil {
+		t.Fatalf("CancelAllForUser: %v", err)
+	}
+	if log.reduces != 1 {
+		t.Errorf("log saw %d reduces, want 1 — the book changed without the log knowing", log.reduces)
+	}
+	if log.cancelAlls != 1 {
+		t.Errorf("log saw %d cancel-alls, want 1", log.cancelAlls)
+	}
+}
+
+// countingLog counts what the Runner appends. It deliberately implements the whole
+// interface rather than embedding a partial one, so adding a mutating command
+// without logging it fails to compile here.
+type countingLog struct {
+	submits, cancels, reduces, cancelAlls int
+	seq                                   int64
+}
+
+func (l *countingLog) next() (int64, error) { l.seq++; return l.seq, nil }
+
+func (l *countingLog) AppendSubmit(*types.Order) (int64, error) { l.submits++; return l.next() }
+
+func (l *countingLog) AppendCancel(int64, string) (int64, error) { l.cancels++; return l.next() }
+
+func (l *countingLog) AppendReduce(int64, int64, string) (int64, error) { l.reduces++; return l.next() }
+
+func (l *countingLog) AppendCancelAll(string) (int64, error) { l.cancelAlls++; return l.next() }

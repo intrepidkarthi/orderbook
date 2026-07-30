@@ -1537,6 +1537,10 @@ func (e *Engine) reverseTrade(tr types.Trade, makerOrders map[int64]*types.Order
 // order already filled beyond newQty cannot shrink to it; that returns
 // ErrInvalidQuantity rather than quietly clamping, since the caller's model of
 // the order is wrong and it should find out.
+//
+// MinRestingTime is enforced, returning ErrCancelTooSoon — a reduce is a partial
+// withdrawal of displayed size, so exempting it would leave the anti-spoofing
+// floor guarding one verb and not the other.
 func (e *Engine) Reduce(orderID int64, newQty int64, userID string) (*types.Order, error) {
 	order, exists := e.book.Get(orderID)
 	if !exists {
@@ -1555,6 +1559,21 @@ func (e *Engine) Reduce(orderID int64, newQty int64, userID string) (*types.Orde
 	}
 	if newQty <= order.FilledQty {
 		return nil, types.ErrInvalidQuantity
+	}
+	// Minimum resting time applies here exactly as it does to a cancel, and for
+	// the same reason: this control exists to stop displayed size being withdrawn
+	// before it can fill, and a reduce from 1000 lots to 1 withdraws 999 of them.
+	// Enforcing it on Cancel alone would leave the Coscia pattern intact behind a
+	// different verb — which mattered little while only an embedder could call
+	// this, and matters a great deal now that a client can.
+	//
+	// Checked after the quantity validation so an impossible request always gets
+	// ErrInvalidQuantity rather than an error that depends on the clock. Bypassed
+	// in replay and for privileged (liquidation) orders, as Cancel is.
+	if e.config.MinRestingTime > 0 && !e.replaying && !order.Privileged {
+		if e.clock().UTC().Sub(order.CreatedAt) < e.config.MinRestingTime {
+			return nil, types.ErrCancelTooSoon
+		}
 	}
 
 	released := order.Quantity - newQty

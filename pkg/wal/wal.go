@@ -1,12 +1,13 @@
 // Package wal provides durable, append-only write-ahead logging and snapshot
 // persistence for the matching engine — the crash-recovery storage backend.
 //
-// It records the ordered *command* stream (submits and cancels) to disk. A fresh
-// engine replays the log — optionally starting from a snapshot — to reach
-// identical book state, the same recovery contract LMAX (journal + snapshot +
-// replay) and Binance (hourly snapshot + sequential replay) rely on. Recovery is
-// bounded to O(recent) by snapshotting and replaying only the WAL tail after the
-// snapshot's sequence.
+// It records the ordered *command* stream to disk — every command that mutates
+// the book, which means submits, cancels, reduces and the operator's account-wide
+// cancel. A fresh engine replays the log — optionally starting from a snapshot —
+// to reach identical book state, the same recovery contract LMAX (journal +
+// snapshot + replay) and Binance (hourly snapshot + sequential replay) rely on.
+// Recovery is bounded to O(recent) by snapshotting and replaying only the WAL tail
+// after the snapshot's sequence.
 //
 // Records are length-prefixed JSON, written write-ahead (before the engine
 // applies the command) so no acknowledged command is lost. A crash mid-write
@@ -30,17 +31,27 @@ import (
 type EntryKind uint8
 
 const (
-	KindSubmit EntryKind = iota + 1 // a Process(order)
-	KindCancel                      // a Cancel(id, user)
+	KindSubmit    EntryKind = iota + 1 // a Process(order)
+	KindCancel                         // a Cancel(id, user)
+	KindReduce                         // a Reduce(id, newQty, user)
+	KindCancelAll                      // a CancelAllForUser(user)
 )
 
 // Entry is one durable command-log record.
+//
+// CancelID names the target order for both KindCancel and KindReduce — it is the
+// engine order id in either case, and giving the reduce its own field would only
+// invite the two drifting apart.
 type Entry struct {
 	Seq      int64        `json:"seq"`
 	Kind     EntryKind    `json:"kind"`
 	Order    *types.Order `json:"order,omitempty"`
 	CancelID int64        `json:"cancel_id,omitempty"`
 	UserID   string       `json:"user_id,omitempty"`
+	// NewQty is the new TOTAL quantity of a KindReduce, matching Engine.Reduce.
+	// A delta would not survive replay: the same delta applied to a differently
+	// filled order yields a different size.
+	NewQty int64 `json:"new_qty,omitempty"`
 }
 
 // Writer is an append-only, durable command log. It is safe for concurrent use,
@@ -98,6 +109,26 @@ func (w *Writer) AppendSubmit(o *types.Order) (int64, error) {
 // AppendCancel logs a Cancel(id, user).
 func (w *Writer) AppendCancel(orderID int64, userID string) (int64, error) {
 	return w.append(Entry{Kind: KindCancel, CancelID: orderID, UserID: userID})
+}
+
+// AppendReduce logs a Reduce(id, newQty, user). newQty is the new total quantity.
+//
+// A reduce mutates the book — it is not a control command the snapshot happens to
+// cover — so leaving it out of the log meant a restart resurrected the order at
+// its original size, silently and with no error anywhere.
+func (w *Writer) AppendReduce(orderID, newQty int64, userID string) (int64, error) {
+	return w.append(Entry{Kind: KindReduce, CancelID: orderID, NewQty: newQty, UserID: userID})
+}
+
+// AppendCancelAll logs a CancelAllForUser(user) — the operator kill switch.
+//
+// It records the intent rather than the orders it removed, which is what makes
+// replay correct: the log is written before the sweep, so at replay time the same
+// point in the command stream holds the same book and the sweep removes exactly
+// the same set. Logging the resulting ids instead would be logging an outcome and
+// hoping it still applies.
+func (w *Writer) AppendCancelAll(userID string) (int64, error) {
+	return w.append(Entry{Kind: KindCancelAll, UserID: userID})
 }
 
 // Sync flushes buffered records and fsyncs the file — the durability point. Call
@@ -182,9 +213,9 @@ func Restore(eng *matching.Engine, entries []Entry) {
 // double-books orders and corrupts the recovered state; too high and accepted
 // commands are dropped. Neither produces an error — just a different book.
 //
-// Orders are replayed fresh so the engine reassigns ids deterministically — a
-// cancel's recorded id therefore matches the replayed order. Cancels for
-// already-gone orders are ignored (idempotent under redelivery).
+// Orders are replayed fresh so the engine reassigns ids deterministically — the
+// id recorded by a cancel or a reduce therefore matches the replayed order.
+// Cancels for already-gone orders are ignored (idempotent under redelivery).
 //
 // Replay runs with the engine in replay mode (SetReplaying) so its live-ingress
 // admission controls — minimum resting time and the per-order size caps — do not
@@ -205,6 +236,14 @@ func RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64) {
 			}
 		case KindCancel:
 			_, _ = eng.Cancel(e.CancelID, e.UserID)
+		case KindReduce:
+			// Refusals are ignored for the same reason a cancel's are: the log is
+			// written write-ahead, so a command the engine went on to refuse is on
+			// disk too, and replay must refuse it identically rather than treat it
+			// as corruption.
+			_, _ = eng.Reduce(e.CancelID, e.NewQty, e.UserID)
+		case KindCancelAll:
+			eng.CancelAllForUser(e.UserID)
 		}
 	}
 }
