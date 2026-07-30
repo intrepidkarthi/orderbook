@@ -7,6 +7,49 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Published benchmark figures that did not reproduce.** Re-measured every number
+  in [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and the README on the stated hardware
+  (median of 5 runs, idle machine, `go1.23.5`), and corrected what disagreed. The
+  engine did not change; the documentation was wrong, in both directions.
+
+  - `OrderBook_Cancel` was published at 253 ns. Five runs gave 265–301 ns, median
+    273 — the old figure is outside the measured range. Now 273.
+  - `Runner.Process` was published at **4 allocs/op**; it is **3**. Checked against
+    the v0.11.0 tag to confirm this was a recording error rather than a change.
+  - "Group commit costs roughly an order of magnitude" — it costs **~30×**
+    (18,260 ns against 613 ns). "Syncing every command costs three further orders
+    of magnitude" — it costs **~210×**, not ~1000×.
+  - "`Checkpoint` is on the order of a millisecond" — it is **~0.3 ms** over a
+    5,000-order book.
+  - Tail latency p999 was published at 292 ns; five of six runs give **250 ns**.
+    The "p999 within ~3.5× of the median" claim becomes ~3×.
+  - Several figures were *conservative* rather than wrong (`BestBid`, `MatchInto`,
+    `Process`) and have been brought to their measured medians too, so the table is
+    internally consistent rather than a mix of vintages.
+
+- **"0 allocs/op" was being reported as stronger than it is.** Go computes that
+  column by integer division, so anything under 1.0 prints as `0` — which is how
+  `OrderBook_Cancel` could publish `0 allocs/op` and `41 B/op` on the same line
+  without the contradiction being visible.
+
+  Measured directly against `runtime.MemStats`, cancel allocates **0.0002**
+  objects/op and market-maker churn **0.009**, so the claim holds in substance —
+  but `Add` into a growing book allocates **1.05**, which is what "pooled" means
+  rather than "allocation-free". All three are now asserted by tests in
+  `pkg/orderbook/alloc_test.go`, including a floor on `Add`, so the claim can fail
+  instead of being a rounded-down column.
+
+- **A scope note that had gone stale.** Both the README and BENCHMARKS said the
+  figures exclude "any session or order-entry protocol — none of which exist in
+  this repository". Those layers have existed since v0.10.0 (`internal/wire`,
+  `pkg/orderentry`, `cmd/obgw`). They are still unmeasured, which was the real
+  point, and it is now stated that way.
+
+- `README.md` linked no protocol documentation, and described the release history
+  as "v0.1.0 → v0.8.0".
+
 ## [0.12.0] - 2026-07-30
 
 Completes the client's side of the order lifecycle, and repairs three things found

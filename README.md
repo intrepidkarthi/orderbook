@@ -64,7 +64,7 @@ you build on are correct, tested, and honest about their edges.
   floating-point on the money path.
 - **Low latency, zero allocation.** O(1) cancel, pooled book nodes and price
   levels, and a caller-buffer match path that allocates **0 B/op**. A realistic
-  cancel-heavy flow runs at **p50 83 ns · p99 167 ns · p999 292 ns** per
+  cancel-heavy flow runs at **p50 83 ns · p99 167 ns · p999 250 ns** per
   operation.
 - **Single-writer core.** One matching goroutine owns the book with no lock on
   the hot path (the LMAX model). A `Runner` fronts it with an MPSC command queue
@@ -191,36 +191,44 @@ goroutine. See [docs/INTEGRATION.md](docs/INTEGRATION.md).
 
 ## Performance
 
-Core-library microbenchmarks (Apple M-series, Go 1.23, single-threaded):
+Core-library microbenchmarks (Apple M4, `go1.23.5 darwin/arm64`, single-threaded):
 
 | Benchmark | ns/op | allocs/op | ~ops/sec |
 |---|---:|---:|---:|
-| Top-of-book read (`BestBid`) | 6.3 | 0 | ~160 M |
-| Cancel (drain) | 253 | 0 | ~4 M |
-| Cancel / replace (book) | 180 | 0 | ~5.5 M |
+| Top-of-book read (`BestBid`) | 5.8 | 0 | ~170 M |
+| Cancel (drain) | 273 | 0.0002 | ~3.7 M |
+| Cancel / replace (book) | 172 | 0.009 | ~5.8 M |
 | New price level (churn) | 292 | 0 | ~3.4 M |
-| Maker + taker match — `Match` (into caller buffer) | 352 | **0** | ~2.8 M |
-| Maker + taker match — `Process` (convenience wrapper) | 491 | 4 | ~2 M |
+| Maker + taker match — `Match` (into caller buffer) | 329 | **0** | ~3.0 M |
+| Maker + taker match — `Process` (convenience wrapper) | 419 | 4 | ~2.4 M |
+
+Median of 5 runs on an idle machine; ±10% run to run. The fractional allocation
+counts are deliberate: Go prints `allocs/op` as integer division, so "0" can mean
+anything under 1.0. Measured against `runtime.MemStats`, cancel really does allocate
+~0.0002 objects per operation — and `Add` into a growing book really does allocate
+1.05, which is what "pooled" means rather than "allocation-free".
 
 **What these numbers measure.** In-process calls into the matching core, and
 nothing else. `*types.Order` values are constructed before `b.ResetTimer()` and
-passed directly to the engine, so the figures exclude order allocation,
-decoding, validation at the API boundary, network I/O, and any session or
-protocol layer — none of which exist in this repository. They are a measure of
-the matching algorithm and its data structures, not of end-to-end order latency
-in a venue. Read them as a floor, and treat any real system built on this as
-strictly slower.
+passed directly to the engine, so the figures exclude order allocation, decoding,
+validation at the API boundary, network I/O, and the session and order-entry
+protocol layers. Those layers exist here (`internal/wire`, `pkg/orderentry`,
+`cmd/obgw`) and none of them is measured on this page. They are a measure of the
+matching algorithm and its data structures, not of end-to-end order latency in a
+venue. Read them as a floor, and treat any real system built on this as strictly
+slower.
 
 Tail latency on a realistic ~90%-cancel / 10%-new flow (`Match` / `Cancel`):
-**p50 83 ns · p99 167 ns · p999 292 ns**, 0 allocs/op — the p999 stays within
-~3.5× of the median. Absolute figures include `time.Now` overhead; the
-median-to-tail shape is the signal.
+**p50 83 ns · p99 167 ns · p999 250 ns**, 0 allocs/op — the p999 stays within ~3×
+of the median. Absolute figures include `time.Now` overhead; the median-to-tail
+shape is the signal.
 
 **These are the bare `Engine`.** Most embedders use the `Runner` (the
 concurrency-safe front), usually with a write-ahead log and an event sink. That
-path allocates 4 allocs/op rather than 0, and adding group-committed durability
-costs roughly an order of magnitude, dominated by `fsync`. The zero-allocation
-claim above is about `Match` into a caller buffer, not about the concurrent API.
+path allocates 3 allocs/op rather than 0, and adding group-committed durability
+costs ~30× — dominated by `fsync`, and syncing on every command instead costs a
+further ~210×. The zero-allocation claim above is about `Match` into a caller
+buffer, not about the concurrent API.
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md#the-durable-path) for the comparison
 and for why the durable figures are given as ratios rather than nanoseconds.
 
