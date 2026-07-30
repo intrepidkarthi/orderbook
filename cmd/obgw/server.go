@@ -450,6 +450,16 @@ func (sess *session) apply(payload []byte) {
 		sess.cancel(payload)
 	case wire.MsgReduce:
 		sess.reduce(payload)
+	case wire.MsgEnterStop:
+		sess.enterStop(payload)
+	case wire.MsgEnterOCO:
+		sess.enterOCO(payload)
+	case wire.MsgEnterIceberg:
+		sess.enterIceberg(payload)
+	case wire.MsgEnterPegged:
+		sess.enterPegged(payload)
+	case wire.MsgEnterTrailing:
+		sess.enterTrailing(payload)
 	case wire.MsgMassCancel:
 		sess.massCancel(payload)
 	case wire.MsgCancelOnDisconnect:
@@ -515,6 +525,216 @@ func (sess *session) enter(payload []byte) {
 		}
 		sess.reject(m.ClOrdID, reason)
 	}
+}
+
+// buildOrder turns a wire base-order block into an engine order, applying the same
+// rules Enter does: the account comes from the authenticated session and never from
+// the wire, and an order naming a different instrument is refused rather than being
+// booked here anyway.
+//
+// reason is non-zero when the order cannot be built, so each caller rejects with the
+// client's own id rather than a bare code.
+func (sess *session) buildOrder(b wire.BaseOrder) (*types.Order, uint16) {
+	if b.Symbol != sess.srv.cfg.Symbol {
+		return nil, orderentry.ReasonMalformed
+	}
+	side := types.SideBuy
+	if b.Side == wire.SideSell {
+		side = types.SideSell
+	}
+	otype := types.OrderTypeLimit
+	if b.Type == wire.TypeMarket {
+		otype = types.OrderTypeMarket
+	}
+	tif := types.TIFGoodTillCancel
+	switch b.TIF {
+	case wire.TIFImmediateOrCanc:
+		tif = types.TIFImmediateOrCancel
+	case wire.TIFFillOrKill:
+		tif = types.TIFFillOrKill
+	}
+	o, err := types.NewOrder(sess.account, sess.srv.cfg.Symbol, side, otype, b.Price, b.Quantity, tif)
+	if err != nil {
+		return nil, orderentry.ReasonMalformed
+	}
+	o.ClientOrderID = b.ClOrdID
+	o.PostOnly = b.PostOnly
+	return o, 0
+}
+
+// submitConditional applies the admission gate and enqueues, so every conditional
+// entry is rate-limited and backpressured exactly like a plain Enter. A path that
+// skipped the gate would be a way around the venue's own throttle.
+func (sess *session) submitConditional(clOrdID string, o *types.Order, enqueue func() error) {
+	if !sess.srv.gate.Allow(o, time.Now()) {
+		sess.reject(clOrdID, orderentry.ReasonThrottled)
+		return
+	}
+	if err := enqueue(); err != nil {
+		reason := orderentry.ReasonOverloaded
+		if errors.Is(err, matching.ErrShuttingDown) {
+			reason = orderentry.ReasonShuttingDown
+		}
+		sess.reject(clOrdID, reason)
+	}
+}
+
+// enterStop places a stop or stop-limit order.
+func (sess *session) enterStop(payload []byte) {
+	m, err := wire.DecodeEnterStop(payload)
+	if err != nil || m.Version != wire.Version {
+		sess.reject("", orderentry.ReasonMalformed)
+		return
+	}
+	o, reason := sess.buildOrder(m.Order)
+	if reason != 0 {
+		sess.reject(m.Order.ClOrdID, reason)
+		return
+	}
+	stop, err := types.NewStopOrder(o, m.StopPrice)
+	if err != nil {
+		// A non-positive stop price lands here. Refused rather than treated as
+		// "trigger now": an order that fires on arrival is a market order.
+		sess.reject(m.Order.ClOrdID, orderentry.ReasonMalformed)
+		return
+	}
+	sess.submitConditional(m.Order.ClOrdID, o, func() error {
+		return sess.srv.runner.TryEnqueueStop(stop)
+	})
+}
+
+// enterOCO places a primary order paired with a stop leg.
+func (sess *session) enterOCO(payload []byte) {
+	m, err := wire.DecodeEnterOCO(payload)
+	if err != nil || m.Version != wire.Version {
+		sess.reject("", orderentry.ReasonMalformed)
+		return
+	}
+	primary, reason := sess.buildOrder(m.Primary)
+	if reason != 0 {
+		sess.reject(m.Primary.ClOrdID, reason)
+		return
+	}
+	// The stop leg inherits symbol, side, quantity and TIF from the primary; only
+	// its own identifier and prices come off the wire. Legs of differing size would
+	// leave a residual position behind whichever fired.
+	leg := m.Primary
+	leg.ClOrdID = m.StopClOrdID
+	leg.Type = wire.TypeMarket
+	leg.Price = 0
+	if m.StopLimitPrice != 0 {
+		leg.Type = wire.TypeLimit
+		leg.Price = m.StopLimitPrice
+	}
+	stopOrder, reason := sess.buildOrder(leg)
+	if reason != 0 {
+		sess.reject(m.StopClOrdID, reason)
+		return
+	}
+	stop, err := types.NewStopOrder(stopOrder, m.StopPrice)
+	if err != nil {
+		sess.reject(m.StopClOrdID, orderentry.ReasonMalformed)
+		return
+	}
+	oco, err := types.NewOCOOrder(primary, stop)
+	if err != nil {
+		sess.reject(m.Primary.ClOrdID, orderentry.ReasonMalformed)
+		return
+	}
+	sess.submitConditional(m.Primary.ClOrdID, primary, func() error {
+		return sess.srv.runner.TryEnqueueOCO(oco)
+	})
+}
+
+// enterIceberg places an order that shows only a slice at a time.
+func (sess *session) enterIceberg(payload []byte) {
+	m, err := wire.DecodeEnterIceberg(payload)
+	if err != nil || m.Version != wire.Version {
+		sess.reject("", orderentry.ReasonMalformed)
+		return
+	}
+	o, reason := sess.buildOrder(m.Order)
+	if reason != 0 {
+		sess.reject(m.Order.ClOrdID, reason)
+		return
+	}
+	ib, err := types.NewIcebergOrder(o, m.DisplayQty)
+	if err != nil {
+		// A display size that is zero, negative, or larger than the total.
+		sess.reject(m.Order.ClOrdID, orderentry.ReasonInvalidQuantity)
+		return
+	}
+	sess.submitConditional(m.Order.ClOrdID, o, func() error {
+		return sess.srv.runner.TryEnqueueIceberg(ib)
+	})
+}
+
+// enterPegged places an order that tracks a reference price.
+func (sess *session) enterPegged(payload []byte) {
+	m, err := wire.DecodeEnterPegged(payload)
+	if err != nil || m.Version != wire.Version {
+		sess.reject("", orderentry.ReasonMalformed)
+		return
+	}
+	// The peg computes the price, so a client-supplied one is refused rather than
+	// silently overwritten — otherwise a client believes it set a price the venue
+	// then replaced.
+	if m.Order.Price != 0 {
+		sess.reject(m.Order.ClOrdID, orderentry.ReasonMalformed)
+		return
+	}
+	// The engine computes the price AND sets the type (ProcessPegged), so the order
+	// is built as a market order here: types.NewOrder refuses a limit order priced at
+	// zero, and zero is the only honest price to send for an order whose price the
+	// venue derives.
+	m.Order.Type = wire.TypeMarket
+	var ref types.PegReference
+	switch m.Ref {
+	case wire.PegBid:
+		ref = types.PegToBid
+	case wire.PegAsk:
+		ref = types.PegToAsk
+	case wire.PegMid:
+		ref = types.PegToMid
+	default:
+		sess.reject(m.Order.ClOrdID, orderentry.ReasonMalformed)
+		return
+	}
+	o, reason := sess.buildOrder(m.Order)
+	if reason != 0 {
+		sess.reject(m.Order.ClOrdID, reason)
+		return
+	}
+	pegged, err := types.NewPeggedOrder(o, ref, m.Offset)
+	if err != nil {
+		sess.reject(m.Order.ClOrdID, orderentry.ReasonMalformed)
+		return
+	}
+	sess.submitConditional(m.Order.ClOrdID, o, func() error {
+		return sess.srv.runner.TryEnqueuePegged(pegged)
+	})
+}
+
+// enterTrailing places a stop whose trigger follows the market.
+func (sess *session) enterTrailing(payload []byte) {
+	m, err := wire.DecodeEnterTrailing(payload)
+	if err != nil || m.Version != wire.Version {
+		sess.reject("", orderentry.ReasonMalformed)
+		return
+	}
+	o, reason := sess.buildOrder(m.Order)
+	if reason != 0 {
+		sess.reject(m.Order.ClOrdID, reason)
+		return
+	}
+	ts, err := types.NewTrailingStop(o, m.Trail)
+	if err != nil {
+		sess.reject(m.Order.ClOrdID, orderentry.ReasonMalformed)
+		return
+	}
+	sess.submitConditional(m.Order.ClOrdID, o, func() error {
+		return sess.srv.runner.TryEnqueueTrailing(ts)
+	})
 }
 
 func (sess *session) cancel(payload []byte) {

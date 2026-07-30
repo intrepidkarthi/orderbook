@@ -150,6 +150,51 @@ of your own orders.
 | Price | 8 | ticks; 0 for market |
 | Quantity | 8 | lots |
 
+**Conditional entry** — five messages, each carrying the same 56-byte base-order
+block as `Enter`'s body plus its own parameters:
+
+| Message | Type | Extra fields | Width |
+|---|---|---|---:|
+| **EnterStop** | `S` | StopPrice (8) | 66 |
+| **EnterIceberg** | `I` | DisplayQty (8) | 66 |
+| **EnterTrailing** | `W` | Trail (8) | 66 |
+| **EnterPegged** | `P` | Ref (1), Offset (8) | 67 |
+| **EnterOCO** | `O` | StopClOrdID (20), StopPrice (8), StopLimitPrice (8) | 94 |
+
+Base-order block: ClOrdID (20) + Symbol (16) + Side (1) + Type (1) + TIF (1) +
+PostOnly (1) + Price (8) + Quantity (8).
+
+The engine has supported all five since v0.5.0 and the wire could express none of
+them: a client could place a limit or a market order and nothing else. Four of the
+six order types the engine implements were reachable only by an embedder calling it
+in-process.
+
+**Each type has its own message rather than one message with a union of fields.** A
+single conditional message carrying StopPrice, DisplayQty, PegOffset and Trail would
+mean four fields of which three are meaningless on any given message, and a field
+that exists but is never checked is what the v0.11.0 audit spent its time removing.
+
+Notes that are load-bearing rather than decorative:
+
+- **A stop needs a positive trigger.** Zero would mean "fire on arrival", which is a
+  market order, and a client should have to say so.
+- **An OCO's stop leg inherits symbol, side, quantity and time-in-force from the
+  primary**; only its own ClOrdID and prices come off the wire. Legs of differing
+  size would leave a residual position behind whichever one fired, so the protocol
+  cannot express the mistake. `StopLimitPrice` 0 makes the leg a stop-market.
+- **A pegged order must send Price 0.** The peg computes the price, and a
+  client-supplied one is refused rather than silently overwritten — otherwise you
+  believe you set a price the venue replaced.
+- **An iceberg has no jitter field.** Reload-size jitter is venue policy, set from the
+  engine's own configuration, so a client value would be decoded and overwritten:
+  precisely the `Symbol` bug from v0.10.0.
+- **All five are rate-limited and journalled** exactly like a plain `Enter`. A
+  conditional path that skipped the admission gate would be a way around the venue's
+  throttle, and one that skipped the log would not survive a restart.
+
+`EnterStop`, `EnterIceberg` and `EnterTrailing` encode to the same 66 bytes and are
+separated by nothing but the type byte.
+
 **Cancel** — MsgType `C` (1) + Version (1) + ClOrdID (20).
 
 **Reduce** — MsgType `M` (1) + Version (1) + ClOrdID (20) + Quantity (8). Shrinks

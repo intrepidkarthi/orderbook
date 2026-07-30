@@ -423,3 +423,182 @@ func DecodeCODAck(src []byte) (CODAck, error) {
 	}
 	return CODAck{Version: src[1], Enabled: src[2] != 0}, nil
 }
+
+// --- conditional order entry ---
+//
+// All five conditional messages share the base-order block, so it is encoded and
+// decoded once here rather than five times. A per-message copy is how the five
+// layouts would silently drift apart.
+
+// putBase writes a BaseOrder block at b[0:BaseOrderLen].
+func putBase(b []byte, o BaseOrder) error {
+	if err := putFixed(b[0:ClOrdIDLen], o.ClOrdID); err != nil {
+		return err
+	}
+	off := ClOrdIDLen
+	if err := putFixed(b[off:off+SymbolLen], o.Symbol); err != nil {
+		return err
+	}
+	off += SymbolLen
+	b[off] = o.Side
+	b[off+1] = o.Type
+	b[off+2] = o.TIF
+	b[off+3] = putBool(o.PostOnly)
+	off += 4
+	binary.BigEndian.PutUint64(b[off:], uint64(o.Price))
+	binary.BigEndian.PutUint64(b[off+8:], uint64(o.Quantity))
+	return nil
+}
+
+// getBase reads a BaseOrder block from src[0:BaseOrderLen].
+func getBase(src []byte) BaseOrder {
+	off := ClOrdIDLen
+	o := BaseOrder{
+		ClOrdID: getFixed(src[0:ClOrdIDLen]),
+		Symbol:  getFixed(src[off : off+SymbolLen]),
+	}
+	off += SymbolLen
+	o.Side = src[off]
+	o.Type = src[off+1]
+	o.TIF = src[off+2]
+	o.PostOnly = src[off+3] != 0
+	off += 4
+	o.Price = int64(binary.BigEndian.Uint64(src[off:]))
+	o.Quantity = int64(binary.BigEndian.Uint64(src[off+8:]))
+	return o
+}
+
+// encodeConditional writes the common shape: header, base order, then width-8
+// trailing int64 fields in order.
+func encodeConditional(dst []byte, width int, msgType, version uint8, o BaseOrder, tail ...int64) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, width)...)
+	b := dst[base:]
+	off := header(b, msgType, version)
+	if err := putBase(b[off:], o); err != nil {
+		return nil, err
+	}
+	off += BaseOrderLen
+	for _, v := range tail {
+		binary.BigEndian.PutUint64(b[off:], uint64(v))
+		off += 8
+	}
+	return dst, nil
+}
+
+// EncodeEnterStop appends an EnterStop payload to dst.
+func EncodeEnterStop(dst []byte, m EnterStop) ([]byte, error) {
+	return encodeConditional(dst, EnterStopLen, MsgEnterStop, m.Version, m.Order, m.StopPrice)
+}
+
+// DecodeEnterStop reads an EnterStop payload from src.
+func DecodeEnterStop(src []byte) (EnterStop, error) {
+	if err := checkHeader(src, EnterStopLen, MsgEnterStop); err != nil {
+		return EnterStop{}, err
+	}
+	off := 2 + BaseOrderLen
+	return EnterStop{
+		Version:   src[1],
+		Order:     getBase(src[2:]),
+		StopPrice: int64(binary.BigEndian.Uint64(src[off:])),
+	}, nil
+}
+
+// EncodeEnterIceberg appends an EnterIceberg payload to dst.
+func EncodeEnterIceberg(dst []byte, m EnterIceberg) ([]byte, error) {
+	return encodeConditional(dst, EnterIcebergLen, MsgEnterIceberg, m.Version, m.Order, m.DisplayQty)
+}
+
+// DecodeEnterIceberg reads an EnterIceberg payload from src.
+func DecodeEnterIceberg(src []byte) (EnterIceberg, error) {
+	if err := checkHeader(src, EnterIcebergLen, MsgEnterIceberg); err != nil {
+		return EnterIceberg{}, err
+	}
+	off := 2 + BaseOrderLen
+	return EnterIceberg{
+		Version:    src[1],
+		Order:      getBase(src[2:]),
+		DisplayQty: int64(binary.BigEndian.Uint64(src[off:])),
+	}, nil
+}
+
+// EncodeEnterTrailing appends an EnterTrailing payload to dst.
+func EncodeEnterTrailing(dst []byte, m EnterTrailing) ([]byte, error) {
+	return encodeConditional(dst, EnterTrailingLen, MsgEnterTrailing, m.Version, m.Order, m.Trail)
+}
+
+// DecodeEnterTrailing reads an EnterTrailing payload from src.
+func DecodeEnterTrailing(src []byte) (EnterTrailing, error) {
+	if err := checkHeader(src, EnterTrailingLen, MsgEnterTrailing); err != nil {
+		return EnterTrailing{}, err
+	}
+	off := 2 + BaseOrderLen
+	return EnterTrailing{
+		Version: src[1],
+		Order:   getBase(src[2:]),
+		Trail:   int64(binary.BigEndian.Uint64(src[off:])),
+	}, nil
+}
+
+// EncodeEnterPegged appends an EnterPegged payload to dst.
+func EncodeEnterPegged(dst []byte, m EnterPegged) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, EnterPeggedLen)...)
+	b := dst[base:]
+	off := header(b, MsgEnterPegged, m.Version)
+	if err := putBase(b[off:], m.Order); err != nil {
+		return nil, err
+	}
+	off += BaseOrderLen
+	b[off] = m.Ref
+	binary.BigEndian.PutUint64(b[off+1:], uint64(m.Offset))
+	return dst, nil
+}
+
+// DecodeEnterPegged reads an EnterPegged payload from src.
+func DecodeEnterPegged(src []byte) (EnterPegged, error) {
+	if err := checkHeader(src, EnterPeggedLen, MsgEnterPegged); err != nil {
+		return EnterPegged{}, err
+	}
+	off := 2 + BaseOrderLen
+	return EnterPegged{
+		Version: src[1],
+		Order:   getBase(src[2:]),
+		Ref:     src[off],
+		Offset:  int64(binary.BigEndian.Uint64(src[off+1:])),
+	}, nil
+}
+
+// EncodeEnterOCO appends an EnterOCO payload to dst.
+func EncodeEnterOCO(dst []byte, m EnterOCO) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, EnterOCOLen)...)
+	b := dst[base:]
+	off := header(b, MsgEnterOCO, m.Version)
+	if err := putBase(b[off:], m.Primary); err != nil {
+		return nil, err
+	}
+	off += BaseOrderLen
+	if err := putFixed(b[off:off+ClOrdIDLen], m.StopClOrdID); err != nil {
+		return nil, err
+	}
+	off += ClOrdIDLen
+	binary.BigEndian.PutUint64(b[off:], uint64(m.StopPrice))
+	binary.BigEndian.PutUint64(b[off+8:], uint64(m.StopLimitPrice))
+	return dst, nil
+}
+
+// DecodeEnterOCO reads an EnterOCO payload from src.
+func DecodeEnterOCO(src []byte) (EnterOCO, error) {
+	if err := checkHeader(src, EnterOCOLen, MsgEnterOCO); err != nil {
+		return EnterOCO{}, err
+	}
+	off := 2 + BaseOrderLen
+	return EnterOCO{
+		Version:        src[1],
+		Primary:        getBase(src[2:]),
+		StopClOrdID:    getFixed(src[off : off+ClOrdIDLen]),
+		StopPrice:      int64(binary.BigEndian.Uint64(src[off+ClOrdIDLen:])),
+		StopLimitPrice: int64(binary.BigEndian.Uint64(src[off+ClOrdIDLen+8:])),
+	}, nil
+}

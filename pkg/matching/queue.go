@@ -21,6 +21,7 @@ const (
 	cmdCancelAll
 	cmdReduce
 	cmdOpenOrders
+	cmdTrailingCount
 	cmdCheckpoint
 )
 
@@ -48,5 +49,6 @@ type cmdReply struct {
 	match  *MatchResult
 	order  *types.Order
 	orders []*types.Order
+	count  int
 	err    error
 }

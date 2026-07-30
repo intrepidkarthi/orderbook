@@ -2,9 +2,9 @@
 // persistence for the matching engine — the crash-recovery storage backend.
 //
 // It records the ordered *command* stream to disk — every command that mutates
-// the book, which means submits, cancels, reduces and the operator's account-wide
-// cancel. A fresh engine replays the log — optionally starting from a snapshot —
-// to reach identical book state, the same recovery contract LMAX (journal +
+// the book: submits, cancels, reduces, the operator's account-wide cancel, and the
+// conditional order types (stop, OCO, iceberg, pegged, trailing). A fresh engine
+// replays the log — optionally starting from a snapshot — to reach identical book state, the same recovery contract LMAX (journal +
 // snapshot + replay) and Binance (hourly snapshot + sequential replay) rely on.
 // Recovery is bounded to O(recent) by snapshotting and replaying only the WAL tail
 // after the snapshot's sequence.
@@ -45,6 +45,11 @@ const (
 	KindCancel                         // a Cancel(id, user)
 	KindReduce                         // a Reduce(id, newQty, user)
 	KindCancelAll                      // a CancelAllForUser(user)
+	KindStop                           // a ProcessStop(stop)
+	KindOCO                            // a ProcessOCO(oco)
+	KindIceberg                        // a ProcessIceberg(iceberg)
+	KindPegged                         // a ProcessPegged(pegged)
+	KindTrailing                       // a ProcessTrailingStop(trailing)
 )
 
 // Entry is one durable command-log record.
@@ -62,6 +67,17 @@ type Entry struct {
 	// A delta would not survive replay: the same delta applied to a differently
 	// filled order yields a different size.
 	NewQty int64 `json:"new_qty,omitempty"`
+
+	// Conditional-order parameters. Each is meaningful for exactly one Kind; the
+	// alternative — an Entry per order type — would duplicate the Order field five
+	// times for no gain, since the wrapper types are a base order plus one or two
+	// scalars.
+	StopPrice  int64        `json:"stop_price,omitempty"`  // KindStop, KindOCO
+	StopOrder  *types.Order `json:"stop_order,omitempty"`  // KindOCO: the stop leg
+	DisplayQty int64        `json:"display_qty,omitempty"` // KindIceberg
+	PegRef     string       `json:"peg_ref,omitempty"`     // KindPegged
+	PegOffset  int64        `json:"peg_offset,omitempty"`  // KindPegged
+	Trail      int64        `json:"trail,omitempty"`       // KindTrailing
 }
 
 // Header, record framing and the bounds that make a corrupt file safe to read.
@@ -243,6 +259,50 @@ func (w *Writer) AppendCancelAll(userID string) (int64, error) {
 	return w.append(Entry{Kind: KindCancelAll, UserID: userID})
 }
 
+// AppendStop logs a ProcessStop. The trigger price is recorded alongside the order,
+// because replaying the order without it would rest a plain order that never fires.
+func (w *Writer) AppendStop(s *types.StopOrder) (int64, error) {
+	if s == nil {
+		return w.Seq(), nil
+	}
+	return w.append(Entry{Kind: KindStop, Order: s.Order, StopPrice: s.StopPrice})
+}
+
+// AppendOCO logs a ProcessOCO. Both legs are recorded: replaying only the primary
+// would leave a position with no stop behind it, which is the opposite of what the
+// client asked for.
+func (w *Writer) AppendOCO(o *types.OCOOrder) (int64, error) {
+	if o == nil || o.Stop == nil {
+		return w.Seq(), nil
+	}
+	return w.append(Entry{Kind: KindOCO, Order: o.Primary, StopOrder: o.Stop.Order, StopPrice: o.Stop.StopPrice})
+}
+
+// AppendIceberg logs a ProcessIceberg. Order.Quantity is the total and DisplayQty the
+// slice; without the slice size a replay would show the whole reserve.
+func (w *Writer) AppendIceberg(ib *types.IcebergOrder) (int64, error) {
+	if ib == nil {
+		return w.Seq(), nil
+	}
+	return w.append(Entry{Kind: KindIceberg, Order: ib.Order, DisplayQty: ib.DisplayQty})
+}
+
+// AppendPegged logs a ProcessPegged.
+func (w *Writer) AppendPegged(p *types.PeggedOrder) (int64, error) {
+	if p == nil {
+		return w.Seq(), nil
+	}
+	return w.append(Entry{Kind: KindPegged, Order: p.Order, PegRef: string(p.Ref), PegOffset: p.Offset})
+}
+
+// AppendTrailing logs a ProcessTrailingStop.
+func (w *Writer) AppendTrailing(ts *types.TrailingStop) (int64, error) {
+	if ts == nil {
+		return w.Seq(), nil
+	}
+	return w.append(Entry{Kind: KindTrailing, Order: ts.Order, Trail: ts.Trail})
+}
+
 // Sync flushes buffered records and fsyncs the file — the durability point. Call
 // it before acknowledging the commands since the last Sync (group commit).
 func (w *Writer) Sync() error {
@@ -398,6 +458,33 @@ func RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64) {
 			_, _ = eng.Reduce(e.CancelID, e.NewQty, e.UserID)
 		case KindCancelAll:
 			eng.CancelAllForUser(e.UserID)
+		case KindStop:
+			if s, err := types.NewStopOrder(e.Order.Fresh(), e.StopPrice); err == nil {
+				eng.ProcessStop(s)
+			}
+		case KindOCO:
+			if e.StopOrder == nil {
+				continue
+			}
+			s, err := types.NewStopOrder(e.StopOrder.Fresh(), e.StopPrice)
+			if err != nil {
+				continue
+			}
+			if o, err := types.NewOCOOrder(e.Order.Fresh(), s); err == nil {
+				eng.ProcessOCO(o)
+			}
+		case KindIceberg:
+			if ib, err := types.NewIcebergOrder(e.Order.Fresh(), e.DisplayQty); err == nil {
+				eng.ProcessIceberg(ib)
+			}
+		case KindPegged:
+			if p, err := types.NewPeggedOrder(e.Order.Fresh(), types.PegReference(e.PegRef), e.PegOffset); err == nil {
+				eng.ProcessPegged(p)
+			}
+		case KindTrailing:
+			if ts, err := types.NewTrailingStop(e.Order.Fresh(), e.Trail); err == nil {
+				eng.ProcessTrailingStop(ts)
+			}
 		}
 	}
 }

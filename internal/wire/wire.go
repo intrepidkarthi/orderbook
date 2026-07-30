@@ -66,6 +66,11 @@ const (
 	MsgCancel             uint8 = 'C' // inbound: cancel by ClOrdID
 	MsgQuery              uint8 = 'Q' // inbound: report my open orders
 	MsgReduce             uint8 = 'M' // inbound: shrink a resting order, keeping queue position
+	MsgEnterStop          uint8 = 'S' // inbound: stop / stop-limit order
+	MsgEnterOCO           uint8 = 'O' // inbound: one-cancels-other pair
+	MsgEnterIceberg       uint8 = 'I' // inbound: iceberg (reserve) order
+	MsgEnterPegged        uint8 = 'P' // inbound: order pegged to bid/ask/mid
+	MsgEnterTrailing      uint8 = 'W' // inbound: trailing stop
 	MsgMassCancel         uint8 = 'F' // inbound: cancel everything I have resting
 	MsgCancelOnDisconnect uint8 = 'B' // inbound: pull my book if this session drops
 
@@ -170,6 +175,134 @@ type Cancel struct {
 
 // CancelLen is the encoded width of a Cancel payload.
 const CancelLen = 1 + 1 + ClOrdIDLen
+
+// --- conditional orders ---
+//
+// The engine has supported stop, stop-limit, OCO, iceberg, pegged and
+// trailing-stop orders since v0.5.0, and until now the wire could express two of
+// the six: a client could place a limit or a market order and nothing else. Four
+// order types were reachable only by an embedder calling the engine in-process,
+// which is the same shape of gap as Reduce before v0.12.0 — a real, tested,
+// durable capability with no way for a client to ask for it.
+//
+// Each type gets its OWN message rather than one message with a union of fields.
+// A single EnterConditional carrying StopPrice, DisplayQty, PegOffset and a trail
+// distance would mean four fields of which three are meaningless on any given
+// message, and "a field that exists but is never checked" is exactly what the
+// v0.11.0 audit spent its time removing. Five messages cost more code and no
+// ambiguity.
+//
+// All five share the same 56-byte base-order block (BaseOrderLen) as Enter's body,
+// so the fields a client already knows how to fill mean the same thing here.
+//
+// Three of them encode to the same width and are separated by nothing but the type
+// byte, which is the fourth time that byte has earned its version bump.
+
+// BaseOrder is the order description shared by Enter and every conditional entry:
+// the fields that describe an order regardless of what triggers it.
+type BaseOrder struct {
+	ClOrdID  string
+	Symbol   string
+	Side     uint8
+	Type     uint8
+	TIF      uint8
+	PostOnly bool
+	Price    int64 // ticks; 0 for market
+	Quantity int64 // lots
+}
+
+// BaseOrderLen is the encoded width of a BaseOrder block.
+const BaseOrderLen = ClOrdIDLen + SymbolLen + 1 + 1 + 1 + 1 + 8 + 8
+
+// EnterStop is a stop or stop-limit order. It rests off the book until the last
+// trade price reaches StopPrice, then enters as Type: 'M' for a stop-market, or
+// 'L' with Price as the limit for a stop-limit.
+//
+// StopPrice must be positive; the engine refuses zero rather than treating it as
+// "trigger immediately", because an order that fires the instant it arrives is a
+// market order and the client should say so.
+type EnterStop struct {
+	Version   uint8
+	Order     BaseOrder
+	StopPrice int64
+}
+
+// EnterStopLen is the encoded width of an EnterStop payload.
+const EnterStopLen = 1 + 1 + BaseOrderLen + 8
+
+// EnterOCO pairs a primary order with a stop leg: fill one and the other is pulled.
+// The classic use is a take-profit limit alongside a stop-loss on the same position.
+//
+// The stop leg carries only its own ClOrdID and prices; it **inherits symbol, side,
+// quantity and time-in-force from the primary**. That is deliberate rather than
+// lazy: legs with different quantities would leave a residual position behind
+// whichever one fired, which is never what an OCO is for, and a protocol that
+// cannot express the mistake is better than one that documents it.
+//
+// StopLimitPrice is the limit the stop leg enters at, or 0 for a stop-market leg.
+type EnterOCO struct {
+	Version        uint8
+	Primary        BaseOrder
+	StopClOrdID    string
+	StopPrice      int64
+	StopLimitPrice int64
+}
+
+// EnterOCOLen is the encoded width of an EnterOCO payload.
+const EnterOCOLen = 1 + 1 + BaseOrderLen + ClOrdIDLen + 8 + 8
+
+// EnterIceberg shows DisplayQty at a time and refills from the reserve as slices
+// fill. Order.Quantity is the TOTAL size, matching the engine.
+//
+// There is deliberately no jitter field. The engine sets reload-size jitter from
+// its own configuration (anti-fingerprinting is venue policy), so a client-supplied
+// value would be decoded and overwritten — the precise bug the v0.11.0 audit found
+// in Symbol.
+type EnterIceberg struct {
+	Version    uint8
+	Order      BaseOrder
+	DisplayQty int64
+}
+
+// EnterIcebergLen is the encoded width of an EnterIceberg payload.
+const EnterIcebergLen = 1 + 1 + BaseOrderLen + 8
+
+// EnterPegged tracks a reference price at a fixed offset in ticks. Ref is PegBid,
+// PegAsk or PegMid. Offset is signed: negative sits inside the reference, positive
+// outside.
+//
+// Order.Price is ignored — the peg computes it — and is refused if non-zero rather
+// than silently overwritten, so a client cannot believe it set a price that the
+// venue then replaced.
+type EnterPegged struct {
+	Version uint8
+	Order   BaseOrder
+	Ref     uint8
+	Offset  int64
+}
+
+// EnterPeggedLen is the encoded width of an EnterPegged payload.
+const EnterPeggedLen = 1 + 1 + BaseOrderLen + 1 + 8
+
+// EnterTrailing is a stop whose trigger follows the market by Trail ticks, ratcheting
+// in the favourable direction only. Trail must be positive.
+type EnterTrailing struct {
+	Version uint8
+	Order   BaseOrder
+	Trail   int64
+}
+
+// EnterTrailingLen is the encoded width of an EnterTrailing payload.
+const EnterTrailingLen = 1 + 1 + BaseOrderLen + 8
+
+// Peg references, as single bytes. types.PegReference is a string ("BID"/"ASK"/
+// "MID"); the wire uses a byte because a fixed-width record cannot carry a string
+// without padding it, and the gateway maps between them.
+const (
+	PegBid uint8 = 'B'
+	PegAsk uint8 = 'A'
+	PegMid uint8 = 'M'
+)
 
 // Reduce shrinks a resting order in place, keeping its queue position. It is the
 // one order-entry operation a client provably cannot build for itself:

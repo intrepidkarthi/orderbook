@@ -392,8 +392,38 @@ func goldenCases(t *testing.T) map[string][]byte {
 			Side: SideBuy, Type: TypeLimit, TIF: TIFGoodTillCancel,
 			PostOnly: true, Price: 2000, Quantity: 1,
 		})),
-		"cancel":    must(EncodeCancel(nil, Cancel{Version: Version, ClOrdID: "cl-1"})),
-		"reduce":    must(EncodeReduce(nil, Reduce{Version: Version, ClOrdID: "cl-1", Quantity: 40})),
+		"cancel": must(EncodeCancel(nil, Cancel{Version: Version, ClOrdID: "cl-1"})),
+		"reduce": must(EncodeReduce(nil, Reduce{Version: Version, ClOrdID: "cl-1", Quantity: 40})),
+		"enter_stop": must(EncodeEnterStop(nil, EnterStop{
+			Version: Version,
+			Order: BaseOrder{ClOrdID: "cl-s", Symbol: "BTC-USD", Side: SideSell, Type: TypeMarket,
+				TIF: TIFGoodTillCancel, Price: 0, Quantity: 5},
+			StopPrice: 29000,
+		})),
+		"enter_oco": must(EncodeEnterOCO(nil, EnterOCO{
+			Version: Version,
+			Primary: BaseOrder{ClOrdID: "cl-tp", Symbol: "BTC-USD", Side: SideSell, Type: TypeLimit,
+				TIF: TIFGoodTillCancel, Price: 31000, Quantity: 5},
+			StopClOrdID: "cl-sl", StopPrice: 29000, StopLimitPrice: 0,
+		})),
+		"enter_iceberg": must(EncodeEnterIceberg(nil, EnterIceberg{
+			Version: Version,
+			Order: BaseOrder{ClOrdID: "cl-i", Symbol: "BTC-USD", Side: SideBuy, Type: TypeLimit,
+				TIF: TIFGoodTillCancel, Price: 30000, Quantity: 500},
+			DisplayQty: 50,
+		})),
+		"enter_pegged": must(EncodeEnterPegged(nil, EnterPegged{
+			Version: Version,
+			Order: BaseOrder{ClOrdID: "cl-p", Symbol: "BTC-USD", Side: SideBuy, Type: TypeMarket,
+				TIF: TIFGoodTillCancel, Price: 0, Quantity: 10},
+			Ref: PegBid, Offset: -1,
+		})),
+		"enter_trailing": must(EncodeEnterTrailing(nil, EnterTrailing{
+			Version: Version,
+			Order: BaseOrder{ClOrdID: "cl-t", Symbol: "BTC-USD", Side: SideSell, Type: TypeMarket,
+				TIF: TIFGoodTillCancel, Price: 0, Quantity: 8},
+			Trail: 25,
+		})),
 		"accepted":  must(EncodeAccepted(nil, Accepted{Version: Version, ClOrdID: "cl-1", Price: 30000, Quantity: 250, Side: SideBuy})),
 		"rejected":  must(EncodeRejected(nil, Rejected{Version: Version, ClOrdID: "cl-1", Reason: ReasonPriceBand})),
 		"executed":  must(EncodeExecuted(nil, Executed{Version: Version, ClOrdID: "cl-1", Price: 30000, Quantity: 100, LeavesQty: 150, Aggressor: SideSell})),
@@ -499,5 +529,87 @@ func TestMassCancelAndCODRoundTrips(t *testing.T) {
 		if _, err := DecodeCODAck(cb); !errors.Is(err, ErrBadType) {
 			t.Errorf("a CancelOnDisconnect decoded as a CODAck: err = %v", err)
 		}
+	}
+}
+
+// TestConditionalRoundTrips covers the five order types the wire could not express
+// before. Three of them encode to the same width, so the type byte is again the only
+// thing keeping them apart.
+func TestConditionalRoundTrips(t *testing.T) {
+	// Derived from the field lists by hand: 2 header + 56 base + extras.
+	if BaseOrderLen != 56 {
+		t.Errorf("BaseOrderLen = %d, want 56", BaseOrderLen)
+	}
+	for name, got := range map[string]int{
+		"EnterStop": EnterStopLen, "EnterIceberg": EnterIcebergLen, "EnterTrailing": EnterTrailingLen,
+	} {
+		if got != 66 {
+			t.Errorf("%s = %d, want 66", name, got)
+		}
+	}
+	if EnterPeggedLen != 67 {
+		t.Errorf("EnterPeggedLen = %d, want 67", EnterPeggedLen)
+	}
+	if EnterOCOLen != 94 {
+		t.Errorf("EnterOCOLen = %d, want 94", EnterOCOLen)
+	}
+
+	base := BaseOrder{ClOrdID: "cl-1", Symbol: "BTC-USD", Side: SideSell, Type: TypeMarket,
+		TIF: TIFImmediateOrCanc, PostOnly: true, Price: 0, Quantity: 7}
+
+	st := EnterStop{Version: Version, Order: base, StopPrice: 123}
+	sb, err := EncodeEnterStop(nil, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeEnterStop(sb); err != nil || got != st {
+		t.Errorf("stop: got %+v err %v", got, err)
+	}
+
+	ib := EnterIceberg{Version: Version, Order: base, DisplayQty: 3}
+	ibb, err := EncodeEnterIceberg(nil, ib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeEnterIceberg(ibb); err != nil || got != ib {
+		t.Errorf("iceberg: got %+v err %v", got, err)
+	}
+
+	ts := EnterTrailing{Version: Version, Order: base, Trail: 9}
+	tb, err := EncodeEnterTrailing(nil, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeEnterTrailing(tb); err != nil || got != ts {
+		t.Errorf("trailing: got %+v err %v", got, err)
+	}
+
+	// The three share a width. Each must refuse the other two.
+	if _, err := DecodeEnterIceberg(sb); !errors.Is(err, ErrBadType) {
+		t.Errorf("a stop decoded as an iceberg: %v", err)
+	}
+	if _, err := DecodeEnterTrailing(ibb); !errors.Is(err, ErrBadType) {
+		t.Errorf("an iceberg decoded as a trailing stop: %v", err)
+	}
+	if _, err := DecodeEnterStop(tb); !errors.Is(err, ErrBadType) {
+		t.Errorf("a trailing stop decoded as a stop: %v", err)
+	}
+
+	pg := EnterPegged{Version: Version, Order: base, Ref: PegMid, Offset: -4}
+	pb, err := EncodeEnterPegged(nil, pg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeEnterPegged(pb); err != nil || got != pg {
+		t.Errorf("pegged: got %+v err %v", got, err)
+	}
+
+	oco := EnterOCO{Version: Version, Primary: base, StopClOrdID: "cl-2", StopPrice: 50, StopLimitPrice: 49}
+	ob, err := EncodeEnterOCO(nil, oco)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeEnterOCO(ob); err != nil || got != oco {
+		t.Errorf("oco: got %+v err %v", got, err)
 	}
 }

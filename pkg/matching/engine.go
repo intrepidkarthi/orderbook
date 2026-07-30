@@ -1786,6 +1786,9 @@ func (e *Engine) StopBook() *orderbook.StopBook { return e.stopBook }
 func (e *Engine) PendingStopCount() int { return e.stopBook.Count() }
 
 // TrailingStopCount returns the number of resting trailing stops.
+// It must be called from the goroutine that owns the engine: trailing stops live in
+// a plain map with no lock of its own, unlike the book and stop book. Use
+// Runner.TrailingStopCount from anywhere else.
 func (e *Engine) TrailingStopCount() int {
 	return len(e.trailingStops)
 }

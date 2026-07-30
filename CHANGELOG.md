@@ -38,6 +38,32 @@ versions may include breaking changes).
 
 ### Added
 
+- **Conditional orders on the wire: stop, stop-limit, OCO, iceberg, pegged and
+  trailing.** The engine has supported all of them since v0.5.0 and the protocol
+  could express none: a client could place a limit or a market order and nothing
+  else, so four of the six order types the engine implements were reachable only by
+  an embedder calling it in-process. Same shape of gap as `Reduce` before v0.12.0 —
+  real, tested capability with no way for a client to ask for it.
+
+  Five messages (`EnterStop` `S`, `EnterOCO` `O`, `EnterIceberg` `I`, `EnterPegged`
+  `P`, `EnterTrailing` `W`), each carrying the same 56-byte base-order block as
+  `Enter`'s body plus its own parameters, rather than one message with a union of
+  fields — three meaningless fields per message is what the v0.11.0 audit spent its
+  time removing.
+
+  Design points worth stating: an OCO's stop leg inherits symbol, side, quantity and
+  TIF from the primary, so legs of differing size (which would leave a residual
+  position behind whichever fired) are not expressible; a pegged order must send
+  price 0 and is refused otherwise, rather than having a price it supplied silently
+  overwritten; and an iceberg carries no jitter field, because reload-size jitter is
+  set from the engine's own configuration and a client value would be decoded and
+  discarded — the exact `Symbol` bug from v0.10.0.
+
+- `Runner.TryEnqueueStop` / `TryEnqueueOCO` / `TryEnqueueIceberg` /
+  `TryEnqueuePegged` / `TryEnqueueTrailing`, and `Runner.TrailingStopCount`. The
+  conditional types had synchronous entry points only, which a network ingress must
+  not use: those hand back the engine-owned order.
+
 - **Mass cancel on the wire.** `MassCancel` / `MassCancelAck` (`F` / `G`).
   `Engine.CancelAllForUser` has existed since v0.9.0 with no way for a client to
   invoke it, which is the difference between a venue you can test against and one you
@@ -65,6 +91,25 @@ vector is byte-identical. `MassCancel` shares `Query`'s exact layout and
 the third time that has paid for itself.
 
 ### Fixed
+
+- **The conditional order types were never written to the log.** `cmdStop`,
+  `cmdOCO`, `cmdIceberg`, `cmdPegged` and `cmdTrailing` all mutate the book and none
+  of them reached `CommandLog`, so a stop or iceberg entered after the last
+  checkpoint did not survive a restart. Snapshots captured them (v0.9.0 fixed that);
+  the log tail did not.
+
+  Invisible while those commands were reachable only in-process, and about to become
+  client-facing. `CommandLog` gains five methods, the log five entry kinds, and
+  replay reconstructs each wrapper from its recorded parameters. The `countingLog`
+  test double implements the whole interface deliberately, so adding a mutating
+  command without logging it fails to compile — which is how this was caught.
+
+- **`Engine.TrailingStopCount` was unsafe to call from another goroutine**, and a
+  `Runner` accessor briefly exposed it as if it were not. The other read accessors
+  delegate to the book and stop book, which carry their own locks; trailing stops
+  live in a plain map owned by the matching goroutine. `Runner.TrailingStopCount`
+  now goes through the command queue, and the engine method documents its
+  single-writer requirement. The race detector caught it.
 
 - **`QueryEnd.Seq` asserted a boundary the client had not reached.** Draining the
   publisher only moves events into the account's *stream*; the connection receives

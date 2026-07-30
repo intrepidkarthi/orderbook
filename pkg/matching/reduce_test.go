@@ -391,8 +391,9 @@ func TestReduceIsWrittenToTheLog(t *testing.T) {
 // interface rather than embedding a partial one, so adding a mutating command
 // without logging it fails to compile here.
 type countingLog struct {
-	submits, cancels, reduces, cancelAlls int
-	seq                                   int64
+	submits, cancels, reduces, cancelAlls     int
+	stops, ocos, icebergs, peggeds, trailings int
+	seq                                       int64
 }
 
 func (l *countingLog) next() (int64, error) { l.seq++; return l.seq, nil }
@@ -404,3 +405,19 @@ func (l *countingLog) AppendCancel(int64, string) (int64, error) { l.cancels++; 
 func (l *countingLog) AppendReduce(int64, int64, string) (int64, error) { l.reduces++; return l.next() }
 
 func (l *countingLog) AppendCancelAll(string) (int64, error) { l.cancelAlls++; return l.next() }
+
+func (l *countingLog) AppendStop(*types.StopOrder) (int64, error) { l.stops++; return l.next() }
+
+func (l *countingLog) AppendOCO(*types.OCOOrder) (int64, error) { l.ocos++; return l.next() }
+
+func (l *countingLog) AppendIceberg(*types.IcebergOrder) (int64, error) {
+	l.icebergs++
+	return l.next()
+}
+
+func (l *countingLog) AppendPegged(*types.PeggedOrder) (int64, error) { l.peggeds++; return l.next() }
+
+func (l *countingLog) AppendTrailing(*types.TrailingStop) (int64, error) {
+	l.trailings++
+	return l.next()
+}

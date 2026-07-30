@@ -77,6 +77,11 @@ type CommandLog interface {
 	AppendCancel(orderID int64, userID string) (int64, error)
 	AppendReduce(orderID, newQty int64, userID string) (int64, error)
 	AppendCancelAll(userID string) (int64, error)
+	AppendStop(s *types.StopOrder) (int64, error)
+	AppendOCO(o *types.OCOOrder) (int64, error)
+	AppendIceberg(ib *types.IcebergOrder) (int64, error)
+	AppendPegged(p *types.PeggedOrder) (int64, error)
+	AppendTrailing(ts *types.TrailingStop) (int64, error)
 }
 
 // RunnerConfig configures a Runner.
@@ -186,6 +191,8 @@ func (r *Runner) dispatch(cmd command) {
 		rep.orders = r.engine.CancelAllForUser(cmd.userID)
 	case cmdOpenOrders:
 		rep.orders = r.engine.OpenOrdersFor(cmd.userID)
+	case cmdTrailingCount:
+		rep.count = r.engine.TrailingStopCount()
 	case cmdCheckpoint:
 		snap := r.engine.TakeSnapshot()
 		snap.WALSeq = r.lastApplied
@@ -217,6 +224,16 @@ func (r *Runner) logCommand(cmd command) {
 		seq, err = r.log.AppendReduce(cmd.cancelID, cmd.reduceQty, cmd.userID)
 	case cmdCancelAll:
 		seq, err = r.log.AppendCancelAll(cmd.userID)
+	case cmdStop:
+		seq, err = r.log.AppendStop(cmd.stop)
+	case cmdOCO:
+		seq, err = r.log.AppendOCO(cmd.oco)
+	case cmdIceberg:
+		seq, err = r.log.AppendIceberg(cmd.iceberg)
+	case cmdPegged:
+		seq, err = r.log.AppendPegged(cmd.pegged)
+	case cmdTrailing:
+		seq, err = r.log.AppendTrailing(cmd.trailing)
 	default:
 		return // control commands carry no book state; the snapshot covers them
 	}
@@ -652,6 +669,23 @@ func (r *Runner) OrderCount() int { return r.engine.OrderCount() }
 // PendingStopCount returns the number of resting stop orders.
 func (r *Runner) PendingStopCount() int { return r.engine.PendingStopCount() }
 
+// TrailingStopCount returns the number of resting trailing stops. They are held
+// separately from the stop book — a trailing stop has no fixed trigger price to key
+// on until the market has moved — so PendingStopCount does not include them.
+//
+// Unlike the other read accessors this goes through the command queue rather than
+// straight to the engine. Those delegate to the book and stop book, which carry
+// their own locks; trailing stops live in a plain map owned by the matching
+// goroutine, so reading it from a caller's goroutine is a data race. The race
+// detector caught exactly that when this was first written as a direct delegation.
+func (r *Runner) TrailingStopCount() int {
+	rep, ok := r.send(command{kind: cmdTrailingCount})
+	if !ok {
+		return 0
+	}
+	return rep.count
+}
+
 // Snapshot returns a top-of-book view to the given depth.
 func (r *Runner) Snapshot(depth int) *orderbook.Snapshot { return r.engine.Snapshot(depth) }
 
@@ -667,4 +701,36 @@ func (r *Runner) Snapshot(depth int) *orderbook.Snapshot { return r.engine.Snaps
 func (r *Runner) Close() {
 	r.once.Do(func() { close(r.quit) })
 	<-r.done
+}
+
+// --- fire-and-forget conditional submission ---
+//
+// The conditional order types had synchronous entry points only, which a network
+// ingress must not use: those hand back the engine-owned order, and a connection
+// goroutine reading any field of it races the matcher. These are the TryEnqueue
+// counterparts, added when the wire learned to carry these order types.
+
+// TryEnqueueStop is the stop/stop-limit counterpart of TryEnqueue.
+func (r *Runner) TryEnqueueStop(s *types.StopOrder) error {
+	return r.tryEnqueue(command{kind: cmdStop, stop: s})
+}
+
+// TryEnqueueOCO is the one-cancels-other counterpart of TryEnqueue.
+func (r *Runner) TryEnqueueOCO(o *types.OCOOrder) error {
+	return r.tryEnqueue(command{kind: cmdOCO, oco: o})
+}
+
+// TryEnqueueIceberg is the iceberg counterpart of TryEnqueue.
+func (r *Runner) TryEnqueueIceberg(ib *types.IcebergOrder) error {
+	return r.tryEnqueue(command{kind: cmdIceberg, iceberg: ib})
+}
+
+// TryEnqueuePegged is the pegged-order counterpart of TryEnqueue.
+func (r *Runner) TryEnqueuePegged(p *types.PeggedOrder) error {
+	return r.tryEnqueue(command{kind: cmdPegged, pegged: p})
+}
+
+// TryEnqueueTrailing is the trailing-stop counterpart of TryEnqueue.
+func (r *Runner) TryEnqueueTrailing(ts *types.TrailingStop) error {
+	return r.tryEnqueue(command{kind: cmdTrailing, trailing: ts})
 }
