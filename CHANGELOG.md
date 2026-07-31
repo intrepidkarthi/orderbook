@@ -9,6 +9,31 @@ versions may include breaking changes).
 
 ### Added
 
+- **[docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md)** — what a venue
+  actually needs, with an honest status for each item and the evidence named so it can
+  be checked rather than trusted.
+
+  It opens by refusing the premise: production readiness is a property of a deployment,
+  not of code. A matching engine is production-ready when a named team runs it, on
+  hardware they have capacity-planned, behind controls they have tested, with runbooks
+  for failures they have rehearsed — none of which can ship in a Go module.
+
+  Three gaps are named as the difference between "a correct engine" and "a venue you
+  could run", and all three are outside what further library work can fix:
+  observability (seams exist, nothing ships), operational readiness (no runbooks, no
+  health checks, no rehearsed drills), and **sustained load testing** — every
+  performance figure in this repository is a microbenchmark over seconds, and nobody
+  has run this at volume for a day.
+
+### Changed
+
+- `docs/BENCHMARKS.md` now states what its numbers cannot tell you: no sustained load,
+  no memory or goroutine growth over a long session, no multi-client gateway test, and
+  therefore no capacity plan. The figures answer "did this change make matching
+  slower", not "can this run a venue".
+
+### Added
+
 - **The closing auction, and indicative pricing through an auction.** v0.16.0 shipped
   pre-open and the opening uncross; this completes the session at both ends.
 

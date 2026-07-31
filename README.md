@@ -55,6 +55,10 @@ the venues that lost quorum getting it wrong.
 The engine has never run a live market. **Production-readiness is a property of
 your deployment, not of this library** — what is offered here is that the pieces
 you build on are correct, tested, and honest about their edges.
+[docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) is the checklist: what
+ships, what is deliberately absent, what you would have to build, and the three gaps
+(observability, operational readiness, sustained load testing) that no further library
+work can close because they are about your deployment.
 
 ---
 
@@ -301,6 +305,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [research/ofi.md](docs/research/ofi.md) | Does order-flow imbalance predict the next move? Contemporaneous R² ≈ 0.24, predictive R² ≈ 0.0004 — a ~577× gap, and the little that remains points the other way. |
 | [research/kyle-lambda.md](docs/research/kyle-lambda.md) | Price impact measured end to end: the λ a real book produces, why it scales as 1/depth, and what a block order costs against working the same quantity. |
 | [research/order-flow.md](docs/research/order-flow.md) | Delta, CVD, and absorption against ground truth: a 94.5%-accurate aggressor rule builds a CVD wrong by 169%, and CVD divergence loses to a price-only control. |
+| [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) | What a venue actually needs, with an honest status for each item — what ships, what is deliberately absent, and what you would have to build. Production readiness is a property of a deployment, not of a library, and this says so. |
 | [PROTOCOL.md](docs/PROTOCOL.md) | The binary order-entry protocol `cmd/obgw` speaks: framing, session and resume, every message, the reason-code vocabulary, and what is deliberately absent from the wire. |
 | [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.16.0) with breaking-change notes. |
 

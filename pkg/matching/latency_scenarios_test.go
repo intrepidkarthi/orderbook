@@ -176,6 +176,11 @@ func BenchmarkLatency_Mixed_70_20_10(b *testing.B) {
 // durable in v0.13.0, and it has never been measured. Its cost is O(book), so the
 // number that matters is how long the matching goroutine is unavailable to everyone
 // else while it runs.
+//
+// RUN THIS WITH A SMALL -benchtime. Each iteration rebuilds a 5,000-order book, so
+// wall-clock is O(b.N x book) even though the timer excludes the rebuild:
+// -benchtime=200000x asks for a billion insertions and takes tens of minutes. The
+// timing is correct at any b.N; only your patience scales. -benchtime=200x is plenty.
 func BenchmarkLatency_MassCancelBurst(b *testing.B) {
 	const perAccount = 5_000
 	var r latencyRun

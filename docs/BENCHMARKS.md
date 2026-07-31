@@ -131,6 +131,16 @@ kill switch is a venue-wide pause proportional to the account's book: budget rou
 0.9 ms per 5,000 orders, and note that it scales, so a 100,000-order account is on the
 order of 18 ms.
 
+Re-measured after trading phases and DAY/GTD expiry were added to the engine: all five
+p50 figures are identical and the upper quantiles are within run-to-run noise, so the
+work those features added to the hot path — a length check and a field comparison, both
+guarded at the call site — does not show up here.
+
+`MassCancelBurst` is excluded from that refresh because each of its iterations rebuilds
+a 5,000-order book: the timer excludes the rebuild so the figure is correct at any
+`b.N`, but wall-clock is O(`b.N` × book) and a large `-benchtime` asks for a billion
+insertions. Run it with `-benchtime=200x`.
+
 `allocs/op` on these rows includes the harness building each `*types.Order` inside the
 measured loop, which the zero-allocation rows above deliberately do not. Read them as
 scenario cost, not as engine allocation.
@@ -226,6 +236,19 @@ Absolute nanosecond figures for these are deliberately not published here: they
 are dominated by the machine's storage and by whatever else it is doing. Run
 `go test -bench=. ./pkg/wal/` on your own hardware, with your own group-commit
 size, and use the ratios above to sanity-check the shape.
+
+## What these numbers cannot tell you
+
+Every figure on this page is a microbenchmark measured over seconds. They are the right
+tool for "did this change make matching slower", and the wrong tool for "can this run a
+venue".
+
+Not measured anywhere: sustained load over hours or days, memory growth and GC
+behaviour under continuous pressure, goroutine and file-descriptor counts across a long
+session, or the gateway with hundreds of concurrent connections rather than a handful.
+Those are the numbers a capacity plan is built from, and this project does not have
+them. See [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md), which is explicit about
+what that means for the claim.
 
 ## Notes on the numbers
 
