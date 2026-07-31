@@ -587,21 +587,28 @@ func (e *Engine) Match(order *types.Order, dst []types.Trade) ([]types.Trade, ty
 	start := len(dst)
 	e.nextID(order)
 	// Anything whose deadline has passed leaves before this order is matched, so it
-	// cannot trade against liquidity that should no longer exist. When nothing is due
-	// this is a single comparison.
-	e.expireDue()
+	// cannot trade against liquidity that should no longer exist. Guarded at the call
+	// site rather than inside: a venue using neither DAY nor GTD should pay a length
+	// check, not a function call, on its hottest path.
+	if len(e.expiries) > 0 {
+		e.expireDue()
+	}
 	// Resolve the deadline before matching, so a DAY order with no session or a GTD
 	// order already in the past is refused rather than discovered later when it fails
-	// to expire.
-	if reason := e.resolveExpiry(order); reason != nil {
-		order.Status = types.OrderStatusRejected
-		e.emitResult(order, nil, types.OrderStatusRejected, reason)
-		return dst, types.OrderStatusRejected, reason
+	// to expire. Guarded for the same reason: most orders are not dated.
+	if order.TimeInForce.Expiring() {
+		if reason := e.resolveExpiry(order); reason != nil {
+			order.Status = types.OrderStatusRejected
+			e.emitResult(order, nil, types.OrderStatusRejected, reason)
+			return dst, types.OrderStatusRejected, reason
+		}
 	}
 	dst, status, reason := e.settleInto(order, dst)
 	if reason == nil {
 		e.recordClientOrderID(order) // remember only accepted orders
-		e.trackExpiry(order)         // only what actually rested gets a deadline
+		if order.TimeInForce.Expiring() {
+			e.trackExpiry(order) // only what actually rested gets a deadline
+		}
 	}
 	dst = e.cascadeStops(dst)
 	e.emitResult(order, dst[start:], status, reason)
@@ -1902,8 +1909,14 @@ func (e *Engine) CancelAllForUser(userID string) []*types.Order {
 // Cancel removes a resting order (or a pending stop) if it belongs to userID and
 // is still active.
 func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
-	e.now = e.clock().UTC()
-	e.expireDue()
+	// Guarded, not called. Reading the clock costs ~27ns on this hardware and a cancel
+	// is ~35ns, so an unconditional stamp here would have roughly doubled the cost of
+	// the single most common operation in real order flow — to service a schedule that
+	// is empty on any venue not using DAY or GTD.
+	if len(e.expiries) > 0 {
+		e.now = e.clock().UTC()
+		e.expireDue()
+	}
 	now := e.clock().UTC()
 
 	if order, exists := e.book.Get(orderID); exists {

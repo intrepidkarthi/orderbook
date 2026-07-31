@@ -2,6 +2,7 @@ package matching
 
 import (
 	"testing"
+	"time"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
@@ -116,5 +117,53 @@ func BenchmarkEngine_CancelReplaceInto(b *testing.B) {
 		_, _ = e.Cancel(live[j].ID, "mm")
 		buf, _, _ = e.Match(repl[i], buf[:0])
 		live[j] = repl[i]
+	}
+}
+
+// BenchmarkEngine_Cancel measures the ENGINE's cancel, not the book's.
+//
+// The published figures covered OrderBook.Remove, and every comparison against other
+// libraries used that too. But a venue calls Engine.Cancel, which additionally checks
+// ownership, enforces the minimum resting time, stamps the order, emits an event and —
+// since DAY and GTD — services the expiry schedule. None of that was measured, and the
+// gap hid a real regression: an unconditional clock read added to this path would have
+// roughly doubled it, and no benchmark would have noticed.
+func BenchmarkEngine_Cancel(b *testing.B) {
+	e := NewEngine(Config{Symbol: "X", MaxOrders: b.N + 16})
+	ids := make([]int64, 0, b.N)
+	buf := make([]types.Trade, 0, 8)
+	for i := 0; i < b.N; i++ {
+		o := mkOrder("mm", types.SideBuy, int64(1000+i%4000), 1)
+		buf, _, _ = e.Match(o, buf[:0])
+		ids = append(ids, o.ID)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = e.Cancel(ids[i], "mm")
+	}
+}
+
+// BenchmarkEngine_CancelWithExpiries is the same path on a venue that uses DAY orders,
+// so the expiry schedule is non-empty and actually gets consulted. The difference
+// between this and BenchmarkEngine_Cancel is what the feature costs a venue that uses
+// it, which is the number worth knowing rather than the one that flatters it.
+func BenchmarkEngine_CancelWithExpiries(b *testing.B) {
+	close := time.Now().Add(24 * time.Hour)
+	cfg := Config{Symbol: "X", MaxOrders: b.N + 16}
+	cfg.SessionClose = func() time.Time { return close }
+	e := NewEngine(cfg)
+	ids := make([]int64, 0, b.N)
+	buf := make([]types.Trade, 0, 8)
+	for i := 0; i < b.N; i++ {
+		o := mkOrder("mm", types.SideBuy, int64(1000+i%4000), 1)
+		o.TimeInForce = types.TIFDay
+		buf, _, _ = e.Match(o, buf[:0])
+		ids = append(ids, o.ID)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = e.Cancel(ids[i], "mm")
 	}
 }
