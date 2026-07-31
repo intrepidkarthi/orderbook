@@ -30,7 +30,7 @@ in front of it.
 | Market-integrity controls | **Strong** — each mapped to a real case |
 | Performance and its honesty | **Strong** — measured, published, corrected |
 | Observability | **Partial** — Prometheus metrics and health endpoints ship; no tracing |
-| Operational readiness | **Weak** — health and readiness endpoints, still no runbooks |
+| Operational readiness | **Weak** — endpoints, thresholds and runbooks; none of it rehearsed |
 | Security at the edge | **Weak by design** — no TLS, secrets in the clear |
 | High availability | **Seams only** — deliberately no consensus |
 | Sustained load / soak at venue scale | **Partial** — a harness, and minutes of evidence |
@@ -169,14 +169,24 @@ there, and that pattern is worth more to a reader than a clean page.)*
 
 ### Operational readiness — weak
 
-What exists: health and readiness endpoints an orchestrator can use, and metrics to
-alert from.
+What exists: health and readiness endpoints an orchestrator can use, metrics to alert
+from with the thresholds named, and [RUNBOOKS.md](RUNBOOKS.md) — procedures for a torn
+log, a corrupt log record, a corrupt snapshot, a stuck matching goroutine, a mass
+cancel that pauses the venue, an evicted subscriber, a publisher dropping batches, and
+a book at its ceiling. Each is written from the code that produces the failure, and
+each names what makes it worse.
 
-What does not: runbooks. No documented recovery procedure beyond "the code recovers".
-No rehearsed failure drills. No alerting thresholds — and note that the numbers you
-would alert on *are* now published (mass cancel blocks the matching goroutine for
-~872 µs per 5,000 orders; a 100,000-order restart takes ~174 ms), but knowing them is
-not the same as having an on-call engineer who has practised the response.
+Writing them was worth it for a reason beyond the pages: drafting the procedure for a
+corrupt snapshot turned up that the honest answer was *"you cannot detect this"* — the
+log was CRC-checked per record and the snapshot it is applied on top of had no
+integrity check at all. That is fixed, and it is the second time in two weeks that
+documenting something carefully found a defect in it.
+
+What does not exist: any of it rehearsed. A procedure nobody has practised under
+pressure is a document, not a capability, and this stays **weak** until somebody has
+run the drill. There is also no failover procedure, no trade-bust path, no credential
+revocation and no clock-disagreement procedure — all named at the end of RUNBOOKS.md
+rather than left to be discovered.
 
 ### Security at the edge — weak, and deliberately so
 
