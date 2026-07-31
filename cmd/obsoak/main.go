@@ -760,7 +760,7 @@ func report(cfg config, st *stats, samples []sample, elapsed time.Duration) {
 		name   string
 		get    func(sample) float64
 		format func(float64) string
-		// leak reports whether a positive slope here means something is being leaked
+		// leak reports whether a rising floor here means something is being leaked
 		// rather than a workload that has simply not finished filling.
 		leak bool
 	}
@@ -772,25 +772,45 @@ func report(cfg config, st *stats, samples []sample, elapsed time.Duration) {
 	}
 	var findings []string
 	for _, ser := range all {
-		first, last := ser.get(steady[0]), ser.get(steady[len(steady)-1])
+		// The floor, not the peak, and not the endpoints.
+		//
+		// Live heap saw-tooths under Go's GC pacing: it climbs to the next target and
+		// drops, so a sample taken at a peak and a sample taken at a trough differ by
+		// more than any leak would in the same window. What a leak moves is the floor
+		// — the low-water mark is data that survived a collection. Comparing the floor
+		// of the first half against the floor of the second is robust to where in the
+		// cycle the scrapes happened to land, and a least-squares fit through raw
+		// samples is not.
+		half := len(steady) / 2
+		lo, hi := floorOf(steady[:half], ser.get), floorOf(steady[half:], ser.get)
 		slope := slopePerHour(steady, ser.get)
 		sign := "+"
 		if slope < 0 {
 			sign = "-"
 		}
-		fmt.Printf("  %-15s first %10s   last %10s   %s%s/hour\n",
-			ser.name, ser.format(first), ser.format(last), sign, ser.format(math.Abs(slope)))
-		if !ser.leak {
+		fmt.Printf("  %-15s floor %10s -> %10s   trend %s%s/hour\n",
+			ser.name, ser.format(lo), ser.format(hi), sign, ser.format(math.Abs(slope)))
+		if !ser.leak || lo <= 0 {
 			continue
 		}
-		// The threshold is proportional, not absolute: a hundred bytes an hour is
-		// noise on a 40 MiB heap and a fleet-ending leak on a 4 KiB one.
-		if first > 0 && slope/first > 0.10 {
-			findings = append(findings, fmt.Sprintf("%s growing %+.1f%%/hour", ser.name, 100*slope/first))
+		// Proportional, not absolute: a hundred bytes an hour is noise on a 40 MiB
+		// heap and a fleet-ending leak on a 4 KiB one.
+		if growth := (hi - lo) / lo; growth > 0.10 {
+			findings = append(findings, fmt.Sprintf("%s floor up %.1f%%", ser.name, 100*growth))
 		}
 	}
 
 	fmt.Println()
+	// A window this short cannot distinguish a leak from GC pacing, from a book that
+	// is still filling, from a cache that has not warmed. Saying "no growth" on the
+	// strength of four minutes would be the most misleading thing this tool could
+	// print, because it is the sentence somebody quotes.
+	if window < minGrowthWindow && len(findings) == 0 {
+		fmt.Printf("VERDICT: inconclusive — %s of steady state is too short to distinguish a leak from GC pacing.\n",
+			window.Truncate(time.Second))
+		fmt.Printf("Nothing grew, and that is not evidence of anything. Run for at least %s.\n", minGrowthWindow)
+		return
+	}
 	switch {
 	case len(findings) > 0:
 		fmt.Printf("VERDICT: growth detected over %s of steady state — %s.\n", window.Truncate(time.Second), strings.Join(findings, "; "))
@@ -804,6 +824,25 @@ func report(cfg config, st *stats, samples []sample, elapsed time.Duration) {
 			window.Truncate(time.Second), comma(int64(float64(sent)/elapsed.Seconds())))
 		fmt.Printf("This is evidence for %s, and for nothing longer.\n", window.Truncate(time.Second))
 	}
+}
+
+// minGrowthWindow is the shortest steady-state window this tool will draw a
+// conclusion from. Below it, "nothing grew" is not a finding.
+const minGrowthWindow = 5 * time.Minute
+
+// floorOf is the low-water mark of a series: what survived every collection in the
+// window, rather than whatever the last scrape happened to catch.
+func floorOf(ss []sample, get func(sample) float64) float64 {
+	if len(ss) == 0 {
+		return 0
+	}
+	min := get(ss[0])
+	for _, s := range ss[1:] {
+		if v := get(s); v < min {
+			min = v
+		}
+	}
+	return min
 }
 
 // slopePerHour is an ordinary least-squares fit, in units per hour. A first-versus-last
