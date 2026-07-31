@@ -147,8 +147,8 @@ Reading it honestly:
   the flow is marketable and a participant cancels its oldest quote rather than
   checking first. A real client would have the fill first.
 - **16,985 `queue full` — 0.28% — is the venue at its limit,** briefly. The command
-  queue sat near zero for the run and spiked past 2,000 twice. 5,000/s durable is
-  comfortable here; 7,000/s durable still runs clean; 10,000/s durable saturates.
+  queue sat near zero for the run and spiked past 2,000 twice. **See §1b: the rate this
+  run sustained is not a property of the code, and it did not reproduce.**
 - **p99 of 250 ms is the top bucket, and the load generator is on the same machine.**
   Treat the tail as an upper bound with the harness's own scheduling in it, not as a
   venue figure. p50 of 5 ms through a real socket, a real protocol and an fsync-ing log
@@ -204,6 +204,87 @@ orphaned. Before, that same condition filled the book to its 100,000-order ceili
 the venue stopped accepting liquidity for good.
 
 Saturation should mean backpressure and rejections. It used to mean permanent damage.
+
+---
+
+## 1b. A correction: the capacity figures did not reproduce
+
+The first version of this document said 5,000 messages a second was comfortable,
+7,000 ran clean and 10,000 saturated. Four hours later, on the same machine and the
+same code, 3,500 ran clean and 5,000 saturated — a little under half.
+
+The code was ruled out first, by the method this repository already uses for
+performance claims and which I did not apply here: an interleaved A/B against a
+worktree at the earlier commit, alternating arms so drift lands on both. Three rounds,
+25 connections, 5,000/s:
+
+| | queue-full rejections |
+|---|---|
+| before the second round of fixes | 14,198 · 18,502 · 15,764 |
+| after | 19,919 · 18,660 · 12,582 |
+
+Indistinguishable. The difference was the machine: a desktop that had been idle in the
+morning and by the evening was running a window server, browsers and several other
+processes. The measurement never controlled for that and never recorded it.
+
+**So the honest statement is that this repository does not know what rate the venue
+sustains.** It knows the shape — the durable path through a socket and a protocol is
+three orders of magnitude below the in-process benchmarks, and the command queue is
+what gives first — and it knows two numbers measured under conditions it failed to
+write down.
+
+This is the third published figure in this project's history to be corrected against
+itself, and the second where the documentation was flattering.
+
+### What did hold
+
+Everything structural, at every rate tried, on both arms of the A/B:
+
+- The book stayed bounded — 1,917 to 1,940 orders resting against ~2,485 the clients
+  believed, at 1,500/s, 2,500/s, 3,500/s, 5,000/s and 12,000/s.
+- No orphaned orders, no dropped publisher batches, no leaked goroutines or descriptors.
+- p50 of 5 ms below saturation.
+
+That distinction is the useful one. **Timing figures are a property of the host;
+correctness findings are a property of the code.** A soak is worth running for the
+second kind even when it cannot pin down the first.
+
+### The methodology fix
+
+`obsoak` now runs a fixed-work arithmetic probe before and after every run and prints
+it first:
+
+```
+machine   fixed-work probe 57ms before, 58ms after  — stable
+```
+
+It measures the thing that actually matters — how much CPU this process can get —
+rather than a number the kernel keeps about everybody, and it needs no per-platform
+mechanism. Within a run, a large gap between the two means the run's own figures are
+internally incomparable. Between runs, the value is the key: two runs whose probes
+disagree were not measuring the same machine, and their throughput numbers should not
+be put in the same table. Every capacity figure quoted from here on carries it.
+
+### And the connection-count question, answered
+
+An earlier run appeared to show 40 connections saturating at 6,000/s where 25 had run
+clean at 7,000 — suggesting per-connection cost, not message rate, was the binding
+constraint, and therefore that "hundreds of connections" was a wall rather than a
+scaling question.
+
+It is not. Holding the rate at 5,000/s and varying only the connection count:
+
+| connections | obgw CPU | goroutines |
+|---:|---:|---:|
+| 10 | 123% | 51 |
+| 20 | 120% | 91 |
+| 40 | 128% | 171 |
+| 80 | 144% | 331 |
+
+Eight times the connections for 17% more CPU. Per-connection cost is real — four
+goroutines each, and a 2 ms poll on every session's outbound stream, which is a
+documented shortcut in `followStream` — but it is not what binds at these scales. The
+apparent connection wall was the same machine drift as everything else in this section.
 
 ---
 
@@ -294,10 +375,10 @@ hours and a deployment is months. In particular:
   goroutine-per-connection model is fine in principle and unproven past a few dozen.
 - **One machine, one instrument, loopback.** No network, no NIC, no other tenant, no
   contention with anything a real deployment would have next to it.
-- **The client is Go and shares the machine.** At high rates the harness is competing
-  with the venue for the same cores, so the client-observed latency includes something
-  that would not exist in a real deployment — and the capacity figures are, if
-  anything, pessimistic for the venue and optimistic about nothing.
+- **The client is Go and shares the machine**, and so does everything else on it. See
+  §1b: this is not a caveat, it is the thing that invalidated the first set of capacity
+  figures. Run a soak on a host you control, and quote the probe value with any number
+  you take from it.
 
 A soak that finds nothing is evidence for the length of the soak, and for nothing
 longer. That sentence is printed in the harness's own verdict for the same reason it

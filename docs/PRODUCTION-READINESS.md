@@ -113,12 +113,16 @@ What they still do not cover, and this is the gap that matters for a production 
   across a full session remain unmeasured.
 - **Hundreds of connections are still untested.** The soak runs use 25. The gateway's
   goroutine-per-connection model is fine in principle and unproven past a few dozen.
-- **The capacity plan is a first data point, not a plan.** One machine, one instrument,
-  loopback, with the load generator competing for the same cores. It tells you the
-  shape of the limit, not what your hardware will carry. What it does say: 20 minutes
-  at 5,000 messages a second, durable, held a flat heap floor, 111 goroutines and 36
-  descriptors, with a client-observed p50 of 5 ms. 7,000/s durable still runs clean;
-  10,000/s saturates the command queue.
+- **There is no capacity plan, and the first attempt at one was wrong.** The rates
+  originally published here did not reproduce four hours later on the same machine and
+  the same code — 7,000/s clean became 3,500/s clean — because the measurement never
+  controlled for what else the host was doing. Ruled out as a code regression by an
+  interleaved A/B; see [SOAK.md §1b](SOAK.md). What survives is the shape: the durable
+  path through a socket and a protocol runs three orders of magnitude below the
+  in-process benchmarks, and the command queue is what gives first. What also survives
+  is everything structural — a bounded book, no orphaned orders, no leaked goroutines
+  or descriptors, p50 of 5 ms below saturation — because correctness findings are a
+  property of the code and timing figures are a property of the host.
 - **The log costs more than anything else here.** 1.22 GiB in twenty minutes at
   5,000/s — 3.7 GiB an hour, 88 GiB a day. The records are JSON, which was a choice
   made for readability and never priced. Budget for it or change the encoding.

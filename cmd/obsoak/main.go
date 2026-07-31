@@ -286,6 +286,7 @@ func run(cfg config) {
 		}()
 	}
 
+	probeBefore := speedProbe()
 	start := time.Now()
 	select {
 	case <-time.After(cfg.duration):
@@ -310,7 +311,9 @@ func run(cfg config) {
 	for s := range samples {
 		collected = append(collected, s)
 	}
-	report(cfg, st, collected, time.Since(start))
+	elapsed := time.Since(start)
+	probeAfter := speedProbe()
+	report(cfg, st, collected, elapsed, probeBefore, probeAfter)
 }
 
 // --- one participant ---------------------------------------------------------
@@ -690,11 +693,51 @@ func scrape(client *http.Client, addr string) (map[string]float64, error) {
 	return out, sc.Err()
 }
 
+// --- how much of the machine did this run actually get? -----------------------
+
+// probeSink keeps the compiler from deleting the probe's arithmetic.
+var probeSink uint64
+
+// speedProbe runs a fixed amount of arithmetic and reports how long it took.
+//
+// Every absolute figure in this report — throughput, latency, the rate at which the
+// queue saturates — is only comparable to another run's if both got the same share of
+// the machine. On a dedicated box that is a safe assumption. On anything that is also
+// running a browser and a window server it is not, and the first version of this
+// harness published capacity numbers that did not reproduce four hours later on the
+// same machine, on the same code, because the machine had got busier in between.
+//
+// A load average would answer this on Linux and need a different mechanism on Darwin.
+// This needs neither, and it measures the thing that actually matters — how much CPU
+// this process can get — rather than a number the kernel keeps about everybody.
+func speedProbe() time.Duration {
+	start := time.Now()
+	x := uint64(1)
+	for i := 0; i < 20_000_000; i++ {
+		x = x*6364136223846793005 + 1442695040888963407
+		x ^= x >> 33
+	}
+	probeSink = x
+	return time.Since(start)
+}
+
 // --- the report --------------------------------------------------------------
 
-func report(cfg config, st *stats, samples []sample, elapsed time.Duration) {
+func report(cfg config, st *stats, samples []sample, elapsed time.Duration, probeBefore, probeAfter time.Duration) {
 	sent := st.sent.Load()
 	fmt.Printf("\n=== obsoak: %s over %s, %d connections ===\n\n", cfg.symbol, elapsed.Truncate(time.Second), cfg.conns)
+
+	// First, because it decides whether anything below is comparable to another run.
+	fmt.Printf("machine   fixed-work probe %s before, %s after", probeBefore.Truncate(time.Millisecond), probeAfter.Truncate(time.Millisecond))
+	if drift := probeDrift(probeBefore, probeAfter); drift > 0.15 {
+		fmt.Printf("  — %.0f%% APART\n", 100*drift)
+		fmt.Println("          This process got a different share of the machine at the two ends of the run.")
+		fmt.Println("          The absolute figures below are not comparable with another run's; the")
+		fmt.Println("          structural ones — orphaned orders, leaked goroutines — still are.")
+	} else {
+		fmt.Println("  — stable")
+	}
+	fmt.Println()
 
 	fmt.Println("throughput")
 	fmt.Printf("  sent          %12s   (%s/s, target %s/s)\n",
@@ -830,29 +873,60 @@ func report(cfg config, st *stats, samples []sample, elapsed time.Duration) {
 	}
 
 	fmt.Println()
+	// Saturation outranks everything below it. A run whose queue never drained was
+	// measuring the slowest thing in the pipeline, and a growth figure taken from it
+	// describes a backlog rather than a leak. This used to be printed as a banner and
+	// then contradicted by a VERDICT line announcing growth — and the VERDICT line is
+	// the one people read.
+	if saturated*2 > len(steady) {
+		fmt.Printf("VERDICT: saturated at %s msg/s — the queue never drained, so nothing here is a statement about growth.\n",
+			comma(int64(float64(sent)/elapsed.Seconds())))
+		if len(findings) > 0 {
+			fmt.Printf("(%s, which is what a permanent backlog looks like. Not a leak until a run that is not saturated says so.)\n",
+				strings.Join(findings, "; "))
+		}
+		fmt.Println("Find the sustainable rate first: halve -rate until the queue sits near zero.")
+		return
+	}
+
 	// A window this short cannot distinguish a leak from GC pacing, from a book that
-	// is still filling, from a cache that has not warmed. Saying "no growth" on the
-	// strength of four minutes would be the most misleading thing this tool could
-	// print, because it is the sentence somebody quotes.
-	if window < minGrowthWindow && len(findings) == 0 {
+	// is still filling, from a cache that has not warmed — and it cannot do so in
+	// EITHER direction. The gate used to apply only when nothing had been found, so a
+	// twenty-nine-second run could still announce "heap floor up 32.7%". Saying "no
+	// growth" on four minutes and saying "growth" on twenty-nine seconds are the same
+	// mistake, and both are sentences somebody quotes.
+	if window < minGrowthWindow {
 		fmt.Printf("VERDICT: inconclusive — %s of steady state is too short to distinguish a leak from GC pacing.\n",
 			window.Truncate(time.Second))
-		fmt.Printf("Nothing grew, and that is not evidence of anything. Run for at least %s.\n", minGrowthWindow)
+		if len(findings) > 0 {
+			fmt.Printf("Worth a longer run rather than a conclusion: %s.\n", strings.Join(findings, "; "))
+		} else {
+			fmt.Println("Nothing grew, and that is not evidence of anything.")
+		}
+		fmt.Printf("Run for at least %s.\n", minGrowthWindow)
 		return
 	}
 	switch {
 	case len(findings) > 0:
 		fmt.Printf("VERDICT: growth detected over %s of steady state — %s.\n", window.Truncate(time.Second), strings.Join(findings, "; "))
 		fmt.Println("A longer run will say whether it plateaus. Treat this as a lead, not a conclusion.")
-	case saturated*2 > len(steady):
-		fmt.Printf("VERDICT: saturated at %s msg/s — the queue never drained, so nothing here is a statement about growth.\n",
-			comma(int64(float64(sent)/elapsed.Seconds())))
-		fmt.Println("Find the sustainable rate first: halve -rate until the queue sits near zero.")
 	default:
 		fmt.Printf("VERDICT: no growth in heap, goroutines or descriptors over %s of steady state at %s msg/s.\n",
 			window.Truncate(time.Second), comma(int64(float64(sent)/elapsed.Seconds())))
 		fmt.Printf("This is evidence for %s, and for nothing longer.\n", window.Truncate(time.Second))
 	}
+}
+
+// probeDrift is the fractional difference between two probe timings.
+func probeDrift(a, b time.Duration) float64 {
+	if a <= 0 || b <= 0 {
+		return 0
+	}
+	lo, hi := float64(a), float64(b)
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	return (hi - lo) / lo
 }
 
 // minGrowthWindow is the shortest steady-state window this tool will draw a
