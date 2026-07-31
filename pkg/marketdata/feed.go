@@ -167,6 +167,27 @@ func NewFeed(incarnation string, retain int) *Feed {
 	}
 }
 
+// Adopt seeds the feed from a recovered book, so a subscriber's first snapshot shows
+// the venue as it actually is.
+//
+// Without it the feed starts empty against a non-empty book, and every level appears
+// to be new the first time it changes — a subscriber would see a book that is missing
+// everything nobody has touched since the restart, which is most of it. Exactly the
+// bug recovery had on the order-entry side before v0.12.0, where the session layer's
+// index was left empty against a recovered book.
+//
+// It publishes nothing. These levels are not changes; they are the starting state, and
+// a subscriber gets them from the snapshot rather than as a burst of deltas describing
+// a book that was already there.
+//
+// Call once, after recovery and before serving.
+func (f *Feed) Adopt(orders []*types.Order, lastTradePrice int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.book.Adopt(orders)
+	f.lastTradePrice = lastTradePrice
+}
+
 // Incarnation identifies this run of the venue.
 func (f *Feed) Incarnation() string { return f.incarnation }
 

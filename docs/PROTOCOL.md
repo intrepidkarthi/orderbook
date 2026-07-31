@@ -402,6 +402,59 @@ inbound packet, including a client heartbeat, refreshes it.
 Connect-and-say-nothing is the cheapest resource-exhaustion attack there is, so
 the unauthenticated timeout is the tightest of the three.
 
+## Market data
+
+A second listener, on its own port (`-mdaddr`), serving the venue's public feed from
+the same engine. One process, two edges, which is how a venue is actually shaped:
+order entry is authenticated and per-account, market data is anonymous and identical
+for everyone. Sharing one port would put an unauthenticated subscriber on the same
+code path as order entry, which is the wrong default however carefully it is written.
+
+**Subscribe** — MsgType `b` (1) + Version (1) + Incarnation (10) + Seq (8).
+
+- `Seq` 0 means "I have nothing": you get a snapshot, then the live stream.
+- A non-zero `Seq` is a resume: you get everything after it and **no snapshot**.
+
+| Message | Type | Carries |
+|---|---|---|
+| **MDLevel** | `l` | Side, Price, Qty — one level of a snapshot |
+| **MDSnapshotEnd** | `e` | Count, Seq, LastTradePrice — the snapshot is complete |
+| **MDDelta** | `d` | Seq, Side, Price, Qty — one aggregated level change |
+| **MDTrade** | `t` | Seq, Price, Qty, Aggressor — a print |
+| **MDStatus** | `s` | Seq, State (`O`pen / `H`alted / `C`ancel-only) |
+| **MDReject** | `r` | one reason byte |
+
+Market data numbers its types **separately** from order entry. The two are separate
+conversations on separate connections and nothing decodes both, so sharing one space
+would make every future order-entry message avoid every market-data one for no
+benefit. A decoder handed the wrong family still refuses it, because every decoder
+checks for exactly the type it wants.
+
+**The contract, stated so it can be falsified:** for one incarnation the sequence is
+dense and gap-free, and everything after `MDSnapshotEnd.Seq` applies on top of the
+snapshot while nothing at or below it does. A subscriber can join at any instant and
+be exactly right. `Feed.Snapshot` takes the book and its sequence under one lock,
+which is what makes that true — reading them separately is the bug the order-entry
+side shipped in v0.12.0.
+
+**A snapshot is a run of `MDLevel` followed by `MDSnapshotEnd`**, not one
+variable-length message. Every payload in this protocol stays fixed-width and
+bounds-checkable by inspection, and the terminator carries a count so a truncated
+snapshot cannot look like a complete one — the same shape as the order-entry `Query`
+reply, for the same reasons.
+
+**Two ways to be refused**, both explicit rather than silently papered over:
+
+- `I` — your cursor belongs to another run of the venue. Sequence numbers mean
+  nothing across a restart.
+- `E` — you are further behind than the feed retains. Resubscribe with `Seq` 0. You
+  are told rather than quietly resynchronised, so you know your picture had a hole.
+
+**Backpressure.** A subscriber that stops reading is disconnected, as on the
+order-entry side. Market data admits a better answer — conflate, and hand it a fresh
+snapshot when it catches up, since nothing is owed to it personally — and that is
+deliberately not implemented rather than half implemented.
+
 ## Durability
 
 `obgw -wal path` turns on the write-ahead log: every command is written before it

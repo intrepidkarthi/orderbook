@@ -135,6 +135,13 @@ func TestShortBufferIsAnError(t *testing.T) {
 		"cmdreject":     func(b []byte) error { _, err := DecodeCmdReject(b); return err },
 		"login":         func(b []byte) error { _, err := DecodeLoginRequest(b); return err },
 		"query":         func(b []byte) error { _, err := DecodeQuery(b); return err },
+		"mdsubscribe":   func(b []byte) error { _, err := DecodeMDSubscribe(b); return err },
+		"mdreject":      func(b []byte) error { _, err := DecodeMDReject(b); return err },
+		"mdlevel":       func(b []byte) error { _, err := DecodeMDLevel(b); return err },
+		"mdsnapend":     func(b []byte) error { _, err := DecodeMDSnapshotEnd(b); return err },
+		"mddelta":       func(b []byte) error { _, err := DecodeMDDelta(b); return err },
+		"mdtrade":       func(b []byte) error { _, err := DecodeMDTrade(b); return err },
+		"mdstatus":      func(b []byte) error { _, err := DecodeMDStatus(b); return err },
 		"openorder":     func(b []byte) error { _, err := DecodeOpenOrder(b); return err },
 		"queryend":      func(b []byte) error { _, err := DecodeQueryEnd(b); return err },
 	}
@@ -440,6 +447,13 @@ func goldenCases(t *testing.T) map[string][]byte {
 		})),
 		"login_accepted":  must(EncodeLoginAccepted(nil, LoginAccepted{Session: "INC0000001", Sequence: 42})),
 		"query":           must(EncodeQuery(nil, Query{Version: Version})),
+		"md_subscribe":    must(EncodeMDSubscribe(nil, MDSubscribe{Version: Version, Incarnation: "INC0000001", Seq: 4096})),
+		"md_reject":       must(EncodeMDReject(nil, MDReject{Version: Version, Reason: MDRejectEvicted})),
+		"md_level":        must(EncodeMDLevel(nil, MDLevel{Version: Version, Side: SideBuy, Price: 30000, Qty: 250})),
+		"md_snapshot_end": must(EncodeMDSnapshotEnd(nil, MDSnapshotEnd{Version: Version, Count: 12, Seq: 4096, LastTradePrice: 30000})),
+		"md_delta":        must(EncodeMDDelta(nil, MDDelta{Version: Version, Seq: 4097, Side: SideSell, Price: 30100, Qty: 0})),
+		"md_trade":        must(EncodeMDTrade(nil, MDTrade{Version: Version, Seq: 4098, Price: 30050, Qty: 7, Aggressor: SideBuy})),
+		"md_status":       must(EncodeMDStatus(nil, MDStatus{Version: Version, Seq: 4099, State: MDStateHalted})),
 		"mass_cancel":     must(EncodeMassCancel(nil, MassCancel{Version: Version})),
 		"mass_cancel_ack": must(EncodeMassCancelAck(nil, MassCancelAck{Version: Version, Count: 4, Seq: 88})),
 		"cod_on":          must(EncodeCancelOnDisconnect(nil, CancelOnDisconnect{Version: Version, Enabled: true})),
@@ -640,6 +654,19 @@ func TestMessageTypesAreDistinct(t *testing.T) {
 		"OpenOrder": MsgOpenOrder, "QueryEnd": MsgQueryEnd,
 		"MassCancelAck": MsgMassCancelAck, "CODAck": MsgCODAck,
 	}
+	// Market data numbers separately, but must still be internally distinct.
+	md := map[string]uint8{
+		"MDSubscribe": MsgMDSubscribe, "MDReject": MsgMDReject, "MDLevel": MsgMDLevel,
+		"MDSnapshotEnd": MsgMDSnapshotEnd, "MDDelta": MsgMDDelta,
+		"MDTrade": MsgMDTrade, "MDStatus": MsgMDStatus,
+	}
+	mdSeen := map[uint8]string{}
+	for name, b := range md {
+		if prev, dup := mdSeen[b]; dup {
+			t.Errorf("%s and %s both use market-data type byte %q", prev, name, b)
+		}
+		mdSeen[b] = name
+	}
 	seen := map[uint8]string{}
 	for name, b := range types {
 		if prev, dup := seen[b]; dup {
@@ -679,5 +706,69 @@ func TestReplaceOrderRoundTrip(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("round trip\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// TestMarketDataRoundTrips covers the market-data family.
+func TestMarketDataRoundTrips(t *testing.T) {
+	sub := MDSubscribe{Version: Version, Incarnation: "INC0000001", Seq: 99}
+	b, err := EncodeMDSubscribe(nil, sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeMDSubscribe(b); err != nil || got != sub {
+		t.Errorf("subscribe: got %+v err %v", got, err)
+	}
+
+	lvl := MDLevel{Version: Version, Side: SideSell, Price: 123, Qty: 45}
+	lb, err := EncodeMDLevel(nil, lvl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeMDLevel(lb); err != nil || got != lvl {
+		t.Errorf("level: got %+v err %v", got, err)
+	}
+
+	end := MDSnapshotEnd{Version: Version, Count: 3, Seq: 77, LastTradePrice: 100}
+	eb, err := EncodeMDSnapshotEnd(nil, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeMDSnapshotEnd(eb); err != nil || got != end {
+		t.Errorf("snapshot end: got %+v err %v", got, err)
+	}
+
+	// A zero quantity is meaningful — it removes the level — so it must survive.
+	d := MDDelta{Version: Version, Seq: 78, Side: SideBuy, Price: 99, Qty: 0}
+	db, err := EncodeMDDelta(nil, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeMDDelta(db); err != nil || got != d {
+		t.Errorf("delta: got %+v err %v", got, err)
+	}
+
+	tr := MDTrade{Version: Version, Seq: 79, Price: 101, Qty: 5, Aggressor: SideSell}
+	tb, err := EncodeMDTrade(nil, tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeMDTrade(tb); err != nil || got != tr {
+		t.Errorf("trade: got %+v err %v", got, err)
+	}
+
+	st := MDStatus{Version: Version, Seq: 80, State: MDStateCancelOnly}
+	sb, err := EncodeMDStatus(nil, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeMDStatus(sb); err != nil || got != st {
+		t.Errorf("status: got %+v err %v", got, err)
+	}
+
+	// An order-entry decoder must refuse a market-data payload and vice versa: the
+	// families number separately, so nothing but the type byte separates them.
+	if _, err := DecodeQuery(sb); !errors.Is(err, ErrBadType) && !errors.Is(err, ErrShort) {
+		t.Errorf("a market-data status decoded as a Query: %v", err)
 	}
 }

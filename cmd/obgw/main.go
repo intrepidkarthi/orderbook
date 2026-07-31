@@ -26,7 +26,8 @@ import (
 
 func main() {
 	var (
-		addr     = flag.String("addr", "127.0.0.1:9000", "listen address")
+		addr     = flag.String("addr", "127.0.0.1:9000", "order-entry listen address")
+		mdAddr   = flag.String("mdaddr", "", "market-data listen address (empty = no market-data feed)")
 		symbol   = flag.String("symbol", "BTC-USD", "the single instrument this gateway serves")
 		accounts = flag.String("accounts", "", "comma-separated user:password pairs")
 		rate     = flag.Float64("rate", 1000, "per-account orders/second")
@@ -39,6 +40,7 @@ func main() {
 
 	cfg := Config{
 		Addr:            *addr,
+		MDAddr:          *mdAddr,
 		Symbol:          *symbol,
 		Accounts:        parseAccounts(*accounts),
 		RatePerSec:      *rate,

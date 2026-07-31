@@ -214,6 +214,24 @@ func (f *L2Feed) flush() {
 	}
 }
 
+// Adopt seeds the aggregate from a set of resting orders, without producing deltas.
+//
+// Used to start a feed against a book that already exists — after a recovery — where
+// the levels are the starting state rather than changes to it.
+func (f *L2Feed) Adopt(orders []*types.Order) {
+	for _, o := range orders {
+		if o == nil || o.RemainingQty <= 0 {
+			continue
+		}
+		f.live[o.ID] = liveOrder{side: o.Side, price: o.Price, remaining: o.RemainingQty}
+		m := f.sideMap(o.Side)
+		m[o.Price] += o.RemainingQty
+	}
+	// Deliberately not marking these levels touched: they are not changes.
+	clear(f.touched)
+	f.out = nil
+}
+
 // Drain returns the deltas accumulated since the last call and resets the buffer.
 // The returned slice is the caller's; the feed does not retain it.
 func (f *L2Feed) Drain() []L2Delta {

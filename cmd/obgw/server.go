@@ -12,6 +12,7 @@ import (
 
 	"github.com/intrepidkarthi/orderbook/internal/wire"
 	"github.com/intrepidkarthi/orderbook/pkg/gateway"
+	"github.com/intrepidkarthi/orderbook/pkg/marketdata"
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
 	"github.com/intrepidkarthi/orderbook/pkg/orderentry"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -42,6 +43,15 @@ type Config struct {
 	// CheckpointEvery bounds how much log a restart must replay. Zero disables
 	// checkpointing, which is legal but means replay grows without limit.
 	CheckpointEvery time.Duration
+	// MDAddr, when set, starts a market-data listener on its own port. Order entry
+	// is authenticated and per-account; market data is anonymous and identical for
+	// everyone. Sharing one port would put an unauthenticated subscriber on the same
+	// code path as order entry, which is the wrong default however carefully it is
+	// written.
+	MDAddr string
+	// MDRetain bounds the market-data gap-fill ring. A subscriber further behind than
+	// this is told to resubscribe from a snapshot rather than served a partial answer.
+	MDRetain int
 }
 
 func (c *Config) applyDefaults() {
@@ -63,6 +73,9 @@ func (c *Config) applyDefaults() {
 	if c.Incarnation == "" {
 		c.Incarnation = "INC0000001"
 	}
+	if c.MDRetain <= 0 {
+		c.MDRetain = 1 << 16
+	}
 }
 
 // Server is a single-symbol order-entry gateway.
@@ -78,9 +91,11 @@ type Server struct {
 	gate   *gateway.Gateway
 	reg    *orderentry.Registry
 	pub    *orderentry.Publisher
+	feed   *marketdata.Feed
 
 	wal      *wal.Writer
 	ln       net.Listener
+	mdLn     net.Listener
 	wg       sync.WaitGroup
 	quit     chan struct{}
 	closeOne sync.Once
@@ -99,6 +114,14 @@ func NewServer(cfg Config) (*Server, error) {
 
 	reg := orderentry.NewRegistry(cfg.Incarnation, cfg.StreamRing)
 	pub := orderentry.NewPublisher(reg, 1<<15)
+	// The market-data feed shares the incarnation: both edges are describing the same
+	// run of the venue, and a subscriber that reconnects after a restart must be
+	// refused for the same reason an order-entry client is.
+	feed := marketdata.NewFeed(cfg.Incarnation, cfg.MDRetain)
+	// MultiSink rather than replacing the publisher: Config.EventSink is a single
+	// slot, so attaching the feed on its own would silently stop every execution
+	// report the order-entry side depends on.
+	sink := matching.MultiSink{pub, feed}
 
 	eng := matching.DefaultConfig(cfg.Symbol)
 	eng.DedupClientOrderIDs = 4096
@@ -124,15 +147,20 @@ func NewServer(cfg Config) (*Server, error) {
 		// or reduce them, and a fill against one produced no execution report at all
 		// because the publisher had no record of the order.
 		reg.Adopt(recovered.RestingOrders())
-		// Only now does the publisher go on, so live events are published and
-		// replayed history is not.
-		recovered.SetEventSink(pub)
+		// Seed the market-data feed too, so a subscriber's first snapshot shows the
+		// venue as it actually is. A feed starting empty against a recovered book
+		// would show only what has changed since the restart, which is almost
+		// nothing — the same shape of bug the session index had before v0.12.0.
+		feed.Adopt(recovered.RestingOrders(), recovered.LastTradePrice())
+		// Only now do the sinks go on, so live events are published and replayed
+		// history is not.
+		recovered.SetEventSink(sink)
 		if w, err = wal.Open(cfg.WALPath); err != nil {
 			return nil, fmt.Errorf("obgw: open wal: %w", err)
 		}
 	}
 
-	eng.EventSink = pub
+	eng.EventSink = sink
 
 	// Only populate Log when there really is one. Assigning a nil *wal.Writer to
 	// the CommandLog interface field yields a NON-nil interface holding a nil
@@ -156,6 +184,7 @@ func NewServer(cfg Config) (*Server, error) {
 		gate:   gateway.New(runner, gateway.Config{Rate: cfg.RatePerSec, Burst: cfg.Burst}),
 		reg:    reg,
 		pub:    pub,
+		feed:   feed,
 		quit:   make(chan struct{}),
 		conns:  map[net.Conn]struct{}{},
 	}, nil
@@ -164,19 +193,42 @@ func NewServer(cfg Config) (*Server, error) {
 // Addr reports the bound address, valid after Listen.
 func (s *Server) Addr() net.Addr { return s.ln.Addr() }
 
-// Listen binds the socket without serving, so a test can learn the port.
+// Listen binds the socket(s) without serving, so a test can learn the port.
 func (s *Server) Listen() error {
 	ln, err := net.Listen("tcp", s.cfg.Addr)
 	if err != nil {
 		return err
 	}
 	s.ln = ln
+	if s.cfg.MDAddr != "" {
+		mdLn, err := net.Listen("tcp", s.cfg.MDAddr)
+		if err != nil {
+			_ = ln.Close()
+			return err
+		}
+		s.mdLn = mdLn
+	}
 	return nil
+}
+
+// MDAddr reports the bound market-data address, valid after Listen when configured.
+func (s *Server) MDAddr() net.Addr {
+	if s.mdLn == nil {
+		return nil
+	}
+	return s.mdLn.Addr()
 }
 
 // Serve accepts connections until Close.
 func (s *Server) Serve() error {
 	go s.pub.Pump()
+	if s.mdLn != nil {
+		go func() {
+			if err := s.serveMarketData(); err != nil {
+				log.Printf("obgw: market data: %v", err)
+			}
+		}()
+	}
 	if s.wal != nil {
 		go s.syncLoop()
 		if s.cfg.CheckpointEvery > 0 && s.cfg.SnapshotPath != "" {
@@ -209,6 +261,9 @@ func (s *Server) Close() {
 		close(s.quit)
 		if s.ln != nil {
 			_ = s.ln.Close()
+		}
+		if s.mdLn != nil {
+			_ = s.mdLn.Close()
 		}
 		// Established connections must be closed explicitly: handlers are parked
 		// in a blocking read, and closing the listener does not reach them.

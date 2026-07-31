@@ -94,6 +94,129 @@ const (
 	MsgCODAck        uint8 = 'V' // outbound: cancel-on-disconnect setting accepted
 )
 
+// Market-data message types.
+//
+// A separate numbering space from order entry, because the two are separate
+// conversations on separate connections and nothing decodes both. Sharing one space
+// would mean every future order-entry message had to avoid every market-data one for
+// no benefit — but a decoder that received the wrong family would still refuse it,
+// since every decoder checks for exactly the type it wants.
+const (
+	MsgMDSubscribe uint8 = 'b' // inbound: start, or resume from a sequence
+	MsgMDReject    uint8 = 'r' // outbound: the subscription was refused
+
+	MsgMDLevel       uint8 = 'l' // outbound: one level of a snapshot
+	MsgMDSnapshotEnd uint8 = 'e' // outbound: the snapshot is complete
+	MsgMDDelta       uint8 = 'd' // outbound: one aggregated level change
+	MsgMDTrade       uint8 = 't' // outbound: a print
+	MsgMDStatus      uint8 = 's' // outbound: a venue state change
+)
+
+// Market-data reject reasons. Narrower than the order-entry vocabulary because a
+// subscriber has fewer ways to be wrong.
+const (
+	MDRejectWrongIncarnation uint8 = 'I' // the cursor belongs to another run of the venue
+	MDRejectEvicted          uint8 = 'E' // too far behind; take a fresh snapshot
+	MDRejectMalformed        uint8 = 'M'
+)
+
+// Venue states carried by MDStatus.
+const (
+	MDStateOpen       uint8 = 'O'
+	MDStateHalted     uint8 = 'H'
+	MDStateCancelOnly uint8 = 'C'
+)
+
+// MDSubscribe starts a market-data subscription.
+//
+// Seq of 0 means "I have nothing, send me a snapshot". A non-zero Seq with a matching
+// incarnation is a resume: send me everything after this. Incarnation is checked
+// because sequence numbers mean nothing across a restart, and serving different
+// content under numbers a subscriber believes it holds is the failure neither side
+// can see.
+type MDSubscribe struct {
+	Version     uint8
+	Incarnation string
+	Seq         uint64
+}
+
+// MDSubscribeLen is the encoded width of an MDSubscribe payload.
+const MDSubscribeLen = 1 + 1 + sessionLen + 8
+
+// MDReject refuses a subscription with one reason byte.
+type MDReject struct {
+	Version uint8
+	Reason  uint8
+}
+
+// MDRejectLen is the encoded width of an MDReject payload.
+const MDRejectLen = 1 + 1 + 1
+
+// MDLevel is one price level of a snapshot. A snapshot is a run of these followed by
+// an MDSnapshotEnd, which is the same shape as the order-entry Query reply — a
+// variable-length payload would be the only thing in this protocol that is not
+// fixed-width, and the terminator carries the count so a truncated snapshot cannot
+// look like a complete one.
+type MDLevel struct {
+	Version uint8
+	Side    uint8
+	Price   int64
+	Qty     int64
+}
+
+// MDLevelLen is the encoded width of an MDLevel payload.
+const MDLevelLen = 1 + 1 + 1 + 8 + 8
+
+// MDSnapshotEnd terminates a snapshot. Seq is the point the snapshot is consistent
+// with: everything the subscriber receives after this with a greater sequence applies
+// on top, and nothing at or below it does.
+type MDSnapshotEnd struct {
+	Version        uint8
+	Count          uint32
+	Seq            uint64
+	LastTradePrice int64
+}
+
+// MDSnapshotEndLen is the encoded width of an MDSnapshotEnd payload.
+const MDSnapshotEndLen = 1 + 1 + 4 + 8 + 8
+
+// MDDelta is one aggregated level change. Qty is the level's NEW total; zero means
+// the level is gone. Absolute rather than incremental, so a subscriber that drops one
+// recovers on the next update for that level instead of being permanently wrong.
+type MDDelta struct {
+	Version uint8
+	Seq     uint64
+	Side    uint8
+	Price   int64
+	Qty     int64
+}
+
+// MDDeltaLen is the encoded width of an MDDelta payload.
+const MDDeltaLen = 1 + 1 + 8 + 1 + 8 + 8
+
+// MDTrade is a print.
+type MDTrade struct {
+	Version   uint8
+	Seq       uint64
+	Price     int64
+	Qty       int64
+	Aggressor uint8
+}
+
+// MDTradeLen is the encoded width of an MDTrade payload.
+const MDTradeLen = 1 + 1 + 8 + 8 + 8 + 1
+
+// MDStatus is a venue state change, carried in the same ordered stream as the data it
+// qualifies rather than delivered on the side.
+type MDStatus struct {
+	Version uint8
+	Seq     uint64
+	State   uint8
+}
+
+// MDStatusLen is the encoded width of an MDStatus payload.
+const MDStatusLen = 1 + 1 + 8 + 1
+
 // Field widths. ClOrdIDLen bounds a client identifier; SymbolLen is 16 rather
 // than a tighter fit because real venue symbols outgrow short fields and
 // widening one later would invalidate every committed vector.

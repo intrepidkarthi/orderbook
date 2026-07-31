@@ -9,6 +9,26 @@ versions may include breaking changes).
 
 ### Added
 
+- **A market-data edge.** `cmd/obgw -mdaddr` serves the public feed on its own
+  listener from the same engine: snapshot-plus-delta for a new subscriber, gap-fill
+  for one that holds a cursor, trades and venue-state changes in the same ordered
+  stream. Seven message types, numbered separately from order entry.
+
+  One process, two edges, because that is how a venue is shaped — order entry is
+  authenticated and per-account, market data is anonymous and identical for everyone,
+  and sharing a port would put an unauthenticated subscriber on the order-entry code
+  path.
+
+  A snapshot is a run of `MDLevel` followed by an `MDSnapshotEnd` carrying the
+  sequence it is consistent with, rather than one variable-length message: every
+  payload stays fixed-width, and the terminator's count means a truncated snapshot
+  cannot look like a complete one. Same shape as the `Query` reply, same reasons.
+
+  An evicted or wrong-incarnation subscriber is refused explicitly rather than
+  quietly resynchronised, so it learns its own picture had a hole in it. A slow one is
+  disconnected; conflation is the better answer for market data and is deliberately
+  absent rather than half built.
+
 - **`marketdata.Feed`** — the venue's public market-data stream: one sequenced
   broadcast of book deltas, trade prints and venue-state changes, with
   snapshot-plus-delta recovery.
@@ -36,6 +56,13 @@ versions may include breaking changes).
   served a truncated slice that looks complete.
 
 ### Fixed
+
+- **The market-data feed was not seeded from a recovered book.** A restart left it
+  aggregating from an empty state against a non-empty venue, so a subscriber's first
+  snapshot would have shown only what changed since the restart — almost nothing.
+  `Feed.Adopt` seeds it, publishing no deltas, because those levels are the starting
+  state rather than changes to it. The same shape of bug the session layer's index had
+  before v0.12.0, caught this time by a test that restarts a venue and subscribes.
 
 - **A manual halt told nobody.** `Engine.Halt`, `Resume` and `SetCancelOnly` set the
   state and emitted nothing. Only the *automatic* transitions — a guardrail trip, a

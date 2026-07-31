@@ -633,3 +633,180 @@ func DecodeReplaceOrder(src []byte) (ReplaceOrder, error) {
 		Order:       getBase(src[off:]),
 	}, nil
 }
+
+// --- market data ---
+//
+// A snapshot is a run of MDLevel followed by MDSnapshotEnd, rather than one
+// variable-length message. That keeps every payload in this protocol fixed-width and
+// bounds-checkable by inspection, and it is the same shape as the order-entry Query
+// reply — including the terminator carrying a count, so a truncated snapshot cannot
+// be mistaken for a complete one.
+
+// EncodeMDSubscribe appends an MDSubscribe payload to dst.
+func EncodeMDSubscribe(dst []byte, m MDSubscribe) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, MDSubscribeLen)...)
+	b := dst[base:]
+	off := header(b, MsgMDSubscribe, m.Version)
+	if err := putFixed(b[off:off+sessionLen], m.Incarnation); err != nil {
+		return nil, err
+	}
+	binary.BigEndian.PutUint64(b[off+sessionLen:], m.Seq)
+	return dst, nil
+}
+
+// DecodeMDSubscribe reads an MDSubscribe payload from src.
+func DecodeMDSubscribe(src []byte) (MDSubscribe, error) {
+	if err := checkHeader(src, MDSubscribeLen, MsgMDSubscribe); err != nil {
+		return MDSubscribe{}, err
+	}
+	return MDSubscribe{
+		Version:     src[1],
+		Incarnation: getFixed(src[2 : 2+sessionLen]),
+		Seq:         binary.BigEndian.Uint64(src[2+sessionLen:]),
+	}, nil
+}
+
+// EncodeMDReject appends an MDReject payload to dst.
+func EncodeMDReject(dst []byte, m MDReject) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, MDRejectLen)...)
+	b := dst[base:]
+	off := header(b, MsgMDReject, m.Version)
+	b[off] = m.Reason
+	return dst, nil
+}
+
+// DecodeMDReject reads an MDReject payload from src.
+func DecodeMDReject(src []byte) (MDReject, error) {
+	if err := checkHeader(src, MDRejectLen, MsgMDReject); err != nil {
+		return MDReject{}, err
+	}
+	return MDReject{Version: src[1], Reason: src[2]}, nil
+}
+
+// EncodeMDLevel appends an MDLevel payload to dst.
+func EncodeMDLevel(dst []byte, m MDLevel) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, MDLevelLen)...)
+	b := dst[base:]
+	off := header(b, MsgMDLevel, m.Version)
+	b[off] = m.Side
+	binary.BigEndian.PutUint64(b[off+1:], uint64(m.Price))
+	binary.BigEndian.PutUint64(b[off+9:], uint64(m.Qty))
+	return dst, nil
+}
+
+// DecodeMDLevel reads an MDLevel payload from src.
+func DecodeMDLevel(src []byte) (MDLevel, error) {
+	if err := checkHeader(src, MDLevelLen, MsgMDLevel); err != nil {
+		return MDLevel{}, err
+	}
+	return MDLevel{
+		Version: src[1], Side: src[2],
+		Price: int64(binary.BigEndian.Uint64(src[3:])),
+		Qty:   int64(binary.BigEndian.Uint64(src[11:])),
+	}, nil
+}
+
+// EncodeMDSnapshotEnd appends an MDSnapshotEnd payload to dst.
+func EncodeMDSnapshotEnd(dst []byte, m MDSnapshotEnd) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, MDSnapshotEndLen)...)
+	b := dst[base:]
+	off := header(b, MsgMDSnapshotEnd, m.Version)
+	binary.BigEndian.PutUint32(b[off:], m.Count)
+	binary.BigEndian.PutUint64(b[off+4:], m.Seq)
+	binary.BigEndian.PutUint64(b[off+12:], uint64(m.LastTradePrice))
+	return dst, nil
+}
+
+// DecodeMDSnapshotEnd reads an MDSnapshotEnd payload from src.
+func DecodeMDSnapshotEnd(src []byte) (MDSnapshotEnd, error) {
+	if err := checkHeader(src, MDSnapshotEndLen, MsgMDSnapshotEnd); err != nil {
+		return MDSnapshotEnd{}, err
+	}
+	return MDSnapshotEnd{
+		Version:        src[1],
+		Count:          binary.BigEndian.Uint32(src[2:]),
+		Seq:            binary.BigEndian.Uint64(src[6:]),
+		LastTradePrice: int64(binary.BigEndian.Uint64(src[14:])),
+	}, nil
+}
+
+// EncodeMDDelta appends an MDDelta payload to dst.
+func EncodeMDDelta(dst []byte, m MDDelta) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, MDDeltaLen)...)
+	b := dst[base:]
+	off := header(b, MsgMDDelta, m.Version)
+	binary.BigEndian.PutUint64(b[off:], m.Seq)
+	b[off+8] = m.Side
+	binary.BigEndian.PutUint64(b[off+9:], uint64(m.Price))
+	binary.BigEndian.PutUint64(b[off+17:], uint64(m.Qty))
+	return dst, nil
+}
+
+// DecodeMDDelta reads an MDDelta payload from src.
+func DecodeMDDelta(src []byte) (MDDelta, error) {
+	if err := checkHeader(src, MDDeltaLen, MsgMDDelta); err != nil {
+		return MDDelta{}, err
+	}
+	return MDDelta{
+		Version: src[1],
+		Seq:     binary.BigEndian.Uint64(src[2:]),
+		Side:    src[10],
+		Price:   int64(binary.BigEndian.Uint64(src[11:])),
+		Qty:     int64(binary.BigEndian.Uint64(src[19:])),
+	}, nil
+}
+
+// EncodeMDTrade appends an MDTrade payload to dst.
+func EncodeMDTrade(dst []byte, m MDTrade) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, MDTradeLen)...)
+	b := dst[base:]
+	off := header(b, MsgMDTrade, m.Version)
+	binary.BigEndian.PutUint64(b[off:], m.Seq)
+	binary.BigEndian.PutUint64(b[off+8:], uint64(m.Price))
+	binary.BigEndian.PutUint64(b[off+16:], uint64(m.Qty))
+	b[off+24] = m.Aggressor
+	return dst, nil
+}
+
+// DecodeMDTrade reads an MDTrade payload from src.
+func DecodeMDTrade(src []byte) (MDTrade, error) {
+	if err := checkHeader(src, MDTradeLen, MsgMDTrade); err != nil {
+		return MDTrade{}, err
+	}
+	return MDTrade{
+		Version:   src[1],
+		Seq:       binary.BigEndian.Uint64(src[2:]),
+		Price:     int64(binary.BigEndian.Uint64(src[10:])),
+		Qty:       int64(binary.BigEndian.Uint64(src[18:])),
+		Aggressor: src[26],
+	}, nil
+}
+
+// EncodeMDStatus appends an MDStatus payload to dst.
+func EncodeMDStatus(dst []byte, m MDStatus) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, MDStatusLen)...)
+	b := dst[base:]
+	off := header(b, MsgMDStatus, m.Version)
+	binary.BigEndian.PutUint64(b[off:], m.Seq)
+	b[off+8] = m.State
+	return dst, nil
+}
+
+// DecodeMDStatus reads an MDStatus payload from src.
+func DecodeMDStatus(src []byte) (MDStatus, error) {
+	if err := checkHeader(src, MDStatusLen, MsgMDStatus); err != nil {
+		return MDStatus{}, err
+	}
+	return MDStatus{
+		Version: src[1],
+		Seq:     binary.BigEndian.Uint64(src[2:]),
+		State:   src[10],
+	}, nil
+}
