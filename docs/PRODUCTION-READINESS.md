@@ -33,7 +33,7 @@ in front of it.
 | Operational readiness | **Weak** — endpoints, thresholds and runbooks; none of it rehearsed |
 | Security at the edge | **Weak by design** — no TLS, secrets in the clear |
 | High availability | **Seams only** — deliberately no consensus |
-| Sustained load / soak at venue scale | **Partial** — a harness, and minutes of evidence |
+| Sustained load / soak at venue scale | **Partial** — a harness, and an hour of evidence |
 | Clearing, settlement, margin, fees | **Absent by design** |
 | Independent review | **None** |
 
@@ -107,10 +107,12 @@ named scenarios and recovery time at three book sizes.
 
 What they still do not cover, and this is the gap that matters for a production claim:
 
-- **Nothing has run for a day.** `cmd/obsoak` now sustains load for as long as you ask
-  it to, and the runs recorded in [SOAK.md](SOAK.md) are minutes. A trading day is
-  hours and a deployment is months. Fragmentation, log growth and snapshot cadence
-  across a full session remain unmeasured.
+- **Nothing has run for a day.** The longest run is an hour: 9,000,170 messages at
+  2,500/s, 50 minutes of steady state across 101 samples, with the goroutine and
+  descriptor counts not moving by one and the heap floor moving by 0.2 MiB
+  ([SOAK.md §1c](SOAK.md)). That rules out the leaks that appear in an hour and says
+  nothing about the ones that appear in a week. A trading day is longer and a
+  deployment is months.
 - **Hundreds of connections are still untested.** The soak runs use 25. The gateway's
   goroutine-per-connection model is fine in principle and unproven past a few dozen.
 - **There is no capacity plan, and the first attempt at one was wrong.** The rates
@@ -123,9 +125,12 @@ What they still do not cover, and this is the gap that matters for a production 
   is everything structural — a bounded book, no orphaned orders, no leaked goroutines
   or descriptors, p50 of 5 ms below saturation — because correctness findings are a
   property of the code and timing figures are a property of the host.
-- **The log costs more than anything else here.** 1.22 GiB in twenty minutes at
-  5,000/s — 3.7 GiB an hour, 88 GiB a day. The records are JSON, which was a choice
-  made for readability and never priced. Budget for it or change the encoding.
+- **The log costs more than anything else here, and it is the one figure that
+  reproduces.** About 220 bytes of journal per client message, measured at two rates an
+  evening apart and agreeing almost exactly: 1.22 GiB in twenty minutes at 5,000/s,
+  1.83 GiB in an hour at 2,500/s — 44 GiB a day at the lower rate. The records are JSON,
+  chosen for readability and never priced. Budget for it or change the encoding; the
+  framing, checksums and recovery do not care what the payload is.
 
 What the first soaks did establish is that microbenchmarks were measuring the wrong
 thing to predict any of this. The engine's in-process figures are in the millions of

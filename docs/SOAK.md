@@ -288,6 +288,60 @@ apparent connection wall was the same machine drift as everything else in this s
 
 ---
 
+## 1c. The long run
+
+An hour at 2,500 messages a second, 25 connections over 25 accounts, durable (WAL and
+30-second checkpoints), Apple M4, Go 1.23.5, loopback — and this time the machine's
+share of itself is recorded, so the run can be compared with another.
+
+```
+machine   fixed-work probe 57ms before, 57ms after  — stable
+
+  sent             9,000,170   (2,500/s, target 2,500/s)
+  fills            1,950,390
+  rejected         1,000,724   (11.119%)
+  errors                   0
+  unanswered              25   (0.000%)
+  p50 5ms   p90 25ms   p99 250ms
+
+  participants believe   2,486 resting
+  venue reports          1,958 resting
+
+steady state: 101 samples over 49m59s, after a 10m0s warmup
+  heap            floor   38.7 MiB ->   38.9 MiB   trend +4.6 MiB/hour
+  goroutines      floor        112 ->        112   trend -0/hour
+  descriptors     floor         37 ->         37   trend +0/hour
+  resting orders  floor      1,874 ->      1,873   trend -4/hour
+
+VERDICT: no growth in heap, goroutines or descriptors over 49m59s at 2,500 msg/s.
+This is evidence for 49m59s, and for nothing longer.
+```
+
+Nine million messages, two million fills, zero errors, twenty-five unanswered sends out
+of nine million. Across 101 samples spanning fifty minutes the goroutine count and the
+descriptor count did not move by one, the heap floor moved by 0.2 MiB, and the book
+held its shape. `obgw_publisher_dropped_total` stayed at zero throughout.
+
+This is the run the harness was built for, and it is worth being precise about what it
+licenses: fifty minutes of steady state at one rate, on one machine, with one workload
+shape. A trading day is longer, a real order mix is not this one, and 25 connections is
+not 500. It rules out the leaks that show up in an hour. It says nothing about the ones
+that show up in a week.
+
+### The log, again, and this time reproducibly
+
+1.83 GiB in an hour at 2,500 messages a second — about 218 bytes a record, matching the
+earlier measurement at twice the rate almost exactly. So unlike the throughput figures,
+this one reproduces: **roughly 220 bytes of journal per client message, whatever the
+rate.** At 2,500/s that is 44 GiB a day.
+
+It is the most predictable number this document contains and the one most likely to
+decide what a deployment can afford. The records are JSON, which was chosen for
+readability and never priced; the framing, checksums and recovery do not care what the
+payload is.
+
+---
+
 ## 2. What the harness measures
 
 Two vantage points, because they answer different questions.
