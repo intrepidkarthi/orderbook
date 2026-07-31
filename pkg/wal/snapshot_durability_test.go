@@ -1,6 +1,9 @@
 package wal
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -125,5 +128,115 @@ func TestWriteSnapshotOverwritesAtomically(t *testing.T) {
 	}
 	if len(got.Orders) != 3 {
 		t.Errorf("snapshot holds %d orders, want 3 (the second write)", len(got.Orders))
+	}
+}
+
+// TestSnapshotDetectsCorruption is the check the snapshot went four releases without.
+//
+// The asymmetry was the problem. Every log record carries a CRC and a complete record
+// that fails it refuses to start the venue. The snapshot is the base those records are
+// applied on top of — so a wrong snapshot is strictly worse than a wrong record — and
+// it had nothing. Most bit flips break the JSON and the parser catches them; a flip
+// inside a number parses perfectly and restores a book that never existed.
+func TestSnapshotDetectsCorruption(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "snap")
+	eng := matching.NewEngine(matching.DefaultConfig("X"))
+	o, err := types.NewOrder("alice", "X", types.SideBuy, types.OrderTypeLimit, 12345, 7, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	eng.Process(o)
+	if err := Checkpoint(path, eng, 1); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	// Flip a digit inside the JSON body, past the magic and the checksum. The result
+	// is still valid JSON and still a valid snapshot — just not the one that was
+	// written. This is exactly the corruption a parser cannot see.
+	i := bytes.Index(b, []byte("12345"))
+	if i < 0 {
+		t.Fatalf("test premise broken: the price is not in the file")
+	}
+	b[i] = '9'
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if _, err := ReadSnapshot(path); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("ReadSnapshot err = %v, want %v — a silently altered book was accepted", err, ErrCorrupt)
+	}
+}
+
+// TestRecoveryRefusesACorruptSnapshot — detection is only worth something if it stops
+// the venue. Recovering from a book whose bytes have changed and then trading against
+// it is the failure the checksum exists to prevent.
+func TestRecoveryRefusesACorruptSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	snapPath := filepath.Join(dir, "snap")
+	walPath := filepath.Join(dir, "log")
+
+	eng := matching.NewEngine(matching.DefaultConfig("X"))
+	o, err := types.NewOrder("alice", "X", types.SideBuy, types.OrderTypeLimit, 12345, 7, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	eng.Process(o)
+	if err := Checkpoint(snapPath, eng, 1); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+
+	b, _ := os.ReadFile(snapPath)
+	i := bytes.Index(b, []byte("12345"))
+	if i < 0 {
+		t.Fatal("test premise broken")
+	}
+	b[i] = '9'
+	if err := os.WriteFile(snapPath, b, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if _, err := Recover(matching.DefaultConfig("X"), snapPath, walPath); !errors.Is(err, ErrCorrupt) {
+		t.Errorf("Recover err = %v, want %v — the venue would have started on a book that never existed", err, ErrCorrupt)
+	}
+}
+
+// TestASnapshotWrittenBeforeChecksumsStillLoads — an upgrade must not cost a venue its
+// ability to recover. Those bytes cannot be verified, which is the honest trade, and
+// the next checkpoint rewrites the file with a checksum.
+func TestASnapshotWrittenBeforeChecksumsStillLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy")
+	eng := matching.NewEngine(matching.DefaultConfig("X"))
+	o, err := types.NewOrder("alice", "X", types.SideBuy, types.OrderTypeLimit, 100, 5, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	eng.Process(o)
+
+	// The old format: bare JSON, no magic, no checksum.
+	raw, err := json.Marshal(eng.TakeSnapshot())
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	snap, err := ReadSnapshot(path)
+	if err != nil {
+		t.Fatalf("a pre-checksum snapshot was refused: %v", err)
+	}
+	if snap == nil {
+		t.Fatal("no snapshot read")
+	}
+	restored, err := matching.RestoreEngine(matching.DefaultConfig("X"), snap)
+	if err != nil {
+		t.Fatalf("RestoreEngine: %v", err)
+	}
+	if restored.OrderCount() != 1 {
+		t.Errorf("restored %d orders, want 1", restored.OrderCount())
 	}
 }

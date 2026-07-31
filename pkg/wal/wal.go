@@ -91,6 +91,21 @@ type Entry struct {
 // is a v1 log — written before checksums existed — and is read without them; see
 // ReadAll.
 const (
+	// SnapMagic does for a snapshot what Magic does for the log: identifies the
+	// format and carries its version, so a file written by an older build is
+	// recognised as such rather than misread.
+	//
+	// The snapshot went without one for four releases, and the asymmetry was the
+	// problem. Every log record carries a CRC and a complete record that fails it
+	// refuses to start the venue — but the snapshot is the BASE those records are
+	// applied on top of, so a wrong snapshot is strictly worse than a wrong record,
+	// and it had no integrity check at all. A torn snapshot was already impossible
+	// (WriteSnapshot renames a fully-synced temp file into place, which is atomic).
+	// Media corruption was not: most bit flips break the JSON and are caught by the
+	// parser, but a flip inside a number parses perfectly and silently restores a
+	// book that never existed.
+	SnapMagic = "OBSNAP\x01"
+
 	// Magic identifies the format and carries its version in the final byte, so a
 	// future framing change is detectable rather than misread.
 	Magic = "OBWAL\x01"
@@ -519,10 +534,15 @@ func RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64) {
 // and the previous snapshot is untouched: a failed write never destroys the last
 // good one.
 func WriteSnapshot(path string, snap *matching.EngineSnapshot) (err error) {
-	b, err := json.Marshal(snap)
+	body, err := json.Marshal(snap)
 	if err != nil {
 		return err
 	}
+	b := make([]byte, 0, len(SnapMagic)+4+len(body))
+	b = append(b, SnapMagic...)
+	b = binary.BigEndian.AppendUint32(b, crc32.Checksum(body, crcTable))
+	b = append(b, body...)
+
 	tmp := path + ".tmp"
 	defer func() {
 		if err != nil {
@@ -617,6 +637,22 @@ func ReadSnapshot(path string) (*matching.EngineSnapshot, error) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	// A file without the magic is a snapshot from before checksums existed. It is read
+	// without one rather than refused, for the same reason a headerless log is: an
+	// upgrade must not cost a venue its ability to recover. Those bytes simply cannot
+	// be verified, and rewriting the file on the next checkpoint fixes that.
+	if len(b) >= len(SnapMagic)+4 && string(b[:len(SnapMagic)]) == SnapMagic {
+		want := binary.BigEndian.Uint32(b[len(SnapMagic) : len(SnapMagic)+4])
+		body := b[len(SnapMagic)+4:]
+		if got := crc32.Checksum(body, crcTable); got != want {
+			// Refused, not repaired. A snapshot is the base every log record after it
+			// is applied to, so starting from one whose bytes have changed produces a
+			// book that is wrong in a way nothing downstream can detect — and the
+			// venue would trade against it.
+			return nil, fmt.Errorf("%w: snapshot %s checksum %08x, want %08x", ErrCorrupt, path, got, want)
+		}
+		b = body
 	}
 	var s matching.EngineSnapshot
 	if err := json.Unmarshal(b, &s); err != nil {
