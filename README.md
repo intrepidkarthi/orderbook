@@ -83,9 +83,15 @@ you build on are correct, tested, and honest about their edges.
   refill, all five self-trade-prevention modes, FOK reversal and cascade-fired
   stops.
 - **Full order surface.** Limit, market, stop / stop-limit, iceberg (hidden),
-  post-only, pegged, OCO / bracket, and trailing-stop orders; GTC / IOC / FOK
-  time-in-force; self-trade prevention; a price-band circuit breaker; FIFO or
+  post-only, pegged, OCO / bracket, and trailing-stop orders; GTC / IOC / FOK / DAY /
+  GTD time-in-force, with the venue holding the deadline rather than the client
+  remembering to cancel; self-trade prevention; a price-band circuit breaker; FIFO or
   pro-rata allocation.
+- **A trading session.** Pre-open accepts orders without matching them, so the book
+  accumulates and may legitimately cross; opening resolves it at a single clearing
+  price by auction, in price-time priority, so a venue never opens onto a crossed book.
+  The engine holds no calendar — it knows what each phase permits, not when phases
+  change, because that is the venue's business.
 - **Market integrity & safety.** Opt-in pre-trade risk controls — fat-finger and
   dust caps, per-account order limits, minimum resting time, client-order-id
   idempotency, mark-price step **and** depth bounds, a self-output guardrail, and
@@ -296,7 +302,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [research/kyle-lambda.md](docs/research/kyle-lambda.md) | Price impact measured end to end: the λ a real book produces, why it scales as 1/depth, and what a block order costs against working the same quantity. |
 | [research/order-flow.md](docs/research/order-flow.md) | Delta, CVD, and absorption against ground truth: a 94.5%-accurate aggressor rule builds a CVD wrong by 169%, and CVD divergence loses to a price-only control. |
 | [PROTOCOL.md](docs/PROTOCOL.md) | The binary order-entry protocol `cmd/obgw` speaks: framing, session and resume, every message, the reason-code vocabulary, and what is deliberately absent from the wire. |
-| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.15.0) with breaking-change notes. |
+| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.16.0) with breaking-change notes. |
 
 ---
 

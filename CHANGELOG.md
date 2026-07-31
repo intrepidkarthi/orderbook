@@ -7,6 +7,36 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-31
+
+The session: a venue that opens, runs, and closes, and orders that know when they end.
+
+**Phases.** The engine knew open, cancel-only and halted, which is not a session. It
+now has pre-open and closed too. Pre-open accepts orders and does not match them, so
+the book may legitimately cross — the single deliberate exception to an invariant held
+everywhere else — and the transition to open resolves it at one clearing price. A
+venue never opens onto a crossed book.
+
+**Time-in-force that ends.** DAY and GTD, with the venue holding the deadline instead
+of the client remembering to cancel. Deadlines live in a min-heap rather than a
+per-command sweep, because a sweep would put an O(book) scan in front of every cancel
+and the tail-latency figures published two releases ago would have stopped being true
+the day it shipped.
+
+**Two things kept deliberately outside.** The engine holds no calendar — it knows
+which phase it is in and what that permits, not when phases change — because a trading
+calendar is a venue's business, the same reasoning that keeps consensus out of this
+library. And auction prints are marked, because both sides were resting and there is
+no aggressor; feeding a conventional one to the repository's own delta/CVD study would
+corrupt exactly what that study measures.
+
+**The bug this cycle found.** The order-entry handler carried its own copy of the
+side/type/TIF mapping, separate from the one every conditional entry uses. They
+diverged the moment DAY and GTD existed: a plain `Enter` carrying the new bytes fell
+through to the default and would have rested as GTC — an order the client believed had
+a deadline, living forever. Caught because the first version of the test asserted only
+that the order was *accepted*, which it was, as the wrong time-in-force.
+
 ### Added
 
 - **Trading phases, and the opening auction that joins them.** The engine knew three
