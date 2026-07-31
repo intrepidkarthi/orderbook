@@ -399,6 +399,11 @@ type Histogram struct {
 var histogramBounds = []int64{
 	100, 250, 500, 1_000, 2_500, 5_000, 10_000, 25_000, 50_000,
 	100_000, 250_000, 500_000, 1_000_000, 5_000_000, 25_000_000,
+	// Past here is not the engine, it is something being waited on: a scheduler that
+	// did not run us, a socket that did not drain, a GC pause. The soak harness
+	// measures client-observed latency with the same buckets and a tail that stopped
+	// at 25 ms would report every one of those as the same number.
+	100_000_000, 250_000_000,
 }
 
 // NewHistogram builds an empty histogram.
