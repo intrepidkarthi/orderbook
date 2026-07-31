@@ -145,7 +145,7 @@ of your own orders.
 | Symbol | 16 | must match the gateway's instrument |
 | Side | 1 | `B` buy, `S` sell |
 | Type | 1 | `L` limit, `M` market |
-| TIF | 1 | `G` GTC, `I` IOC, `F` FOK |
+| TIF | 1 | `G` GTC, `I` IOC, `F` FOK, `D` DAY |
 | PostOnly | 1 | |
 | Price | 8 | ticks; 0 for market |
 | Quantity | 8 | lots |
@@ -226,6 +226,27 @@ Notes that are load-bearing rather than decorative:
 
 `EnterStop`, `EnterIceberg` and `EnterTrailing` encode to the same 66 bytes and are
 separated by nothing but the type byte.
+
+**DAY** (`D`) rests until the venue's session close and then expires. It needs no
+extra field — the venue's close is the deadline — so it rides the existing `Enter` as
+a new value for a byte that already exists, moving nothing and invalidating no vector.
+A venue with no session configured **refuses** a DAY order rather than treating it as
+GTC: silently making an order immortal is the opposite of what you asked for.
+
+**EnterDated** — MsgType `J` (1) + Version (1) + base order (56) + ExpiresAt (8).
+Good-till-date: the order carries its own deadline, in Unix nanoseconds UTC.
+
+It is a separate message because `Enter` has nowhere to put a timestamp, and adding
+one would move every byte after it and invalidate a vector deployed clients already
+parse. Sending TIF `T` on a plain `Enter` is **refused**, not quietly downgraded to
+GTC, which would leave an order you believe is dated resting forever.
+
+A deadline already in the past is refused rather than accepted and expired on the next
+command — an accept-then-cancel for something that was never viable is just confusing.
+
+When an order expires, the `Canceled` you receive is the venue's, not yours. Expiry
+also ignores the minimum resting time: an anti-spoofing floor that could hold an order
+past its own stated lifetime would be the venue inventing liquidity you never offered.
 
 **Cancel** — MsgType `C` (1) + Version (1) + ClOrdID (20).
 

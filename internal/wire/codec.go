@@ -810,3 +810,23 @@ func DecodeMDStatus(src []byte) (MDStatus, error) {
 		State:   src[10],
 	}, nil
 }
+
+// --- EnterDated ---
+
+// EncodeEnterDated appends an EnterDated payload to dst.
+func EncodeEnterDated(dst []byte, m EnterDated) ([]byte, error) {
+	return encodeConditional(dst, EnterDatedLen, MsgEnterDated, m.Version, m.Order, m.ExpiresAt)
+}
+
+// DecodeEnterDated reads an EnterDated payload from src.
+func DecodeEnterDated(src []byte) (EnterDated, error) {
+	if err := checkHeader(src, EnterDatedLen, MsgEnterDated); err != nil {
+		return EnterDated{}, err
+	}
+	off := 2 + BaseOrderLen
+	return EnterDated{
+		Version:   src[1],
+		Order:     getBase(src[2:]),
+		ExpiresAt: int64(binary.BigEndian.Uint64(src[off:])),
+	}, nil
+}

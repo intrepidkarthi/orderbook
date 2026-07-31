@@ -196,6 +196,8 @@ func (r *Runner) dispatch(cmd command) {
 		rep.orders = r.engine.OpenOrdersFor(cmd.userID)
 	case cmdTrailingCount:
 		rep.count = r.engine.TrailingStopCount()
+	case cmdExpireDue:
+		r.engine.ExpireDue()
 	case cmdCheckpoint:
 		snap := r.engine.TakeSnapshot()
 		snap.WALSeq = r.lastApplied
@@ -710,6 +712,19 @@ func (r *Runner) OrderCount() int { return r.engine.OrderCount() }
 
 // PendingStopCount returns the number of resting stop orders.
 func (r *Runner) PendingStopCount() int { return r.engine.PendingStopCount() }
+
+// ExpireDue removes every order whose time-in-force deadline has passed.
+//
+// The engine expires lazily, on command arrival, so in a quiet market an expired
+// order stays in the book until something happens. That is invisible to anyone
+// trading — it is gone before it could match — but a market-data subscriber would see
+// depth that should have left. Drive this on a ticker if that matters; cmd/obgw does.
+//
+// It goes through the queue like any other command, so it is ordered against the
+// order flow rather than racing it.
+func (r *Runner) ExpireDue() {
+	r.send(command{kind: cmdExpireDue})
+}
 
 // TrailingStopCount returns the number of resting trailing stops. They are held
 // separately from the stop book — a trailing stop has no fixed trigger price to key

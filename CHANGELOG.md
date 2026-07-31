@@ -7,6 +7,51 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- **DAY and GTD time-in-force, with the venue holding the deadline.** The engine
+  supported GTC, IOC and FOK; DAY is what most real order flow uses, and without it a
+  client wanting an order gone at the close had to remember to cancel it — a job the
+  venue should be doing.
+
+  DAY rides the existing `Enter` as a new TIF byte, because the venue's session close
+  is its deadline and no field is needed. GTD gets its own message (`EnterDated`),
+  because `Enter` has nowhere to put a timestamp and adding one would move every byte
+  after it. Sending the GTD byte on a plain `Enter` is refused rather than quietly
+  downgraded to GTC, which would leave an order the client believes is dated resting
+  forever.
+
+  Deadlines live in a **min-heap**, not a per-command sweep of the book. A sweep would
+  be O(book) in front of every cancel, and the tail-latency figures this repository
+  publishes would have stopped being true the day it shipped. The cost when nothing is
+  due is one comparison.
+
+  A DAY order's deadline is **resolved on intake** and stored on the order, not
+  re-derived at expiry. That is what makes replay exact: the log carries the resolved
+  instant, so a recovery expires it exactly when the live engine did rather than at
+  whatever the session close happens to be during replay.
+
+  Expiry ignores `MinRestingTime` — a floor that could hold an order past its own
+  stated lifetime would be the venue inventing liquidity the client never offered — and
+  the `Canceled` carries `ErrOrderExpired` so a consumer can tell it from a cancel the
+  client issued. Expired orders leave *before* matching, so nothing ever trades against
+  liquidity that should already be gone.
+
+  A venue with no session close configured refuses DAY orders (`ErrNoSessionClose`)
+  rather than treating them as GTC.
+
+### Fixed
+
+- **The order-entry handler carried its own copy of the side/type/TIF mapping**, and
+  it diverged the moment DAY and GTD were added: a plain `Enter` carrying the new TIF
+  bytes fell through to the default and would have rested as GTC, so an order the
+  client believed had a deadline would have lived forever. `Enter` now builds through
+  the same path as every conditional entry.
+
+  Caught because the first version of the DAY test asserted only that the order was
+  accepted — which it was, as the wrong time-in-force. The test now asserts the
+  resting order's actual TIF and deadline.
+
 ## [0.15.0] - 2026-07-31
 
 The second edge. The venue could take orders and could not publish a market.

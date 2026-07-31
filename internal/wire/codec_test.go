@@ -406,6 +406,12 @@ func goldenCases(t *testing.T) map[string][]byte {
 			Order: BaseOrder{ClOrdID: "cl-new", Symbol: "BTC-USD", Side: SideBuy, Type: TypeLimit,
 				TIF: TIFGoodTillCancel, Price: 30500, Quantity: 250},
 		})),
+		"enter_dated": must(EncodeEnterDated(nil, EnterDated{
+			Version: Version,
+			Order: BaseOrder{ClOrdID: "cl-d", Symbol: "BTC-USD", Side: SideBuy, Type: TypeLimit,
+				TIF: TIFGoodTillCancel, Price: 30000, Quantity: 10},
+			ExpiresAt: 1785000000000000000,
+		})),
 		"enter_stop": must(EncodeEnterStop(nil, EnterStop{
 			Version: Version,
 			Order: BaseOrder{ClOrdID: "cl-s", Symbol: "BTC-USD", Side: SideSell, Type: TypeMarket,
@@ -646,7 +652,7 @@ func TestMessageTypesAreDistinct(t *testing.T) {
 	types := map[string]uint8{
 		"Enter": MsgEnter, "Cancel": MsgCancel, "Query": MsgQuery, "Reduce": MsgReduce,
 		"ReplaceOrder": MsgReplaceOrder,
-		"EnterStop":    MsgEnterStop, "EnterOCO": MsgEnterOCO, "EnterIceberg": MsgEnterIceberg,
+		"EnterDated":   MsgEnterDated, "EnterStop": MsgEnterStop, "EnterOCO": MsgEnterOCO, "EnterIceberg": MsgEnterIceberg,
 		"EnterPegged": MsgEnterPegged, "EnterTrailing": MsgEnterTrailing,
 		"MassCancel": MsgMassCancel, "CancelOnDisconnect": MsgCancelOnDisconnect,
 		"Accepted": MsgAccepted, "Rejected": MsgRejected, "Executed": MsgExecuted,

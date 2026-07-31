@@ -49,6 +49,15 @@ type Config struct {
 	// code path as order entry, which is the wrong default however carefully it is
 	// written.
 	MDAddr string
+	// SessionClose reports when the trading session ends, which is what a DAY order
+	// expires at. Nil means the venue has declared no session and DAY orders are
+	// refused.
+	SessionClose func() time.Time
+	// ExpireEvery drives the expiry sweep. The engine expires lazily on command
+	// arrival, which is enough for correctness — an expired order is gone before it
+	// could match — but in a quiet market a market-data subscriber would see depth
+	// that should have left. Zero disables the ticker.
+	ExpireEvery time.Duration
 	// MDRetain bounds the market-data gap-fill ring. A subscriber further behind than
 	// this is told to resubscribe from a snapshot rather than served a partial answer.
 	MDRetain int
@@ -75,6 +84,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.MDRetain <= 0 {
 		c.MDRetain = 1 << 16
+	}
+	if c.ExpireEvery <= 0 {
+		c.ExpireEvery = time.Second
 	}
 }
 
@@ -125,6 +137,7 @@ func NewServer(cfg Config) (*Server, error) {
 
 	eng := matching.DefaultConfig(cfg.Symbol)
 	eng.DedupClientOrderIDs = 4096
+	eng.SessionClose = cfg.SessionClose
 
 	var (
 		w         *wal.Writer
@@ -222,6 +235,7 @@ func (s *Server) MDAddr() net.Addr {
 // Serve accepts connections until Close.
 func (s *Server) Serve() error {
 	go s.pub.Pump()
+	go s.expireLoop()
 	if s.mdLn != nil {
 		go func() {
 			if err := s.serveMarketData(); err != nil {
@@ -284,6 +298,23 @@ func (s *Server) Close() {
 			}
 		}
 	})
+}
+
+// expireLoop drives time-in-force expiry on a ticker, so a DAY or GTD order leaves
+// the book at its deadline rather than at the next command. Correctness does not
+// depend on it — an expired order is removed before anything can match against it —
+// but market data would otherwise show depth that should have gone.
+func (s *Server) expireLoop() {
+	t := time.NewTicker(s.cfg.ExpireEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.quit:
+			return
+		case <-t.C:
+			s.runner.ExpireDue()
+		}
+	}
 }
 
 // syncLoop group-commits the log. Syncing per command would put a disk write in
@@ -507,6 +538,8 @@ func (sess *session) apply(payload []byte) {
 		sess.reduce(payload)
 	case wire.MsgReplaceOrder:
 		sess.replaceOrder(payload)
+	case wire.MsgEnterDated:
+		sess.enterDated(payload)
 	case wire.MsgEnterStop:
 		sess.enterStop(payload)
 	case wire.MsgEnterOCO:
@@ -534,38 +567,19 @@ func (sess *session) enter(payload []byte) {
 		sess.reject("", orderentry.ReasonMalformed)
 		return
 	}
-
-	// The gateway serves one instrument. A client naming a different one is
-	// refused rather than silently having its order booked in this one.
-	if m.Symbol != sess.srv.cfg.Symbol {
-		sess.reject(m.ClOrdID, orderentry.ReasonMalformed)
+	// Built through the same path as every conditional entry. This handler used to
+	// carry its own copy of the side/type/TIF mapping, and the two drifted the moment
+	// DAY and GTD were added: a plain Enter carrying the new TIF bytes fell through to
+	// the default and rested as GTC, so an order the client believed had a deadline
+	// would have lived forever. One mapping, one place.
+	o, reason := sess.buildOrder(wire.BaseOrder{
+		ClOrdID: m.ClOrdID, Symbol: m.Symbol, Side: m.Side, Type: m.Type,
+		TIF: m.TIF, PostOnly: m.PostOnly, Price: m.Price, Quantity: m.Quantity,
+	})
+	if reason != 0 {
+		sess.reject(m.ClOrdID, reason)
 		return
 	}
-
-	side := types.SideBuy
-	if m.Side == wire.SideSell {
-		side = types.SideSell
-	}
-	otype := types.OrderTypeLimit
-	if m.Type == wire.TypeMarket {
-		otype = types.OrderTypeMarket
-	}
-	tif := types.TIFGoodTillCancel
-	switch m.TIF {
-	case wire.TIFImmediateOrCanc:
-		tif = types.TIFImmediateOrCancel
-	case wire.TIFFillOrKill:
-		tif = types.TIFFillOrKill
-	}
-
-	// The account comes from the authenticated session, never from the wire.
-	o, err := types.NewOrder(sess.account, sess.srv.cfg.Symbol, side, otype, m.Price, m.Quantity, tif)
-	if err != nil {
-		sess.reject(m.ClOrdID, orderentry.ReasonMalformed)
-		return
-	}
-	o.ClientOrderID = m.ClOrdID
-	o.PostOnly = m.PostOnly
 
 	if !sess.srv.gate.Allow(o, time.Now()) {
 		sess.reject(m.ClOrdID, orderentry.ReasonThrottled)
@@ -609,6 +623,13 @@ func (sess *session) buildOrder(b wire.BaseOrder) (*types.Order, uint16) {
 		tif = types.TIFImmediateOrCancel
 	case wire.TIFFillOrKill:
 		tif = types.TIFFillOrKill
+	case wire.TIFDay:
+		tif = types.TIFDay
+	case wire.TIFGoodTillDate:
+		// GTD has nowhere on a plain Enter to carry its deadline, so it is only
+		// legal via EnterDated. Refused rather than quietly downgraded to GTC,
+		// which would leave an order the client believes is dated resting forever.
+		return nil, orderentry.ReasonMalformed
 	}
 	o, err := types.NewOrder(sess.account, sess.srv.cfg.Symbol, side, otype, b.Price, b.Quantity, tif)
 	if err != nil {
@@ -633,6 +654,41 @@ func (sess *session) submitConditional(clOrdID string, o *types.Order, enqueue f
 			reason = orderentry.ReasonShuttingDown
 		}
 		sess.reject(clOrdID, reason)
+	}
+}
+
+// enterDated places an order carrying its own expiry (GTD).
+//
+// The deadline is validated by the engine, which refuses one already in the past
+// rather than accepting the order and expiring it on the next command.
+func (sess *session) enterDated(payload []byte) {
+	m, err := wire.DecodeEnterDated(payload)
+	if err != nil || m.Version != wire.Version {
+		sess.reject("", orderentry.ReasonMalformed)
+		return
+	}
+	// The TIF byte is forced rather than trusted: this message exists precisely to
+	// carry a deadline, and an EnterDated claiming to be GTC would be a contradiction
+	// the engine would then have to guess about.
+	m.Order.TIF = wire.TIFGoodTillCancel
+	o, reason := sess.buildOrder(m.Order)
+	if reason != 0 {
+		sess.reject(m.Order.ClOrdID, reason)
+		return
+	}
+	o.TimeInForce = types.TIFGoodTillDate
+	o.ExpiresAt = time.Unix(0, m.ExpiresAt).UTC()
+
+	if !sess.srv.gate.Allow(o, time.Now()) {
+		sess.reject(m.Order.ClOrdID, orderentry.ReasonThrottled)
+		return
+	}
+	if err := sess.srv.runner.TryEnqueue(o); err != nil {
+		reason := orderentry.ReasonOverloaded
+		if errors.Is(err, matching.ErrShuttingDown) {
+			reason = orderentry.ReasonShuttingDown
+		}
+		sess.reject(m.Order.ClOrdID, reason)
 	}
 }
 

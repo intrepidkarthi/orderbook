@@ -38,7 +38,20 @@ const (
 	TIFImmediateOrCancel TimeInForce = "IOC"
 	// TIFFillOrKill fills the entire order immediately or cancels all of it.
 	TIFFillOrKill TimeInForce = "FOK"
+	// TIFDay rests until the end of the current trading session, then expires.
+	//
+	// It is the time-in-force most real order flow uses, and it needs the venue to
+	// say when the session ends: an engine with no session close configured refuses
+	// a DAY order rather than treating it as GTC, because silently making an order
+	// immortal is the opposite of what the client asked for.
+	TIFDay TimeInForce = "DAY"
+	// TIFGoodTillDate rests until Order.ExpiresAt, then expires. The engine holds the
+	// deadline; the client does not have to poll and cancel.
+	TIFGoodTillDate TimeInForce = "GTD"
 )
+
+// Expiring reports whether this time-in-force gives an order a deadline.
+func (t TimeInForce) Expiring() bool { return t == TIFDay || t == TIFGoodTillDate }
 
 // OrderStatus is the lifecycle state of an order.
 type OrderStatus string
@@ -78,6 +91,11 @@ type Order struct {
 	Status        OrderStatus `json:"status"`
 	CreatedAt     time.Time   `json:"created_at"`
 	UpdatedAt     time.Time   `json:"updated_at"`
+	// ExpiresAt is when a GTD order expires. It is set by the caller for
+	// TIFGoodTillDate and by the engine for TIFDay, which resolves it from the
+	// configured session close on intake — so a DAY order carries a real deadline
+	// through the log and a replay expires it at the same instant.
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
 
 	// STPMode, if non-empty, overrides the engine's self-trade-prevention mode for
 	// this (taker) order — the taker's mode decides, as real venues do. Values are
@@ -121,7 +139,7 @@ func NewOrder(userID, symbol string, side Side, orderType OrderType, price, quan
 	}
 
 	switch tif {
-	case TIFGoodTillCancel, TIFImmediateOrCancel, TIFFillOrKill:
+	case TIFGoodTillCancel, TIFImmediateOrCancel, TIFFillOrKill, TIFDay, TIFGoodTillDate:
 	default:
 		return nil, ErrInvalidTimeInForce
 	}

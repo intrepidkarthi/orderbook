@@ -23,6 +23,7 @@ const (
 	cmdReplace
 	cmdOpenOrders
 	cmdTrailingCount
+	cmdExpireDue
 	cmdCheckpoint
 )
 

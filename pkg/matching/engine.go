@@ -139,6 +139,14 @@ type Config struct {
 	// minimum elapses. Zero disables it. This targets the JPMorgan/Coscia
 	// spoofing pattern (post size, pull it before it can fill).
 	MinRestingTime time.Duration
+	// SessionClose reports when the current trading session ends, which is what a
+	// TIFDay order expires at. Nil means the venue has not declared a session, and a
+	// DAY order is then refused with ErrNoSessionClose rather than treated as GTC —
+	// silently making an order immortal is the opposite of what the client asked for.
+	//
+	// It is a function rather than a fixed time so a venue can roll it daily without
+	// rebuilding the engine.
+	SessionClose func() time.Time
 	// MaxMarkStep bounds how far a single SetMarkPrice update may move the mark
 	// from its current value, as a fraction (e.g. 0.20 = ±20%). A larger jump is
 	// rejected with ErrMarkStepTooLarge, so a thin-book oracle pump cannot drag
@@ -226,6 +234,8 @@ type Engine struct {
 	icebergOrders map[int64]*types.IcebergOrder
 	ocoByOrderID  map[int64]*types.OCOOrder // both legs' ids map to the pair
 	trailingStops map[int64]*types.TrailingStop
+	// expiries schedules TIFDay and TIFGoodTillDate deadlines. See expiry.go.
+	expiries expiryQueue
 	// now is the instant of the command being applied, stamped once by nextID and
 	// reused by every fill and event it produces. Single-writer, so a field is
 	// safe; see commandNow.
@@ -538,13 +548,40 @@ func (e *Engine) commandNow() time.Time {
 func (e *Engine) Match(order *types.Order, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
 	start := len(dst)
 	e.nextID(order)
+	// Anything whose deadline has passed leaves before this order is matched, so it
+	// cannot trade against liquidity that should no longer exist. When nothing is due
+	// this is a single comparison.
+	e.expireDue()
+	// Resolve the deadline before matching, so a DAY order with no session or a GTD
+	// order already in the past is refused rather than discovered later when it fails
+	// to expire.
+	if reason := e.resolveExpiry(order); reason != nil {
+		order.Status = types.OrderStatusRejected
+		e.emitResult(order, nil, types.OrderStatusRejected, reason)
+		return dst, types.OrderStatusRejected, reason
+	}
 	dst, status, reason := e.settleInto(order, dst)
 	if reason == nil {
 		e.recordClientOrderID(order) // remember only accepted orders
+		e.trackExpiry(order)         // only what actually rested gets a deadline
 	}
 	dst = e.cascadeStops(dst)
 	e.emitResult(order, dst[start:], status, reason)
 	return dst, status, reason
+}
+
+// ExpireDue removes every order whose time-in-force deadline has passed.
+//
+// The engine expires lazily: a deadline is checked whenever a command arrives, so in
+// a quiet market an expired order stays in the book until something happens. That is
+// invisible to anyone trading — the order is gone before it could match — but it is
+// visible to a market-data subscriber, which would see depth that should have left.
+// An embedder that cares drives this on a ticker; cmd/obgw does.
+//
+// Single-writer: call from the engine's goroutine, or use Runner.ExpireDue.
+func (e *Engine) ExpireDue() {
+	e.now = e.clock().UTC()
+	e.expireDue()
 }
 
 // Process runs one order through the engine and returns a *MatchResult. It is the
@@ -632,6 +669,17 @@ func (e *Engine) emitCancel(order *types.Order) {
 		return
 	}
 	e.pending = append(e.pending, Event{Kind: EventCanceled, OrderID: order.ID, UserID: order.UserID, Order: order})
+}
+
+// emitCancelReason publishes a Canceled carrying why, so a consumer can tell an
+// expiry from a cancel the client issued.
+func (e *Engine) emitCancelReason(order *types.Order, reason error) {
+	if e.sink == nil {
+		return
+	}
+	e.pending = append(e.pending, Event{
+		Kind: EventCanceled, OrderID: order.ID, UserID: order.UserID, Order: order, Reason: reason,
+	})
 }
 
 // emitTriggered announces that a conditional order's trigger has been reached and it
@@ -1798,6 +1846,8 @@ func (e *Engine) CancelAllForUser(userID string) []*types.Order {
 // Cancel removes a resting order (or a pending stop) if it belongs to userID and
 // is still active.
 func (e *Engine) Cancel(orderID int64, userID string) (*types.Order, error) {
+	e.now = e.clock().UTC()
+	e.expireDue()
 	now := e.clock().UTC()
 
 	if order, exists := e.book.Get(orderID); exists {

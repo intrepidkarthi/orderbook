@@ -74,6 +74,7 @@ const (
 	MsgQuery              uint8 = 'Q' // inbound: report my open orders
 	MsgReduce             uint8 = 'M' // inbound: shrink a resting order, keeping queue position
 	MsgReplaceOrder       uint8 = 'Z' // inbound: cancel one order and enter another, atomically
+	MsgEnterDated         uint8 = 'J' // inbound: an order carrying its own expiry (GTD)
 	MsgEnterStop          uint8 = 'S' // inbound: stop / stop-limit order
 	MsgEnterOCO           uint8 = 'N' // inbound: one-cancels-other pair
 	MsgEnterIceberg       uint8 = 'I' // inbound: iceberg (reserve) order
@@ -236,6 +237,14 @@ const (
 	TIFGoodTillCancel  uint8 = 'G'
 	TIFImmediateOrCanc uint8 = 'I'
 	TIFFillOrKill      uint8 = 'F'
+	// TIFDay rests until the venue's session close. It needs no extra field, so it
+	// rides the existing Enter — a new legal value for a byte that already exists
+	// moves nothing and invalidates no vector.
+	TIFDay uint8 = 'D'
+	// TIFGoodTillDate needs a deadline, which Enter has nowhere to put. Use
+	// EnterDated; sending 'T' on a plain Enter is refused rather than silently
+	// treated as GTC.
+	TIFGoodTillDate uint8 = 'T'
 )
 
 // Reason codes. A deliberately narrow vocabulary a client can branch on, not a
@@ -342,6 +351,26 @@ type ReplaceOrder struct {
 
 // ReplaceOrderLen is the encoded width of a ReplaceOrder payload.
 const ReplaceOrderLen = 1 + 1 + ClOrdIDLen + BaseOrderLen
+
+// EnterDated is an order that carries its own deadline: the base order plus the
+// instant it expires.
+//
+// It is a separate message because Enter has nowhere to put a timestamp, and adding
+// one would move every byte after it and invalidate a vector that deployed clients
+// already parse. DAY needs no such field — the venue's session close is the deadline —
+// so DAY rides the existing Enter as a new TIF value.
+//
+// ExpiresAt is Unix nanoseconds UTC. A deadline already in the past is refused rather
+// than accepted and immediately expired, which would be a confusing accept-then-cancel
+// for an order that was never viable.
+type EnterDated struct {
+	Version   uint8
+	Order     BaseOrder
+	ExpiresAt int64 // Unix nanoseconds, UTC
+}
+
+// EnterDatedLen is the encoded width of an EnterDated payload.
+const EnterDatedLen = 1 + 1 + BaseOrderLen + 8
 
 // --- conditional orders ---
 //

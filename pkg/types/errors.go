@@ -4,8 +4,18 @@ import "errors"
 
 // Validation errors raised when constructing orders.
 var (
-	ErrInvalidPrice       = errors.New("invalid price: must be positive")
-	ErrInvalidQuantity    = errors.New("invalid quantity: must be positive")
+	ErrInvalidPrice    = errors.New("invalid price: must be positive")
+	ErrInvalidQuantity = errors.New("invalid quantity: must be positive")
+	// ErrOrderExpired reports an order whose time-in-force deadline has passed. It is
+	// the reason carried on the Canceled event when the engine expires an order, so a
+	// client can tell an expiry from a cancel it did not issue.
+	ErrOrderExpired = errors.New("order expired")
+	// ErrNoSessionClose reports a DAY order submitted to an engine with no session
+	// close configured. Refused rather than treated as GTC: silently making an order
+	// immortal is the opposite of what the client asked for.
+	ErrNoSessionClose = errors.New("day order requires a configured session close")
+	// ErrInvalidExpiry reports a GTD order with a missing or already-past deadline.
+	ErrInvalidExpiry      = errors.New("invalid expiry time")
 	ErrInvalidSide        = errors.New("invalid order side")
 	ErrInvalidOrderType   = errors.New("invalid order type")
 	ErrInvalidTimeInForce = errors.New("invalid time in force")
