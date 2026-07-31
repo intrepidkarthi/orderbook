@@ -9,6 +9,39 @@ versions may include breaking changes).
 
 ### Added
 
+- **Trading phases, and the opening auction that joins them.** The engine knew three
+  states — open, cancel-only, halted — which is not a session. It now has `PreOpen` and
+  `Closed` as well, and `SetPhase` to move between them.
+
+  **Pre-open accepts orders and does not match them**, so the book may legitimately
+  cross: a bid above an ask simply rests there. That is the point, and it is the single
+  deliberate exception to an invariant the engine holds everywhere else. Everything
+  that accumulates is resolved at one price by `Uncross` — every buy at or above it and
+  every sell at or below it trades, in price-time priority, at that single price. The
+  clearing price maximises executed volume, reusing `pkg/auction` rather than
+  reimplementing it, and moving from pre-open to open runs the uncross first so a venue
+  never opens onto a crossed book.
+
+  Market orders are refused in pre-open: an unpriced order has nothing to rest at, and
+  holding it to execute at whatever the auction decides is not what it asked for.
+
+  **Auction prints carry `Trade.Auction`.** Both sides were resting, so there is no
+  aggressor and `TakerSide` is not meaningful on them — anything inferring order flow
+  from aggressor side has to exclude them rather than treat the convention as data.
+  That matters here specifically, because this repository's own delta/CVD study is
+  built on aggressor ground truth.
+
+  **The engine holds no calendar.** It knows which phase it is in and what that phase
+  permits; it does not know when phases change. The venue calls `SetPhase`, because a
+  trading calendar is a venue's business and embedding one would force every embedder
+  to accept somebody else's — the same reasoning that keeps consensus out of this
+  repository.
+
+- `orderbook.FrontOrder`, returning the highest-priority resting order on a side in
+  O(1). The uncross needs "the next order that should trade" repeatedly, and deriving
+  that from `Orders()` would allocate and walk the whole book per fill — turning an
+  uncross of a large book into O(book²) at exactly the moment a venue is opening.
+
 - **DAY and GTD time-in-force, with the venue holding the deadline.** The engine
   supported GTC, IOC and FOK; DAY is what most real order flow uses, and without it a
   client wanting an order gone at the close had to remember to cancel it — a job the

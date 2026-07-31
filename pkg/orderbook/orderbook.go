@@ -272,6 +272,30 @@ func (ob *OrderBook) Get(orderID int64) (*types.Order, bool) {
 	return n.order, true
 }
 
+// FrontOrder returns the highest-priority resting order on a side — the head of the
+// best price level — in O(1).
+//
+// It exists for the auction uncross, which repeatedly needs "the next order that
+// should trade". Deriving that from Orders() would allocate and walk the whole book on
+// every fill, turning an uncross of a large book into an O(book^2) operation at exactly
+// the moment a venue is trying to open.
+func (ob *OrderBook) FrontOrder(side types.Side) (*types.Order, bool) {
+	ob.mu.RLock()
+	defer ob.mu.RUnlock()
+	prices, levels := ob.bidPrices, ob.bids
+	if side == types.SideSell {
+		prices, levels = ob.askPrices, ob.asks
+	}
+	for _, p := range prices {
+		l, ok := levels[p]
+		if !ok || l.head == nil {
+			continue
+		}
+		return l.head.order, true
+	}
+	return nil, false
+}
+
 // BestBid returns the highest bid price (ticks) and its aggregate quantity (lots).
 func (ob *OrderBook) BestBid() (price, qty int64, ok bool) {
 	ob.mu.RLock()

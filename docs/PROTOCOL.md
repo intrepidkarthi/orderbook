@@ -443,6 +443,10 @@ code path as order entry, which is the wrong default however carefully it is wri
 | **MDDelta** | `d` | Seq, Side, Price, Qty — one aggregated level change |
 | **MDTrade** | `t` | Seq, Price, Qty, Aggressor — a print |
 | **MDStatus** | `s` | Seq, State (`O`pen / `H`alted / `C`ancel-only) |
+
+Pre-open and post-close are reported as cancel-only on the wire: a subscriber needs to
+know it cannot trade, and the exact phase is a venue concept the feed does not attempt
+to enumerate.
 | **MDReject** | `r` | one reason byte |
 
 Market data numbers its types **separately** from order entry. The two are separate

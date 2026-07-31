@@ -24,6 +24,7 @@ const (
 	cmdOpenOrders
 	cmdTrailingCount
 	cmdExpireDue
+	cmdSetPhase
 	cmdCheckpoint
 )
 
@@ -39,6 +40,7 @@ type command struct {
 	pegged    *types.PeggedOrder
 	trailing  *types.TrailingStop
 	replace   *types.Order // the replacement order for cmdReplace
+	phase     EngineState  // target phase for cmdSetPhase
 	cancelID  int64
 	reduceQty int64
 	userID    string
@@ -52,6 +54,7 @@ type cmdReply struct {
 	match  *MatchResult
 	order  *types.Order
 	orders []*types.Order
+	trades []*types.Trade
 	count  int
 	err    error
 }

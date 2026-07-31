@@ -198,6 +198,13 @@ func (r *Runner) dispatch(cmd command) {
 		rep.count = r.engine.TrailingStopCount()
 	case cmdExpireDue:
 		r.engine.ExpireDue()
+	case cmdSetPhase:
+		// Copied to pointers because the engine's slice is a value buffer it reuses;
+		// handing it out would let a caller read trades the next command overwrites.
+		for _, t := range r.engine.SetPhase(cmd.phase) {
+			tc := t
+			rep.trades = append(rep.trades, &tc)
+		}
 	case cmdCheckpoint:
 		snap := r.engine.TakeSnapshot()
 		snap.WALSeq = r.lastApplied
@@ -712,6 +719,23 @@ func (r *Runner) OrderCount() int { return r.engine.OrderCount() }
 
 // PendingStopCount returns the number of resting stop orders.
 func (r *Runner) PendingStopCount() int { return r.engine.PendingStopCount() }
+
+// SetPhase moves the venue to a new trading phase and returns any trades the
+// transition produced — which is the opening uncross, when moving out of pre-open.
+//
+// It goes through the queue like any other command, so the phase change is ordered
+// against the order flow rather than racing it: an order submitted just before a
+// pre-open closes is either in the auction or after it, never ambiguous.
+func (r *Runner) SetPhase(phase EngineState) []*types.Trade {
+	rep, ok := r.send(command{kind: cmdSetPhase, phase: phase})
+	if !ok {
+		return nil
+	}
+	return rep.trades
+}
+
+// Phase reports the venue's current trading phase.
+func (r *Runner) Phase() EngineState { return r.engine.State() }
 
 // ExpireDue removes every order whose time-in-force deadline has passed.
 //

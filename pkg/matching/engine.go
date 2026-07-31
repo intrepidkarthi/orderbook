@@ -54,7 +54,31 @@ const (
 	StateOpen       EngineState = iota // normal trading
 	StateCancelOnly                    // cancels only; new orders rejected
 	StateHalted                        // all orders rejected
+	// StatePreOpen accepts limit orders and does NOT match them, so the book may
+	// legitimately cross. The crossed book is resolved by Uncross, which is what an
+	// opening auction is. Market orders are refused: there is no price to trade at
+	// until the uncross has decided one.
+	StatePreOpen
+	// StateClosed is after the session: no new liquidity, cancels still accepted so a
+	// participant can clear its book before the next session.
+	StateClosed
 )
+
+// String names the state, for logs and operator tooling.
+func (s EngineState) String() string {
+	switch s {
+	case StateCancelOnly:
+		return "CANCEL_ONLY"
+	case StateHalted:
+		return "HALTED"
+	case StatePreOpen:
+		return "PRE_OPEN"
+	case StateClosed:
+		return "CLOSED"
+	default:
+		return "OPEN"
+	}
+}
 
 // Guardrail is an optional self-output safety valve. If the engine prints more
 // than MaxTrades trades (or MaxNotional in tick·lot units) within Window, it
@@ -768,9 +792,27 @@ func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trad
 	case StateHalted:
 		order.Status = types.OrderStatusRejected
 		return dst, types.OrderStatusRejected, types.ErrTradingHalted
-	case StateCancelOnly:
+	case StateCancelOnly, StateClosed:
 		order.Status = types.OrderStatusRejected
 		return dst, types.OrderStatusRejected, types.ErrNewOrdersHalted
+	case StatePreOpen:
+		// Pre-open takes orders and does not match them. A market order has no price
+		// to rest at and no price to trade at until the uncross decides one, so it is
+		// refused rather than held and executed at whatever the auction produces —
+		// which is not what an unpriced order asked for.
+		if order.Type == types.OrderTypeMarket {
+			order.Status = types.OrderStatusRejected
+			return dst, types.OrderStatusRejected, types.ErrNewOrdersHalted
+		}
+		if err := e.checkOrderCaps(order); err != nil {
+			order.Status = types.OrderStatusRejected
+			return dst, types.OrderStatusRejected, err
+		}
+		if err := e.restOrder(order); err != nil {
+			order.Status = types.OrderStatusRejected
+			return dst, types.OrderStatusRejected, err
+		}
+		return dst, order.Status, nil
 	}
 	// Pre-trade risk caps (fat-finger size/notional + int64 overflow guard).
 	if err := e.checkOrderCaps(order); err != nil {

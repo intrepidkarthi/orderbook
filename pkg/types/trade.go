@@ -7,19 +7,24 @@ import "time"
 // integer ticks and Quantity in integer lots. ID/SequenceNum are monotonic
 // int64 values assigned by the engine.
 type Trade struct {
-	ID           int64     `json:"id"`
-	Symbol       string    `json:"symbol"`
-	Price        int64     `json:"price"` // ticks
-	Quantity     int64     `json:"quantity"`
-	BuyOrderID   int64     `json:"buy_order_id"`
-	SellOrderID  int64     `json:"sell_order_id"`
-	BuyerUserID  string    `json:"buyer_user_id"`
-	SellerUserID string    `json:"seller_user_id"`
-	MakerOrderID int64     `json:"maker_order_id"`
-	TakerOrderID int64     `json:"taker_order_id"`
-	TakerSide    Side      `json:"taker_side"`
-	CreatedAt    time.Time `json:"created_at"`
-	SequenceNum  int64     `json:"sequence_num"`
+	ID           int64  `json:"id"`
+	Symbol       string `json:"symbol"`
+	Price        int64  `json:"price"` // ticks
+	Quantity     int64  `json:"quantity"`
+	BuyOrderID   int64  `json:"buy_order_id"`
+	SellOrderID  int64  `json:"sell_order_id"`
+	BuyerUserID  string `json:"buyer_user_id"`
+	SellerUserID string `json:"seller_user_id"`
+	MakerOrderID int64  `json:"maker_order_id"`
+	TakerOrderID int64  `json:"taker_order_id"`
+	TakerSide    Side   `json:"taker_side"`
+	// Auction marks a print produced by an uncross rather than by continuous
+	// matching. In an auction both sides were resting and there is no aggressor, so
+	// TakerSide is not meaningful on these prints — anything inferring order flow
+	// from aggressor side must exclude them rather than treat the convention as data.
+	Auction     bool      `json:"auction,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	SequenceNum int64     `json:"sequence_num"`
 }
 
 // NewTradeValue builds a trade value (no heap allocation) from the matched
