@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -330,5 +331,70 @@ func TestQueryAfterRecoveryAgreesWithWhatCanBeActedOn(t *testing.T) {
 	}
 	if got := revived.runner.OrderCount(); got != 0 {
 		t.Errorf("book still holds %d orders", got)
+	}
+}
+
+// TestATornLogStillYieldsANameableBook composes two things that are tested apart and
+// were never tested together: a log torn by a crash, and a client naming an order that
+// survived it.
+//
+// The WAL distinguishes a torn tail from media corruption, and recovery seeds the
+// session index from the recovered book. Both have their own tests. What neither
+// covers is the whole chain a real restart runs — torn log, recovered book, adopted
+// index, and a cancel resolved on the matching goroutine — which is the chain a venue
+// actually depends on at the worst moment it will ever have.
+//
+// The tear is written the way a crash writes one: a length header with fewer bytes
+// after it than it claims, appended to a log whose earlier records are intact.
+func TestATornLogStillYieldsANameableBook(t *testing.T) {
+	cfg := durableConfig(t)
+	srv := durableServer(t, cfg)
+
+	c := dial(t, srv)
+	c.mustLogin("alice", "pw1")
+	c.enter("survivor", wire.SideBuy, wire.TypeLimit, wire.TIFGoodTillCancel, 100, 10)
+	if _, ok := c.awaitType(t, wire.MsgAccepted, 3*time.Second); !ok {
+		t.Fatal("order not accepted")
+	}
+	// No snapshot: force recovery to go through the log rather than restoring a
+	// checkpoint and reading nothing after it.
+	cfg.SnapshotPath = ""
+	srv.Close()
+
+	f, err := os.OpenFile(cfg.WALPath, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open wal: %v", err)
+	}
+	// A four-byte length prefix claiming 4 KiB, followed by nothing.
+	if _, err := f.Write([]byte{0x00, 0x00, 0x10, 0x00}); err != nil {
+		t.Fatalf("tear the log: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close wal: %v", err)
+	}
+
+	cfg.Addr = "127.0.0.1:0"
+	revived, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("a torn tail refused to start the venue: %v", err)
+	}
+	if err := revived.Listen(); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	go func() { _ = revived.Serve() }()
+	defer revived.Close()
+
+	if got := revived.runner.OrderCount(); got != 1 {
+		t.Fatalf("recovered %d orders, want the one written before the tear", got)
+	}
+
+	c2 := dial(t, revived)
+	c2.mustLogin("alice", "pw1")
+	c2.cancel("survivor")
+	if _, ok := c2.awaitType(t, wire.MsgCanceled, 3*time.Second); !ok {
+		t.Fatal("an order that survived a torn log could not be named by its client id")
+	}
+	if got := revived.runner.OrderCount(); got != 0 {
+		t.Errorf("book still holds %d orders after the cancel", got)
 	}
 }
