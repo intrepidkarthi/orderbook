@@ -71,6 +71,7 @@ After both fixes, 25 connections over 30 seconds:
 |---:|---:|---:|---:|
 | 10,000/s | 1,645 | 2,491 | none |
 | 20,000/s | 1,272 | 2,488 | none |
+| 5,000/s, 20 min | 1,963 | 2,487 | none |
 
 The venue now holds slightly *fewer* orders than the clients think, which is the
 correct direction: the difference is cancels in flight.
@@ -98,6 +99,71 @@ existed there was nothing anywhere that said it had happened.
 
 It reads zero in every run recorded here. That is worth knowing too, and it was not
 knowable before.
+
+---
+
+## 1a. The first clean run
+
+20 minutes, 25 connections over 25 accounts, 5,000 messages a second, durable (WAL and
+30-second checkpoints), on an Apple M4 (10 cores), Go 1.23.5, loopback. Both the venue
+and the load generator on the same machine.
+
+```
+throughput
+  sent             6,000,042   (5,000/s, target 5,000/s)
+  fills            1,298,701
+  rejected           669,207   (11.153%)
+  errors                   0
+  unanswered              26   (0.000%)
+    command unknown order             652,222
+    command queue full                 16,985
+
+client-observed latency, socket write to first response
+  p50                    5ms
+  p90                   25ms
+  p99                  250ms
+  mean           20.651826ms
+
+steady state: 61 samples over 15m0s, after a 5m0s warmup
+  heap            floor   39.8 MiB ->   39.9 MiB   trend +16.0 MiB/hour
+  goroutines      floor        111 ->        111   trend -0/hour
+  descriptors     floor         36 ->         33   trend -1/hour
+  resting orders  floor      1,868 ->      1,859   trend +18/hour
+
+VERDICT: no growth in heap, goroutines or descriptors over 15m0s at 5,000 msg/s.
+This is evidence for 15m0s, and for nothing longer.
+```
+
+Reading it honestly:
+
+- **Nothing leaked over fifteen minutes.** Heap floor flat to within 0.1 MiB across
+  61 samples, goroutines pinned at 111, descriptors unchanged. The `+16.0 MiB/hour`
+  trend is the saw-tooth, which is why the verdict is not computed from it.
+- **The book held its shape.** 1,963 resting against 2,487 the clients believed —
+  the difference is cancels in flight, and it is the correct direction. Before the fix
+  in §1 this figure climbed to the 100,000-order ceiling.
+- **11% rejections is the workload, not a fault.** 652,222 of them are `unknown order`:
+  cancels of orders that had already been filled, which is what happens when a fifth of
+  the flow is marketable and a participant cancels its oldest quote rather than
+  checking first. A real client would have the fill first.
+- **16,985 `queue full` — 0.28% — is the venue at its limit,** briefly. The command
+  queue sat near zero for the run and spiked past 2,000 twice. 5,000/s durable is
+  comfortable here; 7,000/s durable still runs clean; 10,000/s durable saturates.
+- **p99 of 250 ms is the top bucket, and the load generator is on the same machine.**
+  Treat the tail as an upper bound with the harness's own scheduling in it, not as a
+  venue figure. p50 of 5 ms through a real socket, a real protocol and an fsync-ing log
+  is the number to reason from.
+
+### The log is the capacity constraint nobody had costed
+
+The write-ahead log reached **1.22 GiB in twenty minutes** — about 218 bytes a record,
+**3.7 GiB an hour, 88 GiB a day** at this rate. The records are JSON.
+
+That is not a defect; it is a design choice made for readability and never priced. But
+it is the first thing a deployment will hit that no benchmark on this repository
+mentions, and it changes what you provision, how often you checkpoint, and how long you
+can retain. If you run this for real, either budget for it or replace the record
+encoding — the framing, checksums and recovery do not care what the payload is.
 
 ---
 

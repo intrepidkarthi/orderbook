@@ -115,7 +115,13 @@ What they still do not cover, and this is the gap that matters for a production 
   goroutine-per-connection model is fine in principle and unproven past a few dozen.
 - **The capacity plan is a first data point, not a plan.** One machine, one instrument,
   loopback, with the load generator competing for the same cores. It tells you the
-  shape of the limit, not what your hardware will carry.
+  shape of the limit, not what your hardware will carry. What it does say: 20 minutes
+  at 5,000 messages a second, durable, held a flat heap floor, 111 goroutines and 36
+  descriptors, with a client-observed p50 of 5 ms. 7,000/s durable still runs clean;
+  10,000/s saturates the command queue.
+- **The log costs more than anything else here.** 1.22 GiB in twenty minutes at
+  5,000/s — 3.7 GiB an hour, 88 GiB a day. The records are JSON, which was a choice
+  made for readability and never priced. Budget for it or change the encoding.
 
 What the first soaks did establish is that microbenchmarks were measuring the wrong
 thing to predict any of this. The engine's in-process figures are in the millions of
