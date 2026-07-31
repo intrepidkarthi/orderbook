@@ -146,10 +146,17 @@ func NewServer(cfg Config) (*Server, error) {
 	// wrapping the handlers is the difference between metrics that can disagree with
 	// the engine and metrics that cannot.
 	col := observability.NewCollector()
+	// The naming index goes FIRST, and the order is load-bearing. It runs on the
+	// matching goroutine and makes an order addressable by its client's own id the
+	// moment the engine accepts it; everything after it may lag. Behind the publisher
+	// — which is where this lived until a soak found it — a cancel arriving while the
+	// pump was behind was refused for an order that was live in the book, and the
+	// client, correctly, never asked again. See pkg/orderentry/nameindex.go.
+	//
 	// MultiSink rather than replacing the publisher: Config.EventSink is a single
 	// slot, so attaching the feed on its own would silently stop every execution
 	// report the order-entry side depends on.
-	sink := matching.MultiSink{pub, feed, col}
+	sink := matching.MultiSink{orderentry.NewNameIndex(reg), pub, feed, col}
 
 	eng := matching.DefaultConfig(cfg.Symbol)
 	eng.DedupClientOrderIDs = 4096
@@ -891,13 +898,24 @@ func (sess *session) cancel(payload []byte) {
 		sess.reject("", orderentry.ReasonMalformed)
 		return
 	}
-	id, ok := sess.srv.reg.OrderIDFor(sess.account, m.ClOrdID)
-	if !ok {
-		sess.reject(m.ClOrdID, orderentry.ReasonUnknownOrder)
-		return
-	}
+	// The order is named when the command is applied, not now. Now is too early: the
+	// Enter that creates it may still be in the queue ahead of this cancel, and a
+	// client told "no such order" does not ask again — the order would rest in the
+	// book, addressable by nobody, until the venue restarted. Measured at 12,843
+	// orphaned orders in thirty seconds at 10,000 messages a second. See docs/SOAK.md.
+	//
+	// The closure runs on the matching goroutine, so the reject on the miss path is a
+	// non-blocking send onto this connection's bounded queue and nothing else.
+	//
 	// The account is the session's, so a client can only ever cancel its own.
-	if err := sess.srv.runner.TryEnqueueCancel(id, sess.account); err != nil {
+	err = sess.srv.runner.TryEnqueueCancelBy(sess.account, func() (int64, bool) {
+		id, ok := sess.srv.reg.OrderIDFor(sess.account, m.ClOrdID)
+		if !ok {
+			sess.reject(m.ClOrdID, orderentry.ReasonUnknownOrder)
+		}
+		return id, ok
+	})
+	if err != nil {
 		sess.reject(m.ClOrdID, orderentry.ReasonOverloaded)
 	}
 }
@@ -927,14 +945,13 @@ func (sess *session) reduce(payload []byte) {
 		sess.reject(m.ClOrdID, orderentry.ReasonInvalidQuantity)
 		return
 	}
-	id, ok := sess.srv.reg.OrderIDFor(sess.account, m.ClOrdID)
-	if !ok {
-		sess.reject(m.ClOrdID, orderentry.ReasonUnknownOrder)
-		return
-	}
+	// Named at apply time, for the same reason a cancel is. See sess.cancel.
+	//
 	// The account is the session's, so the engine's own (orderID, userID) check
 	// makes naming another client's order impossible rather than merely refused.
-	done, err := sess.srv.runner.TryReduceAsync(id, m.Quantity, sess.account)
+	done, err := sess.srv.runner.TryReduceAsyncBy(m.Quantity, sess.account, func() (int64, bool) {
+		return sess.srv.reg.OrderIDFor(sess.account, m.ClOrdID)
+	})
 	if err != nil {
 		reason := orderentry.ReasonOverloaded
 		if errors.Is(err, matching.ErrShuttingDown) {
@@ -1002,11 +1019,6 @@ func (sess *session) replaceOrder(payload []byte) {
 		sess.reject("", orderentry.ReasonMalformed)
 		return
 	}
-	id, ok := sess.srv.reg.OrderIDFor(sess.account, m.OrigClOrdID)
-	if !ok {
-		sess.reject(m.OrigClOrdID, orderentry.ReasonUnknownOrder)
-		return
-	}
 	replacement, reason := sess.buildOrder(m.Order)
 	if reason != 0 {
 		sess.reject(m.Order.ClOrdID, reason)
@@ -1018,7 +1030,10 @@ func (sess *session) replaceOrder(payload []byte) {
 		sess.reject(m.Order.ClOrdID, orderentry.ReasonThrottled)
 		return
 	}
-	done, err := sess.srv.runner.TryReplaceAsync(id, sess.account, replacement)
+	// Named at apply time, for the same reason a cancel is. See sess.cancel.
+	done, err := sess.srv.runner.TryReplaceAsyncBy(sess.account, replacement, func() (int64, bool) {
+		return sess.srv.reg.OrderIDFor(sess.account, m.OrigClOrdID)
+	})
 	if err != nil {
 		reason := orderentry.ReasonOverloaded
 		if errors.Is(err, matching.ErrShuttingDown) {

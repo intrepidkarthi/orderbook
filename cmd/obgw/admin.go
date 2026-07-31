@@ -7,6 +7,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"os"
 	"runtime"
 	"runtime/metrics"
 	"sync"
@@ -235,6 +236,20 @@ func (s *Server) registerGauges() {
 
 	c.Gauge("obgw_connections", "Established client sockets across both edges.",
 		func() float64 { return float64(s.connCount()) })
+	// The single most important number on this page, and the last one to be added.
+	//
+	// The publisher drops its OLDEST batches when its queue overflows, which is the
+	// right call — blocking would stop the venue and growing without limit would end
+	// it — but a dropped batch is not a delayed message, it is a lost one. Every
+	// consumer downstream derives from that stream: the session index that lets a
+	// client name its own order by ClOrdID, and the execution reports for fills
+	// against it. So one dropped batch orphans an order in the book that no client
+	// can ever cancel, and silently discards the fills against it.
+	//
+	// This is non-zero on any run that saturates, and until this gauge existed there
+	// was nothing anywhere that said so.
+	c.Gauge("obgw_publisher_dropped_total", "Event batches the publisher discarded under backpressure. Each one loses execution reports and orphans orders in the book. Alert on any increase.",
+		func() float64 { return float64(s.pub.Dropped()) })
 	// Goroutines and heap are here because the soak test is where this venue's real
 	// unknowns are: a leak shows up over hours, not in a benchmark, and it shows up
 	// here first.
@@ -242,6 +257,12 @@ func (s *Server) registerGauges() {
 		func() float64 { return float64(runtime.NumGoroutine()) })
 	c.Gauge("obgw_heap_bytes", "Live heap in bytes, read without stopping the world.",
 		heapBytes)
+	// File descriptors are the third leak that only appears over hours, and the one
+	// that ends a venue's day outright: at the limit, accept fails and no new
+	// participant can connect while the ones already on stay perfectly healthy — a
+	// failure that looks like nothing at all from inside the process.
+	c.Gauge("obgw_open_files", "Open file descriptors; -1 where the platform does not expose them.",
+		openFiles)
 }
 
 // phaseCode maps a trading phase to a number, because a Prometheus gauge is a number
@@ -287,6 +308,38 @@ func heapBytes() float64 {
 		return 0
 	}
 	return float64(heapSample[0].Value.Uint64())
+}
+
+// fdDir is where this platform lists the process's descriptors: /proc/self/fd on
+// Linux, /dev/fd on Darwin and the BSDs. Resolved once, because the answer cannot
+// change while the process runs.
+var fdDir = func() string {
+	for _, dir := range []string{"/proc/self/fd", "/dev/fd"} {
+		if _, err := os.Stat(dir); err == nil {
+			return dir
+		}
+	}
+	return ""
+}()
+
+// openFiles counts descriptors, returning -1 rather than 0 where it cannot. Zero is a
+// plausible reading and this is never plausibly zero, so reporting it would turn "I
+// could not tell you" into "everything is fine".
+func openFiles() float64 {
+	if fdDir == "" {
+		return -1
+	}
+	f, err := os.Open(fdDir)
+	if err != nil {
+		return -1
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(-1)
+	if err != nil {
+		return -1
+	}
+	// Minus one: the handle opened to do the counting is in its own listing.
+	return float64(len(names) - 1)
 }
 
 // applyLatency is the histogram the session read loop feeds.
