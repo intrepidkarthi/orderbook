@@ -160,6 +160,20 @@ func (r *Runner) loop() {
 
 func (r *Runner) dispatch(cmd command) {
 	var rep cmdReply
+	// Resolution first, and before the log: the journal must record the engine order
+	// id, not the client's name for it, or a replay would have to reconstruct a
+	// mapping that only ever existed in the gateway.
+	if cmd.resolve != nil {
+		id, ok := cmd.resolve()
+		if !ok {
+			rep.err = types.ErrOrderNotFound
+			if cmd.reply != nil {
+				cmd.reply <- rep
+			}
+			return
+		}
+		cmd.cancelID = id
+	}
 	r.logCommand(cmd)
 	switch cmd.kind {
 	case cmdSubmit:
@@ -553,6 +567,24 @@ func (r *Runner) TryEnqueueCancel(orderID int64, userID string) error {
 	return r.tryEnqueue(command{kind: cmdCancel, cancelID: orderID, userID: userID})
 }
 
+// TryEnqueueCancelBy is TryEnqueueCancel for a caller that does not yet know the
+// engine's id for the order — a gateway holding only the client's own identifier.
+//
+// resolve runs on the matching goroutine when the command reaches the front of the
+// queue, so every command enqueued before it has already been applied. That is the
+// only point at which "does this client's order exist?" has a stable answer: ask it
+// on the caller's goroutine instead and a cancel can be refused for an order whose
+// Enter is still two places behind it in the same queue, which no client retries
+// because it was told the order does not exist.
+//
+// Two obligations on resolve, both because of where it runs: it must not block, and
+// if it wants to tell the client that the order is genuinely unknown it must do so
+// without waiting — the reference gateway's reject is a non-blocking send onto a
+// bounded per-connection queue, which is the shape to copy.
+func (r *Runner) TryEnqueueCancelBy(userID string, resolve func() (int64, bool)) error {
+	return r.tryEnqueue(command{kind: cmdCancel, userID: userID, resolve: resolve})
+}
+
 // TryReplaceAsync enqueues an atomic cancel-and-replace and returns a channel
 // carrying its error — nil on success.
 //
@@ -561,13 +593,23 @@ func (r *Runner) TryEnqueueCancel(orderID int64, userID string) error {
 // cannot stall a connection's ingress, and only the error crosses the channel
 // because the resulting order is engine-owned.
 func (r *Runner) TryReplaceAsync(orderID int64, userID string, replacement *types.Order) (<-chan error, error) {
+	return r.tryReplaceAsync(orderID, userID, replacement, nil)
+}
+
+// TryReplaceAsyncBy is TryReplaceAsync with the target named at apply time. See
+// TryEnqueueCancelBy for why that matters.
+func (r *Runner) TryReplaceAsyncBy(userID string, replacement *types.Order, resolve func() (int64, bool)) (<-chan error, error) {
+	return r.tryReplaceAsync(0, userID, replacement, resolve)
+}
+
+func (r *Runner) tryReplaceAsync(orderID int64, userID string, replacement *types.Order, resolve func() (int64, bool)) (<-chan error, error) {
 	select {
 	case <-r.quit:
 		return nil, ErrShuttingDown
 	default:
 	}
 	reply := make(chan cmdReply, 1)
-	cmd := command{kind: cmdReplace, cancelID: orderID, userID: userID, replace: replacement, reply: reply}
+	cmd := command{kind: cmdReplace, cancelID: orderID, userID: userID, replace: replacement, reply: reply, resolve: resolve}
 	select {
 	case r.queue <- cmd:
 	default:
@@ -644,13 +686,23 @@ func (r *Runner) TryCancelAllAsync(userID string) (<-chan int, error) {
 // and the matching goroutine keeps mutating it, so handing it to a connection
 // goroutine would be the race TryEnqueue exists to avoid.
 func (r *Runner) TryReduceAsync(orderID, newQty int64, userID string) (<-chan error, error) {
+	return r.tryReduceAsync(orderID, newQty, userID, nil)
+}
+
+// TryReduceAsyncBy is TryReduceAsync with the target named at apply time. See
+// TryEnqueueCancelBy for why that matters.
+func (r *Runner) TryReduceAsyncBy(newQty int64, userID string, resolve func() (int64, bool)) (<-chan error, error) {
+	return r.tryReduceAsync(0, newQty, userID, resolve)
+}
+
+func (r *Runner) tryReduceAsync(orderID, newQty int64, userID string, resolve func() (int64, bool)) (<-chan error, error) {
 	select {
 	case <-r.quit:
 		return nil, ErrShuttingDown
 	default:
 	}
 	reply := make(chan cmdReply, 1)
-	cmd := command{kind: cmdReduce, cancelID: orderID, reduceQty: newQty, userID: userID, reply: reply}
+	cmd := command{kind: cmdReduce, cancelID: orderID, reduceQty: newQty, userID: userID, reply: reply, resolve: resolve}
 	select {
 	case r.queue <- cmd:
 	default:

@@ -33,16 +33,34 @@ const (
 // field is meaningful per kind. reply, if non-nil, receives the outcome once the
 // command has been applied.
 type command struct {
-	kind      cmdKind
-	order     *types.Order
-	stop      *types.StopOrder
-	oco       *types.OCOOrder
-	iceberg   *types.IcebergOrder
-	pegged    *types.PeggedOrder
-	trailing  *types.TrailingStop
-	replace   *types.Order // the replacement order for cmdReplace
-	phase     EngineState  // target phase for cmdSetPhase
-	cancelID  int64
+	kind     cmdKind
+	order    *types.Order
+	stop     *types.StopOrder
+	oco      *types.OCOOrder
+	iceberg  *types.IcebergOrder
+	pegged   *types.PeggedOrder
+	trailing *types.TrailingStop
+	replace  *types.Order // the replacement order for cmdReplace
+	phase    EngineState  // target phase for cmdSetPhase
+	cancelID int64
+	// resolve, when set, names the target order ON THE MATCHING GOROUTINE, at the
+	// moment the command is applied, instead of on the caller's goroutine before it
+	// is enqueued.
+	//
+	// The difference is the whole point. A client names its order by its own
+	// identifier, and the mapping from that to an engine order id only exists once the
+	// engine has accepted the order. Resolving ahead of the queue asks that question
+	// too early: with commands waiting, a cancel could be refused as "no such order"
+	// while the Enter that creates it was still queued two positions ahead of it. The
+	// enqueue order was always right — the reference gateway is careful to enqueue on
+	// its read loop precisely so a cancel cannot overtake its own Enter — but the
+	// lookup happened before the queue, so the ordering guarantee protected the wrong
+	// step.
+	//
+	// It is called exactly once, before the command is journalled, so the log records
+	// the resolved id and a replay needs no resolver. It must not block: it runs where
+	// the venue matches.
+	resolve   func() (int64, bool)
 	reduceQty int64
 	userID    string
 	snapOut   chan *EngineSnapshot
