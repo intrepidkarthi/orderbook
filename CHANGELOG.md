@@ -7,6 +7,80 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Orders that no client could cancel.** Under sustained load the reference gateway
+  refused a cancel for an order that was live in its own book. A client does not retry
+  a definitive "no such order", so the order stayed there, addressable by nobody, until
+  the venue restarted — and the book filled to `MaxOrders`, at which point the venue
+  stopped accepting liquidity while reporting itself healthy. Measured at 12,843
+  orphaned orders in thirty seconds at 10,000 messages a second; none below 4,000.
+
+  Two causes, and fixing the first made the second visible. The naming index was
+  maintained by the publisher's pump, which may lag — a late acknowledgement is still
+  an acknowledgement, but a late answer to "which order do you mean?" is a wrong one,
+  because the question is not asked twice. And the lookup happened *before* the command
+  queue, so a cancel could be refused while the `Enter` that creates it was still queued
+  ahead of it. `orderentry.NameIndex` moves naming onto the matching goroutine;
+  `matching.Runner`'s `TryEnqueueCancelBy` / `TryReduceAsyncBy` / `TryReplaceAsyncBy`
+  resolve the target when the command reaches the front of the queue.
+
+  Found by `cmd/obsoak` within its first hour. Not by 480 tests, two fuzz targets, the
+  race detector or any benchmark — it is not a race and not a wrong answer, it is a
+  right answer arriving after the question stopped being asked.
+
+- Four further defects, each created by the fix before it: a name that could outlive its
+  order once naming and forgetting had different owners; a caller-supplied resolver that
+  could panic and take the matching goroutine — and therefore the market — with it; an
+  allocation added to the hot path by a composite map key; and a concurrent map write
+  from the one `byClOrd` writer the lock split missed, which `-race` never reached and
+  a soak crashed the process on in thirty seconds.
+
+### Added
+
+- **`pkg/observability`** — a Prometheus collector attached to the engine as an
+  `EventSink`, so it counts what the book saw rather than what a gateway believed it
+  sent. No new dependency. Expiries are counted apart from cancels, rejections are
+  broken down by reason, and `orderbook_last_event_sequence` is exported because a
+  stalled matcher reads zero in every rate metric — which is exactly what a quiet market
+  reads.
+
+- **An admin edge on `cmd/obgw`** (`-admin`) serving `/metrics`, `/healthz` and
+  `/readyz` on its own port. Nothing a scrape touches goes through the command queue.
+  `/healthz` deliberately does not probe the matcher: a failed liveness check means
+  "restart me", and restarting a venue that is holding a book because a probe was slow
+  is worse than the stall.
+
+- **`cmd/obsoak`** — a soak harness. Sustained load, client-observed latency, and growth
+  judged on the heap's floor rather than its trend, because live heap saw-tooths under
+  GC pacing. Below five minutes of steady state it declines to conclude in either
+  direction.
+
+- **[docs/SOAK.md](docs/SOAK.md)** — what it measures, the methodology that took three
+  wrong versions to get right, and what it found.
+
+### Changed
+
+- **Corrected: the capacity figures published in `docs/SOAK.md` did not reproduce.**
+  5,000 msg/s comfortable, 7,000 clean and 10,000 saturating became 3,500 clean and
+  5,000 saturating four hours later, on the same machine and the same code. Ruled out
+  as a code regression by an interleaved A/B against a worktree at the earlier commit —
+  three rounds, alternating, indistinguishable. The difference was a desktop that had
+  been idle in the morning and was running a window server and browsers by the evening;
+  the measurement controlled for none of that and recorded none of it.
+
+  This project therefore does not know what rate the venue sustains. It knows the shape
+  — the durable path through a socket and a protocol runs three orders of magnitude
+  below the in-process benchmarks, and the command queue gives first — and it knows two
+  numbers taken under conditions it failed to write down. Third published figure
+  corrected against itself; second where the documentation was flattering.
+
+  What held at every rate and on both arms: a bounded book, no orphaned orders, no
+  dropped batches, no leaked goroutines or descriptors, p50 of 5 ms below saturation.
+  Timing figures are a property of the host; correctness findings are a property of the
+  code. `obsoak` now runs a fixed-work probe before and after each run and prints it
+  first, so a run carries the evidence of its own conditions.
+
 ### Added
 
 - **[docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md)** — what a venue
