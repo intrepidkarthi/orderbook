@@ -29,18 +29,24 @@ in front of it.
 | Order-entry and market-data protocols | **Strong** — frozen, both edges served |
 | Market-integrity controls | **Strong** — each mapped to a real case |
 | Performance and its honesty | **Strong** — measured, published, corrected |
-| Observability | **Weak** — seams exist, nothing ships |
-| Operational readiness | **Absent** — no runbooks, no health checks |
+| Observability | **Partial** — Prometheus metrics and health endpoints ship; no tracing |
+| Operational readiness | **Weak** — health and readiness endpoints, still no runbooks |
 | Security at the edge | **Weak by design** — no TLS, secrets in the clear |
 | High availability | **Seams only** — deliberately no consensus |
-| Sustained load / soak at venue scale | **Absent** — microbenchmarks only |
+| Sustained load / soak at venue scale | **Partial** — a harness, and minutes of evidence |
 | Clearing, settlement, margin, fees | **Absent by design** |
 | Independent review | **None** |
 
 Three of those are the difference between "a correct engine" and "a venue you could
-run": observability, operational readiness, and sustained load testing. They are also
-the three that no amount of further library work fixes, because they are about your
-deployment.
+run": observability, operational readiness, and sustained load testing. The first is
+now partly addressed and the third has a harness; the parts that remain are about your
+deployment and cannot ship in a module.
+
+The third one earned its place. Within the first hour of running under sustained load,
+the venue was found to be refusing cancels for orders that were live in its own book,
+filling to `MaxOrders` and then trading nothing — a defect that 480 tests, two fuzzers,
+the race detector and every benchmark had missed, and that the venue reported itself
+healthy throughout. See [SOAK.md](SOAK.md).
 
 ---
 
@@ -63,6 +69,33 @@ Each row names the evidence, because a checklist that only asserts is worth noth
 
 Test count: **480 test functions**, two fuzz targets, race and replay-recovery in CI.
 
+## 1a. What sustained load found that nothing else did
+
+The engine has 480 test functions, two fuzz targets at 5.6M executions, replay-recovery
+and race detection in CI, and a benchmark suite that has twice been corrected against
+itself. None of them found this:
+
+> Under sustained load the reference gateway refused cancels for orders that were live
+> in its own book. A client does not retry a definitive "no such order", so those
+> orders stayed in the book, addressable by nobody, until the venue restarted. At
+> 20,000 messages a second the book filled to its 100,000-order ceiling within thirty
+> seconds and the venue stopped accepting liquidity — while reporting itself healthy
+> the entire time.
+
+It was not a race and not a wrong answer. It was a right answer arriving after the
+question had stopped being asked, and that is a shape no unit test has a reason to
+look for. Both causes and both fixes are in [SOAK.md](SOAK.md).
+
+Two lessons, and they generalise past this repository:
+
+- **A correct answer delivered late can be indistinguishable from a wrong one.** The
+  venue's asynchronous publisher was carrying two things: a conversation with the
+  client, which may lag, and the venue's answer to "which order do you mean?", which
+  may not. They shared a queue because they were written at the same time.
+- **A test suite tests the questions you thought to ask.** Sustained load asks
+  different ones — not because it is cleverer, but because it puts the system in
+  states no test constructs.
+
 ## 2. Performance, and what the numbers do and do not mean
 
 Measured, published, and corrected when they were wrong — twice in this project's
@@ -72,46 +105,68 @@ history, both times in the direction of the documentation being flattering. See
 What they cover: in-process calls into the matching core, with tail latency across six
 named scenarios and recovery time at three book sizes.
 
-What they do not cover, and this is the gap that matters for a production claim:
+What they still do not cover, and this is the gap that matters for a production claim:
 
-- **No sustained load test.** Every figure is a microbenchmark over seconds. Nobody has
-  run this at target volume for a day, let alone a week. Memory growth, GC behaviour
-  under sustained pressure, and file-descriptor and goroutine leaks across a long
-  session are all unmeasured.
-- **No multi-client load test.** The gateway has been tested with a handful of
-  connections, not hundreds. Its per-connection goroutine model is fine in principle
-  and unproven in practice.
-- **No capacity plan.** The benchmarks tell you what one operation costs. They do not
-  tell you how many participants, orders per second, or symbols a given machine will
-  carry, because nobody has measured that.
+- **Nothing has run for a day.** `cmd/obsoak` now sustains load for as long as you ask
+  it to, and the runs recorded in [SOAK.md](SOAK.md) are minutes. A trading day is
+  hours and a deployment is months. Fragmentation, log growth and snapshot cadence
+  across a full session remain unmeasured.
+- **Hundreds of connections are still untested.** The soak runs use 25. The gateway's
+  goroutine-per-connection model is fine in principle and unproven past a few dozen.
+- **The capacity plan is a first data point, not a plan.** One machine, one instrument,
+  loopback, with the load generator competing for the same cores. It tells you the
+  shape of the limit, not what your hardware will carry.
+
+What the first soaks did establish is that microbenchmarks were measuring the wrong
+thing to predict any of this. The engine's in-process figures are in the millions of
+operations a second; the venue's sustained ceiling through a real socket, a real
+protocol and a durable log is three orders of magnitude below that, and the first thing
+that broke under sustained load was not throughput at all — it was correctness.
 
 ## 3. What a venue needs that this does not provide
 
-### Observability — weak
+### Observability — partial
 
-What exists: `QueueLen`/`QueueCap` gauges on the `Runner`, and an event stream that can
-drive anything.
+What exists now: `pkg/observability` is a Prometheus collector that attaches to the
+engine as an `EventSink`, so it counts what the book saw rather than what a gateway
+believed it sent. `cmd/obgw` serves it on a separate admin port alongside `/healthz`
+and `/readyz`. Counters cover order lifecycle, trades, phase transitions and
+rejections broken down by reason; gauges cover queue depth, book size, top of book,
+phase, connections, goroutines, heap and file descriptors. No new dependency — the
+exposition format is written directly.
 
-What does not: everything else. No Prometheus exporter, no tracing, no structured
-logging, no health or readiness endpoint.
+Three decisions in there are worth knowing before you rely on it:
 
-*(The first version of this document claimed a `Metrics` seam existed, because the
-README's contributing list mentions one. It does not exist and never did — the
-reference was to something a contributor might build. Corrected here rather than
-quietly, because a readiness checklist that repeats an unbacked claim is worse than no
-checklist. It is also the fourth time in this project's history that a documented seam
-turned out not to be there.)*
+- **Nothing a scrape touches goes through the command queue.** An endpoint that
+  enqueued would answer promptly while the venue was healthy and hang exactly when the
+  matcher stalled, losing the reading at the only moment anybody wanted it.
+- **`/healthz` does not probe the matcher.** A failed liveness check means "restart
+  me", and restarting a venue that is holding a book because a probe was slow is worse
+  than the stall. `/readyz` is the one that should pull a node out of rotation, and it
+  fires on queue occupancy past a high-water mark or on the event sequence standing
+  still while commands wait — which is the only way a stalled matcher is
+  distinguishable from a quiet market.
+- **An empty book reports NaN, not zero.** Zero is a price.
 
-You need this before almost anything else on this list: an unobservable venue is one
-you cannot operate even when it is behaving.
+What still does not exist: tracing, structured logging, and any dashboard or alert
+rules. The numbers are exposed; deciding what to alert on is yours.
 
-### Operational readiness — absent
+*(An earlier version of this document claimed a `Metrics` seam existed, because the
+README's contributing list mentions one. It did not exist and never had — the reference
+was to something a contributor might build. Recorded here rather than quietly deleted,
+because it was the fourth documented seam in this project that turned out not to be
+there, and that pattern is worth more to a reader than a clean page.)*
 
-No runbooks. No documented recovery procedure beyond "the code recovers". No rehearsed
-failure drills. No alerting thresholds — and note that the numbers you would alert on
-*are* now published (mass cancel blocks the matching goroutine for ~872 µs per 5,000
-orders; a 100,000-order restart takes ~174 ms), but knowing them is not the same as
-having an on-call engineer who has practised the response.
+### Operational readiness — weak
+
+What exists: health and readiness endpoints an orchestrator can use, and metrics to
+alert from.
+
+What does not: runbooks. No documented recovery procedure beyond "the code recovers".
+No rehearsed failure drills. No alerting thresholds — and note that the numbers you
+would alert on *are* now published (mass cancel blocks the matching goroutine for
+~872 µs per 5,000 orders; a 100,000-order restart takes ~174 ms), but knowing them is
+not the same as having an on-call engineer who has practised the response.
 
 ### Security at the edge — weak, and deliberately so
 
@@ -176,11 +231,15 @@ real defects. That is a good habit and it is not the same as someone else lookin
 
 In the order that will actually help:
 
-1. **Instrument it.** Metrics off the event stream, the queue-depth gauges, and
-   latency histograms. Nothing else on this list is useful until you can see what the
-   venue is doing.
-2. **Soak it at your volume.** Days, not seconds, with your order mix. Watch memory,
-   goroutines, file descriptors and GC. This is where the unknowns are.
+1. **Instrument it.** `pkg/observability` and the admin edge on `cmd/obgw` are the
+   starting point and not the end of it: you still need dashboards, alert thresholds
+   and tracing. Nothing else on this list is useful until you can see what the venue is
+   doing — which is not a slogan. The defect in §1 was invisible from inside the
+   process, and the metric that would have shown it did not exist until somebody went
+   looking.
+2. **Soak it at your volume.** `cmd/obsoak` will do it; see [SOAK.md](SOAK.md). Days,
+   not minutes, with your order mix, and watch the floor of the heap rather than its
+   trend. This is still where the unknowns are.
 3. **Put TLS and real credentials at the edge.** The reference gateway is explicit that
    it is not suitable as-is.
 4. **Decide your HA story and rehearse the failover.** The seams are here; the decision
