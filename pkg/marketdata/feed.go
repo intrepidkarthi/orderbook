@@ -88,6 +88,11 @@ const (
 	// UpdateStatus is a venue state change (halted, resumed), which a subscriber
 	// needs in the same ordered stream as the data it qualifies.
 	UpdateStatus
+	// UpdateIndicative is what an auction would clear at if it uncrossed now, with
+	// the imbalance left over. Published during an accumulating phase so participants
+	// can react before the price is fixed — an auction that revealed nothing until it
+	// printed would be a sealed-bid auction, a different market design.
+	UpdateIndicative
 )
 
 // Update is one sequenced market-data message.
@@ -112,6 +117,13 @@ type Update struct {
 
 	// UpdateStatus
 	State VenueState
+
+	// UpdateIndicative
+	IndicativePrice  int64
+	IndicativeVolume int64
+	// Imbalance is buy minus sell interest at the indicative price, in lots. Positive
+	// means more to buy than to sell.
+	Imbalance int64
 }
 
 // VenueState is the trading state a UpdateStatus reports.
@@ -307,6 +319,25 @@ func (f *Feed) Snapshot() Snapshot {
 		Asks:           f.book.Levels(types.SideSell),
 		LastTradePrice: f.lastTradePrice,
 	}
+}
+
+// PublishIndicative announces what an auction would currently clear at.
+//
+// The venue calls this on whatever cadence it chooses, rather than the feed deriving
+// it from every order. During an auction the indicative price moves on essentially
+// every message, and broadcasting that would be several times the traffic of the
+// order flow itself for information nobody can act on at that granularity — real
+// venues publish on a timer, and the timer is a venue decision.
+//
+// It takes a sequence like any other update, so it is ordered against the deltas
+// around it and a subscriber resuming mid-auction gets it in the right place.
+func (f *Feed) PublishIndicative(price, volume, imbalance int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.publishLocked(Update{
+		Kind: UpdateIndicative, IndicativePrice: price,
+		IndicativeVolume: volume, Imbalance: imbalance,
+	})
 }
 
 // Retained reports the oldest sequence still available for gap-fill, and how many

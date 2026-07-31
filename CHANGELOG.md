@@ -7,6 +7,34 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- **The closing auction, and indicative pricing through an auction.** v0.16.0 shipped
+  pre-open and the opening uncross; this completes the session at both ends.
+
+  `StateClosingAuction` accumulates orders on top of the live continuous book without
+  matching them, and leaving it resolves everything at one closing price. It needed
+  almost no new code: the transition rule was generalised from "pre-open into open" to
+  **"leaving any accumulating phase resolves what accumulated"**, which is what stops a
+  third accumulating phase arriving one day without an uncross.
+
+- **`Engine.IndicativeAuction`** reports what an auction would clear at right now —
+  price, volume, and the imbalance left over — without changing anything. A pre-open
+  that revealed nothing until it printed would be a sealed-bid auction, which is a
+  different market design with different incentives.
+
+  The imbalance is buy minus sell interest at that price, and its sign is the number a
+  participant acts on: the price says where the auction is, the imbalance says which
+  way it moves if nobody responds. There is a test for the sign in both directions,
+  because getting it backwards would be worse than not publishing it.
+
+- **`MDIndicative` on the market-data feed**, published by the venue on its own cadence
+  via `Feed.PublishIndicative` rather than derived from every order. During an auction
+  the indicative price moves on essentially every message; broadcasting that would be
+  several times the traffic of the order flow itself, for information nobody can act on
+  at that granularity. Real venues publish on a timer, and the timer is a venue
+  decision — the same reasoning that keeps the calendar out of the engine.
+
 ## [0.16.0] - 2026-07-31
 
 The session: a venue that opens, runs, and closes, and orders that know when they end.

@@ -208,6 +208,11 @@ func (s *Server) mdSendUpdates(conn net.Conn, updates []marketdata.Update) bool 
 				Version: wire.Version, Seq: u.Seq, Price: u.TradePrice,
 				Qty: u.TradeQty, Aggressor: mdSide(u.Aggressor),
 			})
+		case marketdata.UpdateIndicative:
+			b, err = wire.EncodeMDIndicative(nil, wire.MDIndicative{
+				Version: wire.Version, Seq: u.Seq, Price: u.IndicativePrice,
+				Volume: u.IndicativeVolume, Imbalance: u.Imbalance,
+			})
 		case marketdata.UpdateStatus:
 			b, err = wire.EncodeMDStatus(nil, wire.MDStatus{
 				Version: wire.Version, Seq: u.Seq, State: mdState(u.State),

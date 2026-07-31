@@ -25,6 +25,7 @@ const (
 	cmdTrailingCount
 	cmdExpireDue
 	cmdSetPhase
+	cmdIndicative
 	cmdCheckpoint
 )
 
@@ -51,10 +52,11 @@ type command struct {
 // cmdReply is the result of applying a command. match is set for order-submitting
 // commands; order/err are set for a cancel.
 type cmdReply struct {
-	match  *MatchResult
-	order  *types.Order
-	orders []*types.Order
-	trades []*types.Trade
-	count  int
-	err    error
+	match      *MatchResult
+	order      *types.Order
+	orders     []*types.Order
+	trades     []*types.Trade
+	count      int
+	indicative Indicative
+	err        error
 }

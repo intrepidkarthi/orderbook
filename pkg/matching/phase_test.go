@@ -272,3 +272,122 @@ func TestContinuousTradingIsUnchanged(t *testing.T) {
 		t.Error("a continuous trade is marked as an auction print")
 	}
 }
+
+// --- closing auction and indicative pricing ---
+
+// TestClosingAuctionAccumulatesOnALiveBook — the difference from pre-open is only
+// where it starts: a closing auction begins with a live, already-uncrossed book.
+func TestClosingAuctionAccumulatesOnALiveBook(t *testing.T) {
+	e := NewEngine(DefaultConfig("X"))
+
+	// Continuous trading leaves a normal, uncrossed book.
+	e.Process(phaseOrder(t, "s", types.SideSell, 110, 5))
+	e.Process(phaseOrder(t, "b", types.SideBuy, 100, 5))
+	if e.OrderCount() != 2 {
+		t.Fatalf("book holds %d before the close", e.OrderCount())
+	}
+
+	e.SetPhase(StateClosingAuction)
+	// An order that would have crossed now rests instead.
+	res := e.Process(phaseOrder(t, "b2", types.SideBuy, 115, 5))
+	if len(res.Trades) != 0 {
+		t.Errorf("%d trades during the closing auction; nothing should match", len(res.Trades))
+	}
+	bid, _, _ := e.BestBid()
+	ask, _, _ := e.BestAsk()
+	if bid <= ask {
+		t.Errorf("book not crossed (bid %d, ask %d); the auction is supposed to accumulate", bid, ask)
+	}
+}
+
+// TestClosingAuctionUncrossesOnTheWayOut — the transition rule is "leaving an
+// accumulating phase resolves what accumulated", so the closing auction gets the
+// uncross for free rather than as a second special case.
+func TestClosingAuctionUncrossesOnTheWayOut(t *testing.T) {
+	e := NewEngine(DefaultConfig("X"))
+	e.SetPhase(StateClosingAuction)
+	e.Process(phaseOrder(t, "s", types.SideSell, 100, 5))
+	e.Process(phaseOrder(t, "b", types.SideBuy, 105, 5))
+
+	trades := e.SetPhase(StateClosed)
+	if len(trades) != 1 {
+		t.Fatalf("got %d trades from the closing uncross, want 1", len(trades))
+	}
+	if !trades[0].Auction {
+		t.Error("the closing print is not marked as an auction trade")
+	}
+	if e.OrderCount() != 0 {
+		t.Errorf("book holds %d after a full closing uncross", e.OrderCount())
+	}
+}
+
+// TestIndicativeReportsWhereTheAuctionIs — a pre-open that revealed nothing until it
+// printed would be a sealed-bid auction, which is a different market design.
+func TestIndicativeReportsWhereTheAuctionIs(t *testing.T) {
+	e := NewEngine(DefaultConfig("X"))
+	e.SetPhase(StatePreOpen)
+
+	if ind := e.IndicativeAuction(); ind.HasClearing {
+		t.Error("an empty book reported a clearing price")
+	}
+
+	e.Process(phaseOrder(t, "s", types.SideSell, 100, 5))
+	e.Process(phaseOrder(t, "b", types.SideBuy, 105, 12))
+
+	ind := e.IndicativeAuction()
+	if !ind.HasClearing {
+		t.Fatal("a crossed book reported no indicative price")
+	}
+	if ind.Volume != 5 {
+		t.Errorf("indicative volume %d, want 5 — only the sell side can fill", ind.Volume)
+	}
+	// 12 to buy against 5 to sell: seven lots of buy interest go unfilled.
+	if ind.Imbalance != 7 {
+		t.Errorf("imbalance %d, want +7 (buy-side)", ind.Imbalance)
+	}
+
+	// And it must agree with what the uncross actually does.
+	trades := e.SetPhase(StateOpen)
+	var volume int64
+	for _, tr := range trades {
+		volume += tr.Quantity
+		if tr.Price != ind.Price {
+			t.Errorf("cleared at %d, indicative said %d", tr.Price, ind.Price)
+		}
+	}
+	if volume != ind.Volume {
+		t.Errorf("uncrossed %d lots, indicative said %d", volume, ind.Volume)
+	}
+}
+
+// TestIndicativeImbalanceSignsTheOtherWay — the sign is the number a participant acts
+// on, so getting it backwards is worse than not publishing it.
+func TestIndicativeImbalanceSignsTheOtherWay(t *testing.T) {
+	e := NewEngine(DefaultConfig("X"))
+	e.SetPhase(StatePreOpen)
+	e.Process(phaseOrder(t, "s", types.SideSell, 100, 12))
+	e.Process(phaseOrder(t, "b", types.SideBuy, 105, 5))
+
+	ind := e.IndicativeAuction()
+	if !ind.HasClearing {
+		t.Fatal("no indicative price")
+	}
+	if ind.Imbalance != -7 {
+		t.Errorf("imbalance %d, want -7 (sell-side)", ind.Imbalance)
+	}
+}
+
+// TestIndicativeThroughTheRunner — it walks a full snapshot, so it must not be read
+// from a caller's goroutine while the matcher is mutating levels.
+func TestIndicativeThroughTheRunner(t *testing.T) {
+	r := NewRunner(RunnerConfig{Engine: DefaultConfig("X")})
+	defer r.Close()
+	r.SetPhase(StatePreOpen)
+	r.Process(phaseOrder(t, "s", types.SideSell, 100, 5))
+	r.Process(phaseOrder(t, "b", types.SideBuy, 105, 5))
+
+	ind := r.IndicativeAuction()
+	if !ind.HasClearing || ind.Volume != 5 {
+		t.Errorf("indicative = %+v, want a clearing price with volume 5", ind)
+	}
+}

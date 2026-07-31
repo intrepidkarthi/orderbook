@@ -64,7 +64,11 @@ func (e *Engine) SetPhase(phase EngineState) []types.Trade {
 		return nil
 	}
 	var trades []types.Trade
-	if e.state == StatePreOpen && phase == StateOpen {
+	// Leaving any accumulating phase resolves what accumulated. Pre-open into open is
+	// the opening auction; the closing auction into closed is the closing one. Both
+	// are the same operation, and writing it as one transition rule rather than two
+	// special cases is what stops a third phase arriving without an uncross.
+	if e.state.accumulating() && !phase.accumulating() {
 		trades = e.Uncross(nil)
 	}
 	e.state = phase
@@ -75,7 +79,7 @@ func (e *Engine) SetPhase(phase EngineState) []types.Trade {
 		e.emitStateChange(EventCancelOnly, "")
 	case StateOpen:
 		e.emitStateChange(EventResumed, "")
-	case StatePreOpen, StateClosed:
+	case StatePreOpen, StateClosed, StateClosingAuction:
 		// Both refuse new liquidity in their own way and neither is a halt. They reuse
 		// the cancel-only kind rather than getting one each: a consumer needs to know
 		// it cannot trade, and Engine.State names the phase exactly for anything that
@@ -198,4 +202,62 @@ func min64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// Indicative is what an auction would produce if it uncrossed right now.
+//
+// Venues broadcast this through a pre-open so participants can react before the
+// price is fixed — an auction that revealed nothing until it printed would be a
+// sealed-bid auction, which is a different market design with different incentives.
+type Indicative struct {
+	HasClearing bool
+	Price       int64
+	Volume      int64
+	// Imbalance is buy interest minus sell interest at the indicative price, in lots.
+	// Positive means more to buy than to sell. It is the number a participant acts on:
+	// the price alone says where, and the imbalance says which way it will move if
+	// nobody responds.
+	Imbalance int64
+}
+
+// IndicativeAuction reports what an uncross would produce against the current book,
+// without changing anything.
+//
+// Read-only and safe to call in any phase, though it only means something while orders
+// are accumulating. Single-writer: call from the engine's goroutine, or via
+// Runner.IndicativeAuction.
+func (e *Engine) IndicativeAuction() Indicative {
+	snap := e.book.Snapshot(1 << 20)
+	bids := make([]auction.Level, 0, len(snap.Bids))
+	for _, l := range snap.Bids {
+		bids = append(bids, auction.Level{Price: l.Price, Qty: l.Quantity})
+	}
+	asks := make([]auction.Level, 0, len(snap.Asks))
+	for _, l := range snap.Asks {
+		asks = append(asks, auction.Level{Price: l.Price, Qty: l.Quantity})
+	}
+	res := auction.Uncross(bids, asks)
+	if !res.HasClearing {
+		return Indicative{}
+	}
+	// Imbalance is computed here rather than taken from the uncross because the
+	// uncross only needs the matched volume; what is left unmatched on each side is a
+	// separate question, and it is the one a participant is actually asking.
+	var buy, sell int64
+	for _, l := range bids {
+		if l.Price >= res.ClearingPrice {
+			buy += l.Qty
+		}
+	}
+	for _, l := range asks {
+		if l.Price <= res.ClearingPrice {
+			sell += l.Qty
+		}
+	}
+	return Indicative{
+		HasClearing: true,
+		Price:       res.ClearingPrice,
+		Volume:      res.Volume,
+		Imbalance:   buy - sell,
+	}
 }

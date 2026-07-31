@@ -62,7 +62,19 @@ const (
 	// StateClosed is after the session: no new liquidity, cancels still accepted so a
 	// participant can clear its book before the next session.
 	StateClosed
+	// StateClosingAuction accumulates orders on top of the continuous book without
+	// matching them, exactly as pre-open does, and the transition out of it resolves
+	// everything at one closing price. The difference from pre-open is only where it
+	// starts: pre-open begins with whatever survived the last session, a closing
+	// auction begins with a live, already-uncrossed book.
+	StateClosingAuction
 )
+
+// accumulating reports whether a phase takes orders without matching them, so the
+// book may cross and must be resolved by an uncross on the way out.
+func (s EngineState) accumulating() bool {
+	return s == StatePreOpen || s == StateClosingAuction
+}
 
 // String names the state, for logs and operator tooling.
 func (s EngineState) String() string {
@@ -73,6 +85,8 @@ func (s EngineState) String() string {
 		return "HALTED"
 	case StatePreOpen:
 		return "PRE_OPEN"
+	case StateClosingAuction:
+		return "CLOSING_AUCTION"
 	case StateClosed:
 		return "CLOSED"
 	default:
@@ -795,8 +809,8 @@ func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trad
 	case StateCancelOnly, StateClosed:
 		order.Status = types.OrderStatusRejected
 		return dst, types.OrderStatusRejected, types.ErrNewOrdersHalted
-	case StatePreOpen:
-		// Pre-open takes orders and does not match them. A market order has no price
+	case StatePreOpen, StateClosingAuction:
+		// An accumulating phase takes orders and does not match them. A market order has no price
 		// to rest at and no price to trade at until the uncross decides one, so it is
 		// refused rather than held and executed at whatever the auction produces —
 		// which is not what an unpriced order asked for.

@@ -830,3 +830,30 @@ func DecodeEnterDated(src []byte) (EnterDated, error) {
 		ExpiresAt: int64(binary.BigEndian.Uint64(src[off:])),
 	}, nil
 }
+
+// EncodeMDIndicative appends an MDIndicative payload to dst.
+func EncodeMDIndicative(dst []byte, m MDIndicative) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, MDIndicativeLen)...)
+	b := dst[base:]
+	off := header(b, MsgMDIndicative, m.Version)
+	binary.BigEndian.PutUint64(b[off:], m.Seq)
+	binary.BigEndian.PutUint64(b[off+8:], uint64(m.Price))
+	binary.BigEndian.PutUint64(b[off+16:], uint64(m.Volume))
+	binary.BigEndian.PutUint64(b[off+24:], uint64(m.Imbalance))
+	return dst, nil
+}
+
+// DecodeMDIndicative reads an MDIndicative payload from src.
+func DecodeMDIndicative(src []byte) (MDIndicative, error) {
+	if err := checkHeader(src, MDIndicativeLen, MsgMDIndicative); err != nil {
+		return MDIndicative{}, err
+	}
+	return MDIndicative{
+		Version:   src[1],
+		Seq:       binary.BigEndian.Uint64(src[2:]),
+		Price:     int64(binary.BigEndian.Uint64(src[10:])),
+		Volume:    int64(binary.BigEndian.Uint64(src[18:])),
+		Imbalance: int64(binary.BigEndian.Uint64(src[26:])),
+	}, nil
+}

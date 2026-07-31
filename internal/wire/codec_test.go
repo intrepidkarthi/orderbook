@@ -142,6 +142,7 @@ func TestShortBufferIsAnError(t *testing.T) {
 		"mddelta":       func(b []byte) error { _, err := DecodeMDDelta(b); return err },
 		"mdtrade":       func(b []byte) error { _, err := DecodeMDTrade(b); return err },
 		"mdstatus":      func(b []byte) error { _, err := DecodeMDStatus(b); return err },
+		"mdindicative":  func(b []byte) error { _, err := DecodeMDIndicative(b); return err },
 		"openorder":     func(b []byte) error { _, err := DecodeOpenOrder(b); return err },
 		"queryend":      func(b []byte) error { _, err := DecodeQueryEnd(b); return err },
 	}
@@ -460,6 +461,7 @@ func goldenCases(t *testing.T) map[string][]byte {
 		"md_delta":        must(EncodeMDDelta(nil, MDDelta{Version: Version, Seq: 4097, Side: SideSell, Price: 30100, Qty: 0})),
 		"md_trade":        must(EncodeMDTrade(nil, MDTrade{Version: Version, Seq: 4098, Price: 30050, Qty: 7, Aggressor: SideBuy})),
 		"md_status":       must(EncodeMDStatus(nil, MDStatus{Version: Version, Seq: 4099, State: MDStateHalted})),
+		"md_indicative":   must(EncodeMDIndicative(nil, MDIndicative{Version: Version, Seq: 4100, Price: 30000, Volume: 500, Imbalance: -120})),
 		"mass_cancel":     must(EncodeMassCancel(nil, MassCancel{Version: Version})),
 		"mass_cancel_ack": must(EncodeMassCancelAck(nil, MassCancelAck{Version: Version, Count: 4, Seq: 88})),
 		"cod_on":          must(EncodeCancelOnDisconnect(nil, CancelOnDisconnect{Version: Version, Enabled: true})),
@@ -664,7 +666,7 @@ func TestMessageTypesAreDistinct(t *testing.T) {
 	md := map[string]uint8{
 		"MDSubscribe": MsgMDSubscribe, "MDReject": MsgMDReject, "MDLevel": MsgMDLevel,
 		"MDSnapshotEnd": MsgMDSnapshotEnd, "MDDelta": MsgMDDelta,
-		"MDTrade": MsgMDTrade, "MDStatus": MsgMDStatus,
+		"MDTrade": MsgMDTrade, "MDStatus": MsgMDStatus, "MDIndicative": MsgMDIndicative,
 	}
 	mdSeen := map[uint8]string{}
 	for name, b := range md {

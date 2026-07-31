@@ -111,6 +111,7 @@ const (
 	MsgMDDelta       uint8 = 'd' // outbound: one aggregated level change
 	MsgMDTrade       uint8 = 't' // outbound: a print
 	MsgMDStatus      uint8 = 's' // outbound: a venue state change
+	MsgMDIndicative  uint8 = 'i' // outbound: what an auction would clear at right now
 )
 
 // Market-data reject reasons. Narrower than the order-entry vocabulary because a
@@ -217,6 +218,24 @@ type MDStatus struct {
 
 // MDStatusLen is the encoded width of an MDStatus payload.
 const MDStatusLen = 1 + 1 + 8 + 1
+
+// MDIndicative is what an auction would clear at if it uncrossed now, with the
+// imbalance left over.
+//
+// Published during pre-open and the closing auction so participants can react before
+// the price is fixed. Imbalance is buy minus sell interest at that price, in lots:
+// positive means more to buy than to sell. The price alone says where the auction is;
+// the imbalance says which way it moves if nobody responds.
+type MDIndicative struct {
+	Version   uint8
+	Seq       uint64
+	Price     int64
+	Volume    int64
+	Imbalance int64
+}
+
+// MDIndicativeLen is the encoded width of an MDIndicative payload.
+const MDIndicativeLen = 1 + 1 + 8 + 8 + 8 + 8
 
 // Field widths. ClOrdIDLen bounds a client identifier; SymbolLen is 16 rather
 // than a tighter fit because real venue symbols outgrow short fields and

@@ -198,6 +198,8 @@ func (r *Runner) dispatch(cmd command) {
 		rep.count = r.engine.TrailingStopCount()
 	case cmdExpireDue:
 		r.engine.ExpireDue()
+	case cmdIndicative:
+		rep.indicative = r.engine.IndicativeAuction()
 	case cmdSetPhase:
 		// Copied to pointers because the engine's slice is a value buffer it reuses;
 		// handing it out would let a caller read trades the next command overwrites.
@@ -732,6 +734,19 @@ func (r *Runner) SetPhase(phase EngineState) []*types.Trade {
 		return nil
 	}
 	return rep.trades
+}
+
+// IndicativeAuction reports what an uncross would produce against the current book.
+//
+// It goes through the queue rather than reading the book directly: it walks a full
+// snapshot, and doing that from a caller's goroutine while the matcher mutates levels
+// would be reading a book mid-command.
+func (r *Runner) IndicativeAuction() Indicative {
+	rep, ok := r.send(command{kind: cmdIndicative})
+	if !ok {
+		return Indicative{}
+	}
+	return rep.indicative
 }
 
 // Phase reports the venue's current trading phase.

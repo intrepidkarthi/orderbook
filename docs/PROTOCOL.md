@@ -443,6 +443,15 @@ code path as order entry, which is the wrong default however carefully it is wri
 | **MDDelta** | `d` | Seq, Side, Price, Qty — one aggregated level change |
 | **MDTrade** | `t` | Seq, Price, Qty, Aggressor — a print |
 | **MDStatus** | `s` | Seq, State (`O`pen / `H`alted / `C`ancel-only) |
+| **MDIndicative** | `i` | Seq, Price, Volume, Imbalance — what an auction would clear at |
+
+`MDIndicative` is published during pre-open and the closing auction, on the venue's own
+cadence rather than per order: during an auction the indicative price moves on nearly
+every message, and broadcasting that would be several times the traffic of the order
+flow for information nobody can act on at that granularity. `Imbalance` is buy minus
+sell interest at the indicative price, in lots — positive means more to buy than to
+sell. The price says where the auction is; the imbalance says which way it moves if
+nobody responds.
 
 Pre-open and post-close are reported as cancel-only on the wire: a subscriber needs to
 know it cannot trade, and the exact phase is a venue concept the feed does not attempt
