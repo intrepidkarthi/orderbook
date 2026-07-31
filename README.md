@@ -117,6 +117,15 @@ work can close because they are about your deployment.
   position**, **atomic cancel/replace**, **mass cancel**, cancel-on-disconnect, and
   **query your open orders** when resume is not available. Orders that outlive a
   restart stay nameable and keep reporting their fills.
+- **An admin edge, and a soak harness that used it.** `cmd/obgw -admin` serves
+  Prometheus metrics, `/healthz` and `/readyz` on a third port — counters off the
+  engine's own event stream, so they count what the book saw rather than what the
+  gateway believed it sent, and nothing a scrape touches goes through the command
+  queue. `cmd/obsoak` drives the venue at a sustained rate and reports what grows.
+  The first hour of running it found a defect that 480 tests, two fuzzers and the
+  race detector had not: under load the venue refused cancels for orders live in its
+  own book, and filled to its order ceiling while reporting itself healthy. Fixed,
+  regression-tested, and written up in [docs/SOAK.md](docs/SOAK.md).
 - **A market-data edge.** `cmd/obgw -mdaddr` publishes the venue's public feed on its
   own listener: a snapshot naming the sequence it is consistent with, then incremental
   level changes, trade prints and venue-state changes in one dense, gap-free stream.
@@ -286,6 +295,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | `pkg/orderbook` | the CLOB data structure and L1/L2/L3 snapshots |
 | `pkg/matching` | the single-writer `Engine` and the concurrent `Runner` |
 | `pkg/marketdata` | record, replay, and digest — deterministic recovery primitives |
+| `pkg/observability` | Prometheus counters, gauges and histograms off the event stream |
 
 ---
 
@@ -305,6 +315,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [research/ofi.md](docs/research/ofi.md) | Does order-flow imbalance predict the next move? Contemporaneous R² ≈ 0.24, predictive R² ≈ 0.0004 — a ~577× gap, and the little that remains points the other way. |
 | [research/kyle-lambda.md](docs/research/kyle-lambda.md) | Price impact measured end to end: the λ a real book produces, why it scales as 1/depth, and what a block order costs against working the same quantity. |
 | [research/order-flow.md](docs/research/order-flow.md) | Delta, CVD, and absorption against ground truth: a 94.5%-accurate aggressor rule builds a CVD wrong by 169%, and CVD divergence loses to a price-only control. |
+| [SOAK.md](docs/SOAK.md) | Sustained load: what `cmd/obsoak` measures, the methodology that took three wrong versions to get right, and the correctness defect the first hour of it found. |
 | [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) | What a venue actually needs, with an honest status for each item — what ships, what is deliberately absent, and what you would have to build. Production readiness is a property of a deployment, not of a library, and this says so. |
 | [PROTOCOL.md](docs/PROTOCOL.md) | The binary order-entry protocol `cmd/obgw` speaks: framing, session and resume, every message, the reason-code vocabulary, and what is deliberately absent from the wire. |
 | [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.16.0) with breaking-change notes. |
@@ -357,8 +368,8 @@ or discussion if you want to talk through an idea first.
 - **Protocol codecs** — a FIX / OUCH / SBE adapter package translating the wire ↔
   `types.Order` and the `EventSink` stream ↔ execution reports.
 - **New `EventSink` kinds** — emit the reserved `Triggered` / `BookDelta` events.
-- **A metrics exporter** — a Prometheus/`expvar` adapter off the event stream (the
-  event stream), with an example.
+- **Tracing and structured logging** — `pkg/observability` covers metrics; spans
+  across the gateway → queue → matcher → publisher path are not there.
 - **More surveillance** — a quote-fading detector, or a wash-trade detector keyed
   on beneficial-ownership groups (the cross-account case the core can't see).
 - **More signals** — micro-price, VPIN, or a queue-position model in `pkg/signals`.
