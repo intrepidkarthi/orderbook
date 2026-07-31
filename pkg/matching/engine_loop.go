@@ -2,6 +2,7 @@ package matching
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
@@ -20,6 +21,17 @@ var ErrQueueFull = errors.New("matching: runner command queue is full")
 // guarantee that all N connection goroutines have stopped before it shuts the
 // matcher down — a guarantee no real ingress can actually make.
 var ErrShuttingDown = errors.New("matching: runner is shutting down")
+
+// ErrNoResolver reports a By-suffixed enqueue called without a resolver. It is a
+// caller bug, refused at the door rather than turned into a command that names order
+// zero — which would be journalled, applied, and correctly refused, leaving a real log
+// record for a question nobody asked.
+var ErrNoResolver = errors.New("matching: no resolver supplied")
+
+// ErrResolverPanicked reports that a caller-supplied resolver panicked. The command
+// was not journalled and not applied; the book is untouched. See safeResolve for why
+// this is contained rather than fatal.
+var ErrResolverPanicked = errors.New("matching: resolver panicked")
 
 // shutdownResult is the refusal handed back to an order-bearing submit that
 // arrived after the fence closed. It is a rejection rather than a nil result so
@@ -164,9 +176,14 @@ func (r *Runner) dispatch(cmd command) {
 	// id, not the client's name for it, or a replay would have to reconstruct a
 	// mapping that only ever existed in the gateway.
 	if cmd.resolve != nil {
-		id, ok := cmd.resolve()
-		if !ok {
+		id, ok, panicked := safeResolve(cmd.resolve)
+		switch {
+		case panicked != nil:
+			rep.err = fmt.Errorf("%w: %v", ErrResolverPanicked, panicked)
+		case !ok:
 			rep.err = types.ErrOrderNotFound
+		}
+		if rep.err != nil {
 			if cmd.reply != nil {
 				cmd.reply <- rep
 			}
@@ -229,6 +246,31 @@ func (r *Runner) dispatch(cmd command) {
 	if cmd.reply != nil {
 		cmd.reply <- rep
 	}
+}
+
+// safeResolve calls a caller-supplied resolver without letting it stop the venue.
+//
+// This is the only place the runner recovers from a panic, and the exception is
+// deliberate. Everywhere else, a panic on the matching goroutine means an engine
+// invariant is broken and dying is the correct response — continuing would trade
+// against a book whose state nobody can vouch for.
+//
+// A resolver is different in kind. It is caller code, it answers a question the engine
+// did not ask, and it runs BEFORE the command is journalled or applied — so a panic
+// inside it says nothing about the book, and the engine's state is exactly what it was.
+// The blast radius of not recovering here is the whole market, for a bug in a gateway's
+// lookup table. Treating it as "could not resolve" is both safe and the smaller
+// failure.
+//
+// It is not swallowed: the async paths carry ErrResolverPanicked back to the caller.
+func safeResolve(fn func() (int64, bool)) (id int64, ok bool, panicked any) {
+	defer func() {
+		if p := recover(); p != nil {
+			id, ok, panicked = 0, false, p
+		}
+	}()
+	id, ok = fn()
+	return id, ok, nil
 }
 
 // logCommand writes a mutating command to the log before it is applied, and
@@ -582,6 +624,12 @@ func (r *Runner) TryEnqueueCancel(orderID int64, userID string) error {
 // without waiting — the reference gateway's reject is a non-blocking send onto a
 // bounded per-connection queue, which is the shape to copy.
 func (r *Runner) TryEnqueueCancelBy(userID string, resolve func() (int64, bool)) error {
+	if resolve == nil {
+		// Refused rather than treated as "cancel order 0". A nil resolver is a caller
+		// bug, and the alternative is a command that names nothing, is journalled, and
+		// is refused by the engine — a real log record for a question nobody asked.
+		return ErrNoResolver
+	}
 	return r.tryEnqueue(command{kind: cmdCancel, userID: userID, resolve: resolve})
 }
 
@@ -599,6 +647,9 @@ func (r *Runner) TryReplaceAsync(orderID int64, userID string, replacement *type
 // TryReplaceAsyncBy is TryReplaceAsync with the target named at apply time. See
 // TryEnqueueCancelBy for why that matters.
 func (r *Runner) TryReplaceAsyncBy(userID string, replacement *types.Order, resolve func() (int64, bool)) (<-chan error, error) {
+	if resolve == nil {
+		return nil, ErrNoResolver
+	}
 	return r.tryReplaceAsync(0, userID, replacement, resolve)
 }
 
@@ -692,6 +743,9 @@ func (r *Runner) TryReduceAsync(orderID, newQty int64, userID string) (<-chan er
 // TryReduceAsyncBy is TryReduceAsync with the target named at apply time. See
 // TryEnqueueCancelBy for why that matters.
 func (r *Runner) TryReduceAsyncBy(newQty int64, userID string, resolve func() (int64, bool)) (<-chan error, error) {
+	if resolve == nil {
+		return nil, ErrNoResolver
+	}
 	return r.tryReduceAsync(0, newQty, userID, resolve)
 }
 

@@ -164,3 +164,91 @@ func (l *recordingLog) lastCancelID() int64 {
 	}
 	return l.cancels[len(l.cancels)-1]
 }
+
+// TestAByEnqueueWithoutAResolverIsRefused — a nil resolver would otherwise become a
+// command naming order zero: journalled, applied, refused. A real log record for a
+// question nobody asked.
+func TestAByEnqueueWithoutAResolverIsRefused(t *testing.T) {
+	r := NewRunner(RunnerConfig{Engine: DefaultConfig("X"), QueueSize: 8})
+	defer r.Close()
+
+	if err := r.TryEnqueueCancelBy("alice", nil); !errors.Is(err, ErrNoResolver) {
+		t.Errorf("cancel: err = %v, want %v", err, ErrNoResolver)
+	}
+	if _, err := r.TryReduceAsyncBy(1, "alice", nil); !errors.Is(err, ErrNoResolver) {
+		t.Errorf("reduce: err = %v, want %v", err, ErrNoResolver)
+	}
+	if _, err := r.TryReplaceAsyncBy("alice", mkOrder("alice", types.SideBuy, 100, 1), nil); !errors.Is(err, ErrNoResolver) {
+		t.Errorf("replace: err = %v, want %v", err, ErrNoResolver)
+	}
+}
+
+// TestAResolverThatPanicsDoesNotTakeTheVenueWithIt — the resolver is caller-supplied
+// code running on the matching goroutine, which is the one goroutine whose death
+// stops the market. A gateway bug must not be a venue outage.
+func TestAResolverThatPanicsDoesNotTakeTheVenueWithIt(t *testing.T) {
+	r := NewRunner(RunnerConfig{Engine: DefaultConfig("X"), QueueSize: 8})
+	defer r.Close()
+
+	if err := r.TryEnqueueCancelBy("alice", func() (int64, bool) {
+		panic("a gateway bug")
+	}); err != nil {
+		t.Fatalf("TryEnqueueCancelBy: %v", err)
+	}
+
+	// The matcher must still be matching.
+	done := make(chan int, 1)
+	go func() { r.Process(mkOrder("bob", types.SideBuy, 100, 5)); done <- r.OrderCount() }()
+	select {
+	case n := <-done:
+		if n != 1 {
+			t.Errorf("book has %d orders, want 1", n)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the matching goroutine died with the resolver")
+	}
+}
+
+// TestAPanickingResolverIsReportedNotSwallowed — contained is not the same as hidden.
+// The async paths must carry it back, or a gateway bug becomes a client whose reduce
+// silently did nothing.
+func TestAPanickingResolverIsReportedNotSwallowed(t *testing.T) {
+	r := NewRunner(RunnerConfig{Engine: DefaultConfig("X"), QueueSize: 8})
+	defer r.Close()
+
+	done, err := r.TryReduceAsyncBy(1, "alice", func() (int64, bool) { panic("boom") })
+	if err != nil {
+		t.Fatalf("TryReduceAsyncBy: %v", err)
+	}
+	select {
+	case got := <-done:
+		if !errors.Is(got, ErrResolverPanicked) {
+			t.Errorf("err = %v, want %v", got, ErrResolverPanicked)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no outcome reported")
+	}
+}
+
+// TestAPanickingResolverLeavesTheBookUntouched — the resolver runs before the command
+// is journalled and before it is applied, so the claim that the book is exactly what it
+// was is a claim worth asserting rather than reasoning about.
+func TestAPanickingResolverLeavesTheBookUntouched(t *testing.T) {
+	logged := &recordingLog{}
+	r := NewRunner(RunnerConfig{Engine: DefaultConfig("X"), QueueSize: 8, Log: logged})
+	defer r.Close()
+
+	r.Process(mkOrder("alice", types.SideBuy, 100, 5))
+	if err := r.TryEnqueueCancelBy("alice", func() (int64, bool) { panic("boom") }); err != nil {
+		t.Fatalf("TryEnqueueCancelBy: %v", err)
+	}
+	// A synchronous command behind it, so the panicking one has certainly been handled.
+	r.Process(mkOrder("bob", types.SideSell, 200, 1))
+
+	if n := r.OrderCount(); n != 2 {
+		t.Errorf("book has %d orders, want 2; the panicking cancel changed the book", n)
+	}
+	if got := logged.lastCancelID(); got != -1 {
+		t.Errorf("a cancel was journalled (id %d); nothing should have been", got)
+	}
+}
