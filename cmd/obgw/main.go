@@ -11,7 +11,11 @@
 // Authentication defaults to deny. With no accounts configured, every login is
 // rejected — an empty configuration must not produce an open venue.
 //
-//	obgw -addr :9000 -symbol BTC-USD -accounts alice:s3cret,bob:hunter2
+//	obgw -addr :9000 -symbol BTC-USD -accounts alice:s3cret,bob:hunter2 -admin 127.0.0.1:9100
+//
+// The admin listener is a separate port on purpose: it is for whoever runs the venue,
+// and it should be reachable from a monitoring network that participants cannot reach
+// at all.
 package main
 
 import (
@@ -26,21 +30,23 @@ import (
 
 func main() {
 	var (
-		addr     = flag.String("addr", "127.0.0.1:9000", "order-entry listen address")
-		mdAddr   = flag.String("mdaddr", "", "market-data listen address (empty = no market-data feed)")
-		symbol   = flag.String("symbol", "BTC-USD", "the single instrument this gateway serves")
-		accounts = flag.String("accounts", "", "comma-separated user:password pairs")
-		rate     = flag.Float64("rate", 1000, "per-account orders/second")
-		burst    = flag.Float64("burst", 200, "per-account burst allowance")
-		walPath  = flag.String("wal", "", "write-ahead log path (empty = no durability)")
-		snapPath = flag.String("snapshot", "", "snapshot path, used with -wal to bound restart time")
-		ckpt     = flag.Duration("checkpoint", 30*time.Second, "checkpoint interval")
+		addr      = flag.String("addr", "127.0.0.1:9000", "order-entry listen address")
+		mdAddr    = flag.String("mdaddr", "", "market-data listen address (empty = no market-data feed)")
+		adminAddr = flag.String("admin", "", "admin HTTP listen address for /metrics, /healthz and /readyz (empty = unobserved)")
+		symbol    = flag.String("symbol", "BTC-USD", "the single instrument this gateway serves")
+		accounts  = flag.String("accounts", "", "comma-separated user:password pairs")
+		rate      = flag.Float64("rate", 1000, "per-account orders/second")
+		burst     = flag.Float64("burst", 200, "per-account burst allowance")
+		walPath   = flag.String("wal", "", "write-ahead log path (empty = no durability)")
+		snapPath  = flag.String("snapshot", "", "snapshot path, used with -wal to bound restart time")
+		ckpt      = flag.Duration("checkpoint", 30*time.Second, "checkpoint interval")
 	)
 	flag.Parse()
 
 	cfg := Config{
 		Addr:            *addr,
 		MDAddr:          *mdAddr,
+		AdminAddr:       *adminAddr,
 		Symbol:          *symbol,
 		Accounts:        parseAccounts(*accounts),
 		RatePerSec:      *rate,
@@ -55,6 +61,9 @@ func main() {
 	if cfg.WALPath == "" {
 		log.Println("obgw: no -wal path — running WITHOUT durability; a crash loses the book")
 	}
+	if cfg.AdminAddr == "" {
+		log.Println("obgw: no -admin address — running unobserved; nothing reports queue depth, book size or a stalled matcher")
+	}
 
 	srv, err := NewServer(cfg)
 	if err != nil {
@@ -64,6 +73,9 @@ func main() {
 		log.Fatalf("obgw: listen: %v", err)
 	}
 	log.Printf("obgw: serving %s on %s (incarnation %s)", cfg.Symbol, srv.Addr(), cfg.Incarnation)
+	if a := srv.AdminAddr(); a != nil {
+		log.Printf("obgw: admin on %s (/metrics, /healthz, /readyz)", a)
+	}
 
 	// Drain on SIGTERM rather than dying mid-command: the Runner's fence lets
 	// in-flight producers finish instead of panicking them.

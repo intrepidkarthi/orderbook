@@ -14,6 +14,7 @@ import (
 	"github.com/intrepidkarthi/orderbook/pkg/gateway"
 	"github.com/intrepidkarthi/orderbook/pkg/marketdata"
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
+	"github.com/intrepidkarthi/orderbook/pkg/observability"
 	"github.com/intrepidkarthi/orderbook/pkg/orderentry"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 	"github.com/intrepidkarthi/orderbook/pkg/wal"
@@ -61,6 +62,10 @@ type Config struct {
 	// MDRetain bounds the market-data gap-fill ring. A subscriber further behind than
 	// this is told to resubscribe from a snapshot rather than served a partial answer.
 	MDRetain int
+	// AdminAddr, when set, starts an HTTP listener serving /metrics, /healthz and
+	// /readyz on its own port. Empty means the venue trades unobserved, which is
+	// legal here and is not something to do on purpose — see admin.go.
+	AdminAddr string
 }
 
 func (c *Config) applyDefaults() {
@@ -105,6 +110,12 @@ type Server struct {
 	pub    *orderentry.Publisher
 	feed   *marketdata.Feed
 
+	// metrics is a sink like the others, so it counts exactly what the book saw
+	// rather than what the gateway believed it sent.
+	metrics   *observability.Collector
+	applyHist *observability.Histogram
+	admin     admin
+
 	wal      *wal.Writer
 	ln       net.Listener
 	mdLn     net.Listener
@@ -130,10 +141,15 @@ func NewServer(cfg Config) (*Server, error) {
 	// run of the venue, and a subscriber that reconnects after a restart must be
 	// refused for the same reason an order-entry client is.
 	feed := marketdata.NewFeed(cfg.Incarnation, cfg.MDRetain)
+	// The collector is a sink like the other two, so it counts what the book saw
+	// rather than what the gateway believed it sent. Attaching it here rather than
+	// wrapping the handlers is the difference between metrics that can disagree with
+	// the engine and metrics that cannot.
+	col := observability.NewCollector()
 	// MultiSink rather than replacing the publisher: Config.EventSink is a single
 	// slot, so attaching the feed on its own would silently stop every execution
 	// report the order-entry side depends on.
-	sink := matching.MultiSink{pub, feed}
+	sink := matching.MultiSink{pub, feed, col}
 
 	eng := matching.DefaultConfig(cfg.Symbol)
 	eng.DedupClientOrderIDs = 4096
@@ -190,17 +206,21 @@ func NewServer(cfg Config) (*Server, error) {
 	// away everything it had just read back from disk.
 	runner := matching.NewRunnerFor(recovered, rc)
 
-	return &Server{
-		wal:    w,
-		cfg:    cfg,
-		runner: runner,
-		gate:   gateway.New(runner, gateway.Config{Rate: cfg.RatePerSec, Burst: cfg.Burst}),
-		reg:    reg,
-		pub:    pub,
-		feed:   feed,
-		quit:   make(chan struct{}),
-		conns:  map[net.Conn]struct{}{},
-	}, nil
+	srv := &Server{
+		wal:       w,
+		cfg:       cfg,
+		runner:    runner,
+		metrics:   col,
+		applyHist: col.Histogram(applyLatencyMetric),
+		gate:      gateway.New(runner, gateway.Config{Rate: cfg.RatePerSec, Burst: cfg.Burst}),
+		reg:       reg,
+		pub:       pub,
+		feed:      feed,
+		quit:      make(chan struct{}),
+		conns:     map[net.Conn]struct{}{},
+	}
+	srv.registerGauges()
+	return srv, nil
 }
 
 // Addr reports the bound address, valid after Listen.
@@ -220,6 +240,16 @@ func (s *Server) Listen() error {
 			return err
 		}
 		s.mdLn = mdLn
+	}
+	// The admin edge comes up with the sockets, not with the market: an operator
+	// wants /metrics answering while the venue is still recovering its log, which is
+	// exactly when they most want to know what it is doing.
+	if err := s.startAdmin(); err != nil {
+		_ = ln.Close()
+		if s.mdLn != nil {
+			_ = s.mdLn.Close()
+		}
+		return err
 	}
 	return nil
 }
@@ -286,6 +316,9 @@ func (s *Server) Close() {
 			_ = c.Close()
 		}
 		s.connMu.Unlock()
+		// Before the wait, not after: the admin server's goroutine is in the same
+		// WaitGroup, and http.Server.Serve does not return until Shutdown is called.
+		s.closeAdmin()
 
 		s.wg.Wait()
 		s.runner.Close()
@@ -520,6 +553,8 @@ func (sess *session) readLoop(buf []byte) {
 // declared message type. Inferring the type from payload length would mean any
 // future message sharing a length with an existing one is silently misread.
 func (sess *session) apply(payload []byte) {
+	defer sess.srv.observeApply(time.Now())
+
 	msgType, ok := wire.MsgTypeOf(payload)
 	if !ok {
 		sess.reject("", orderentry.ReasonMalformed)
