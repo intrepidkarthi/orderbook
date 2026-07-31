@@ -154,10 +154,28 @@ func (s *Stream) Since(seq uint64) ([]Msg, error) {
 // under numbers it believes it already has — the failure that would otherwise be
 // completely invisible to both sides.
 type Registry struct {
-	mu          sync.RWMutex
-	streams     map[string]*Stream
-	orders      map[int64]*live  // engine order id -> owner, client id, remaining
-	byClOrd     map[string]int64 // account+client id -> engine order id
+	mu      sync.RWMutex
+	streams map[string]*Stream
+	orders  map[int64]*live // engine order id -> owner, client id, remaining
+
+	// The naming index has its own lock, and that separation is the point.
+	//
+	// It is written on the MATCHING goroutine, by NameIndex, the instant the engine
+	// accepts an order — while everything else in this type is maintained by the pump
+	// goroutine, asynchronously, whenever it gets there. Sharing mu would put the
+	// matcher behind the pump's delivery work, which is precisely what the pump exists
+	// to avoid.
+	//
+	// It used to be written by the pump like everything else, and that was wrong in a
+	// way no test caught and no benchmark could: a client's cancel resolves through
+	// this map, so a pump running even a fraction of a second behind would tell a
+	// client that its live resting order did not exist. The client, correctly, would
+	// not ask again — and the order stayed in the book, uncancellable by anybody, for
+	// the life of the venue. Measured at 12,843 orphaned orders in thirty seconds at
+	// 10,000 messages a second; invisible below about 4,000. See docs/SOAK.md.
+	nameMu  sync.RWMutex
+	byClOrd map[string]int64 // account+client id -> engine order id
+
 	incarnation string
 	ringSize    int
 }
@@ -308,9 +326,22 @@ func (r *Registry) track(o *types.Order) {
 	// An iceberg reload re-announces the same id; keep one entry and reset its
 	// remaining to the new slice rather than accumulating.
 	r.orders[o.ID] = &live{account: o.UserID, clOrdID: o.ClientOrderID, remaining: o.Quantity}
-	if o.ClientOrderID != "" {
-		r.byClOrd[clOrdKey(o.UserID, o.ClientOrderID)] = o.ID
+	// The name is NOT written here. Name owns it, and it has already run — on the
+	// matching goroutine, before this event was ever queued.
+}
+
+// Name records that an order can be addressed by its client's own identifier.
+//
+// It is called from NameIndex on the matching goroutine and does nothing else, so
+// the critical section is one map write. Everything expensive about publishing —
+// encoding, fanning out, ring maintenance — stays on the pump where it belongs.
+func (r *Registry) Name(o *types.Order) {
+	if o == nil || o.ClientOrderID == "" {
+		return
 	}
+	r.nameMu.Lock()
+	r.byClOrd[clOrdKey(o.UserID, o.ClientOrderID)] = o.ID
+	r.nameMu.Unlock()
 }
 
 // Adopt seeds the registry from a recovered book, so orders that outlived a
@@ -338,7 +369,6 @@ func (r *Registry) track(o *types.Order) {
 // Call it once, after recovery and before serving.
 func (r *Registry) Adopt(orders []*types.Order) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.orders == nil {
 		r.orders = map[int64]*live{}
 	}
@@ -347,10 +377,16 @@ func (r *Registry) Adopt(orders []*types.Order) {
 			continue
 		}
 		r.orders[o.ID] = &live{account: o.UserID, clOrdID: o.ClientOrderID, remaining: o.RemainingQty}
-		if o.ClientOrderID != "" {
+	}
+	r.mu.Unlock()
+
+	r.nameMu.Lock()
+	for _, o := range orders {
+		if o != nil && o.ClientOrderID != "" {
 			r.byClOrd[clOrdKey(o.UserID, o.ClientOrderID)] = o.ID
 		}
 	}
+	r.nameMu.Unlock()
 }
 
 // clOrdKey scopes a client order id to its account. Scoping is the security
@@ -362,19 +398,46 @@ func clOrdKey(account, clOrdID string) string { return account + "\x00" + clOrdI
 // client's account. It is how a cancel arriving over the wire names an order
 // without the wire ever carrying an engine id or an account.
 func (r *Registry) OrderIDFor(account, clOrdID string) (int64, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.nameMu.RLock()
+	defer r.nameMu.RUnlock()
 	id, ok := r.byClOrd[clOrdKey(account, clOrdID)]
 	return id, ok
 }
 
+// Lock order: mu is never held while nameMu is taken, and nameMu is never held
+// while mu is taken. The two maps are now owned by different goroutines — orders by
+// the pump, byClOrd by the matcher — and every path that touches both does so in
+// that sequence, one at a time.
+
 func (r *Registry) forget(id int64) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if l, ok := r.orders[id]; ok && l.clOrdID != "" {
-		delete(r.byClOrd, clOrdKey(l.account, l.clOrdID))
+	l, ok := r.orders[id]
+	var key string
+	if ok && l.clOrdID != "" {
+		key = clOrdKey(l.account, l.clOrdID)
 	}
 	delete(r.orders, id)
+	r.mu.Unlock()
+
+	r.unname(key, id)
+}
+
+// unname drops a name, but only if it still points at the order being forgotten.
+//
+// Forgetting runs on the pump and naming runs on the matcher, so by the time this
+// arrives the client may already have reused the identifier for a new order.
+// Deleting unconditionally would unname the live one on the strength of a dead
+// one's cancellation — the same orphaning bug the split was made to fix, wearing a
+// different hat.
+func (r *Registry) unname(key string, id int64) {
+	if key == "" {
+		return
+	}
+	r.nameMu.Lock()
+	if cur, ok := r.byClOrd[key]; ok && cur == id {
+		delete(r.byClOrd, key)
+	}
+	r.nameMu.Unlock()
 }
 
 func (r *Registry) resize(id, remaining int64) {
@@ -389,9 +452,9 @@ func (r *Registry) resize(id, remaining int64) {
 // exhausted so the table stays bounded by the live book rather than by history.
 func (r *Registry) fill(id, qty int64) (account, clOrdID string, leaves int64, ok bool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	l, ok := r.orders[id]
 	if !ok {
+		r.mu.Unlock()
 		return "", "", 0, false
 	}
 	l.remaining -= qty
@@ -399,12 +462,20 @@ func (r *Registry) fill(id, qty int64) (account, clOrdID string, leaves int64, o
 		l.remaining = 0
 	}
 	account, clOrdID, leaves = l.account, l.clOrdID, l.remaining
+	var key string
 	if l.remaining == 0 {
 		if l.clOrdID != "" {
-			delete(r.byClOrd, clOrdKey(l.account, l.clOrdID))
+			key = clOrdKey(l.account, l.clOrdID)
 		}
 		delete(r.orders, id)
 	}
+	r.mu.Unlock()
+
+	// Outside mu. This used to delete from byClOrd while holding mu, which was correct
+	// when one lock covered both maps and became a concurrent map write the moment the
+	// matcher started naming orders under its own. Neither the race detector nor 480
+	// tests reached it; thirty seconds of soak crashed the process on it.
+	r.unname(key, id)
 	return account, clOrdID, leaves, true
 }
 
