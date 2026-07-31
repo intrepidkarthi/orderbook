@@ -7,6 +7,43 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-31
+
+The second edge. The venue could take orders and could not publish a market.
+
+**What ships.** `marketdata.Feed` — one sequenced broadcast of book deltas, trade
+prints and venue-state changes — and `cmd/obgw -mdaddr`, a listener that serves it.
+A subscriber joining with nothing gets a snapshot and then the live stream; one
+holding a cursor gets the gap-fill and no snapshot.
+
+**The contract, stated so it can be falsified.** For one venue incarnation the
+sequence is dense and gap-free from 1, and `Snapshot(at Seq S)` plus every update
+after `S` equals the engine's book. A subscriber can join at any instant and be
+exactly right. Asserted from many starting points across a random tape, and again
+end to end over a socket against the venue's own view.
+
+What makes it true is that `Snapshot` takes the book **and** its sequence under one
+lock. Reading them separately is exactly the bug the order-entry side shipped in
+v0.12.0, where a report claimed consistency with a sequence the client had not
+reached and a change got applied twice. The same mistake was available here.
+
+**What is deliberately not here.** Conflation. A slow subscriber is disconnected
+rather than being served a conflated stream and a fresh snapshot when it catches up,
+which is the better answer for market data and is a feature with its own failure
+modes. Absent rather than half built.
+
+**Two bugs found by writing the tests, not by testing the feature.** A manual halt
+told nobody — `Engine.Halt`, `Resume` and `SetCancelOnly` set the state and emitted
+nothing, so only the automatic transitions ever reached a consumer, and the one halt
+a venue most needs to broadcast reached none. And the feed was not seeded from a
+recovered book, so after a restart a subscriber's first snapshot would have shown
+only what changed since — almost nothing.
+
+That second one is the third time in this repository that recovery has been found not
+to restore something *above* the book. The pattern is worth naming: replay rebuilds
+the engine, and every consumer that derives state from the event stream needs its own
+explicit adoption path.
+
 ### Added
 
 - **A market-data edge.** `cmd/obgw -mdaddr` serves the public feed on its own

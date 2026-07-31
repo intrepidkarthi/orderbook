@@ -36,10 +36,11 @@ WebAssembly demo that runs the real engine in the browser.
 is not here. Both qualifiers are load-bearing.
 
 What ships: the matching core, durable recovery, an event stream proven to
-reconstruct the book, an operator kill switch, a frozen binary order-entry
-protocol ([docs/PROTOCOL.md](docs/PROTOCOL.md)), and `cmd/obgw` — a reference TCP
-gateway with authentication, per-account outbound streams, gap-free resume across
-a disconnect, and bounded backpressure at every stage.
+reconstruct the book, an operator kill switch, a frozen binary protocol
+([docs/PROTOCOL.md](docs/PROTOCOL.md)), and `cmd/obgw` — a reference TCP gateway
+serving **both edges**: order entry with authentication, per-account outbound streams
+and gap-free resume across a disconnect, and a public market-data feed with
+snapshot-plus-delta recovery. Bounded backpressure at every stage.
 
 What does not, and is yours: **TLS and credential storage** (the reference sends a
 shared secret in the clear and says so), **multi-symbol routing** (order ids and
@@ -106,6 +107,13 @@ you build on are correct, tested, and honest about their edges.
   position**, **atomic cancel/replace**, **mass cancel**, cancel-on-disconnect, and
   **query your open orders** when resume is not available. Orders that outlive a
   restart stay nameable and keep reporting their fills.
+- **A market-data edge.** `cmd/obgw -mdaddr` publishes the venue's public feed on its
+  own listener: a snapshot naming the sequence it is consistent with, then incremental
+  level changes, trade prints and venue-state changes in one dense, gap-free stream.
+  A subscriber holding a cursor gets a gap-fill instead; one too far behind, or from
+  another venue incarnation, is refused explicitly rather than quietly resynchronised.
+  The guarantee — snapshot plus everything after its sequence equals the engine's book
+  — is asserted both in-process and end to end over a socket.
 - **Market data.** L1 / L2 / L3 (market-by-order) snapshots with sequence numbers,
   plus `marketdata.L2Feed` — incremental aggregated depth derived from the event
   stream, coalesced per command, with absolute quantities so a subscriber that misses
@@ -288,7 +296,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [research/kyle-lambda.md](docs/research/kyle-lambda.md) | Price impact measured end to end: the λ a real book produces, why it scales as 1/depth, and what a block order costs against working the same quantity. |
 | [research/order-flow.md](docs/research/order-flow.md) | Delta, CVD, and absorption against ground truth: a 94.5%-accurate aggressor rule builds a CVD wrong by 169%, and CVD divergence loses to a price-only control. |
 | [PROTOCOL.md](docs/PROTOCOL.md) | The binary order-entry protocol `cmd/obgw` speaks: framing, session and resume, every message, the reason-code vocabulary, and what is deliberately absent from the wire. |
-| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.14.0) with breaking-change notes. |
+| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.15.0) with breaking-change notes. |
 
 ---
 
