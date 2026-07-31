@@ -165,6 +165,46 @@ mentions, and it changes what you provision, how often you checkpoint, and how l
 can retain. If you run this for real, either budget for it or replace the record
 encoding — the framing, checksums and recovery do not care what the payload is.
 
+### What a second pass over the same code found
+
+Re-reading the fixes rather than re-running them turned up four more things. None
+would have been found by adding tests to what was already there; each came from asking
+what the *change itself* had made possible.
+
+- **A name could outlive its order.** Naming became synchronous while forgetting stayed
+  on the pump, whose queue drops batches — so an order could be named and never
+  tracked, and `forget` had nothing to look the name up by. `forget` now takes the
+  identifier from the event, which cannot go missing.
+- **A resolver that panicked killed the venue.** Moving name resolution onto the
+  matching goroutine put caller-supplied code on the one goroutine whose death stops
+  trading. Contained now, and argued: it is the only place the runner recovers, because
+  a resolver runs before the command is journalled or applied, so a panic in it says
+  nothing about the book.
+- **Naming allocated.** A composite `account+"\x00"+clOrdID` key, built on every write —
+  16 B and one allocation per accepted order, on the hot path of an engine that claims
+  to allocate nothing. A nested map removed it: 45 ns and one allocation became 26 ns
+  and none, and the account scoping became a property of the data rather than a
+  convention about how a string was built.
+- **The harness could not report on time.** Client sends had no deadline, so a
+  saturated venue delayed the report by six minutes on a seven-minute run; adding the
+  deadline then exposed a deadlock on the error path that nothing could previously
+  reach. Both fixed. 90 seconds for a 90-second run at 12,000 msg/s with the queue full
+  throughout.
+
+The pattern is worth naming: **every one of these was created by the previous fix.**
+A change to locking, or to which goroutine owns what, does not have a blast radius you
+can reason about from the diff.
+
+### Saturation is now survivable rather than terminal
+
+The clearest evidence the fix worked is not a clean run — it is a saturated one. At
+12,000 messages a second across 40 connections, with the command queue full in every
+sample, the venue held 1,753 orders against 3,978 the clients believed. Nothing
+orphaned. Before, that same condition filled the book to its 100,000-order ceiling and
+the venue stopped accepting liquidity for good.
+
+Saturation should mean backpressure and rejections. It used to mean permanent damage.
+
 ---
 
 ## 2. What the harness measures
