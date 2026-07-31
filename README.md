@@ -358,7 +358,7 @@ or discussion if you want to talk through an idea first.
   `types.Order` and the `EventSink` stream ↔ execution reports.
 - **New `EventSink` kinds** — emit the reserved `Triggered` / `BookDelta` events.
 - **A metrics exporter** — a Prometheus/`expvar` adapter off the event stream (the
-  `Metrics` seam), with an example.
+  event stream), with an example.
 - **More surveillance** — a quote-fading detector, or a wash-trade detector keyed
   on beneficial-ownership groups (the cross-account case the core can't see).
 - **More signals** — micro-price, VPIN, or a queue-position model in `pkg/signals`.

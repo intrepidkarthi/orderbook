@@ -89,11 +89,21 @@ What they do not cover, and this is the gap that matters for a production claim:
 
 ### Observability — weak
 
-There is a `Metrics` seam and `QueueLen`/`QueueCap` gauges, and the event stream can
-drive anything. **Nothing ships**: no Prometheus exporter, no tracing, no structured
-logging, no health or readiness endpoint. You will build this, and you need it before
-you need almost anything else here, because an unobservable venue is one you cannot
-operate even when it is behaving.
+What exists: `QueueLen`/`QueueCap` gauges on the `Runner`, and an event stream that can
+drive anything.
+
+What does not: everything else. No Prometheus exporter, no tracing, no structured
+logging, no health or readiness endpoint.
+
+*(The first version of this document claimed a `Metrics` seam existed, because the
+README's contributing list mentions one. It does not exist and never did — the
+reference was to something a contributor might build. Corrected here rather than
+quietly, because a readiness checklist that repeats an unbacked claim is worse than no
+checklist. It is also the fourth time in this project's history that a documented seam
+turned out not to be there.)*
+
+You need this before almost anything else on this list: an unobservable venue is one
+you cannot operate even when it is behaving.
 
 ### Operational readiness — absent
 
