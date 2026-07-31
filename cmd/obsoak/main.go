@@ -79,6 +79,13 @@ import (
 	"github.com/intrepidkarthi/orderbook/pkg/orderentry"
 )
 
+// writeTimeout bounds one client send. Generous relative to any healthy response
+// time, so it fires only when the venue has genuinely stopped reading.
+const writeTimeout = 5 * time.Second
+
+// drainTimeout bounds the wait for participants to stop after the run ends.
+const drainTimeout = 30 * time.Second
+
 type config struct {
 	addr      string
 	adminAddr string
@@ -286,7 +293,16 @@ func run(cfg config) {
 		fmt.Println("\nobsoak: interrupted; reporting what was collected")
 	}
 	close(stop)
-	wg.Wait()
+	// Bounded. Every participant should return promptly once its socket is closed, and
+	// the report is the deliverable — waiting forever for a straggler would throw away
+	// everything the run learned in order to be tidy about how it ended.
+	drained := make(chan struct{})
+	go func() { wg.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(drainTimeout):
+		fmt.Printf("obsoak: %s after stopping, some connections had not drained; reporting anyway\n", drainTimeout)
+	}
 	samplerWG.Wait()
 	close(samples)
 
@@ -370,13 +386,29 @@ func (p *participant) login() error {
 }
 
 func (p *participant) run(stop <-chan struct{}) {
-	defer p.conn.Close()
-
 	var readerWG sync.WaitGroup
 	readerWG.Add(1)
 	go func() {
 		defer readerWG.Done()
 		p.readLoop(stop)
+	}()
+
+	// One exit, and it closes the socket before waiting for the reader.
+	//
+	// The reader is parked in a blocking read with no deadline, which is what a real
+	// client does; closing the connection is the only thing that releases it. The
+	// error path used to wait for it WITHOUT closing, which is a deadlock — and it was
+	// unreachable until client sends got a deadline of their own, at which point a
+	// slow venue could fail a write and hang the harness on the way out. A fix for one
+	// problem making a latent second one reachable is the ordinary case, not a
+	// surprise.
+	defer func() {
+		_ = p.conn.Close()
+		readerWG.Wait()
+		p.mu.Lock()
+		p.st.orphans.Add(int64(len(p.inflight)))
+		p.st.believed.Add(int64(len(p.resting)))
+		p.mu.Unlock()
 	}()
 
 	// Deadline pacing rather than a ticker per message: at ten thousand messages a
@@ -387,14 +419,6 @@ func (p *participant) run(stop <-chan struct{}) {
 	for {
 		select {
 		case <-stop:
-			// Closing the socket is what unblocks the reader; it is parked in a read
-			// with no deadline, which is what a real client does.
-			_ = p.conn.Close()
-			readerWG.Wait()
-			p.mu.Lock()
-			p.st.orphans.Add(int64(len(p.inflight)))
-			p.st.believed.Add(int64(len(p.resting)))
-			p.mu.Unlock()
 			return
 		default:
 		}
@@ -404,10 +428,6 @@ func (p *participant) run(stop <-chan struct{}) {
 		}
 		if err := p.act(); err != nil {
 			p.st.errors.Add(1)
-			readerWG.Wait()
-			p.mu.Lock()
-			p.st.believed.Add(int64(len(p.resting)))
-			p.mu.Unlock()
 			return
 		}
 	}
@@ -481,6 +501,15 @@ func (p *participant) send(msgType uint8, id string, side uint8, price int64, ti
 	p.inflight[id] = time.Now()
 	p.mu.Unlock()
 
+	// A deadline, because a saturated venue stops draining its socket and a blocking
+	// write then lasts as long as the backlog does. Without it the run still ends —
+	// this is not a hang — but the report arrives whenever the writes happen to clear,
+	// which on a 7-minute saturated run was six minutes late. A soak whose findings
+	// turn up long after the soak is a soak nobody will run overnight.
+	//
+	// It is also what a real client does. One with no send timeout is not a model of
+	// anything.
+	_ = p.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	if err := wire.WritePacket(p.conn, wire.PacketUnsequenced, b); err != nil {
 		p.mu.Lock()
 		delete(p.inflight, id)
