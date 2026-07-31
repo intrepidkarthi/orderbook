@@ -173,8 +173,20 @@ type Registry struct {
 	// not ask again — and the order stayed in the book, uncancellable by anybody, for
 	// the life of the venue. Measured at 12,843 orphaned orders in thirty seconds at
 	// 10,000 messages a second; invisible below about 4,000. See docs/SOAK.md.
-	nameMu  sync.RWMutex
-	byClOrd map[string]int64 // account+client id -> engine order id
+	nameMu sync.RWMutex
+	// Nested rather than keyed on account+"\x00"+clOrdID, for two reasons.
+	//
+	// The composite key had to be built on every write, which is a string
+	// concatenation — 16 B and one allocation per accepted order, on the matching
+	// goroutine, in an engine whose hot path is measured against runtime.MemStats and
+	// claims to allocate nothing. (Reads were already free: the compiler elides the
+	// concatenation for a map lookup, but not for an assignment.)
+	//
+	// And the account scoping is the security boundary — without it one client could
+	// name another's order by guessing an identifier as ordinary as "1" — so it is
+	// better expressed as the shape of the data than as a convention about how a
+	// string was built.
+	byClOrd map[string]map[string]int64 // account -> client id -> engine order id
 
 	incarnation string
 	ringSize    int
@@ -187,7 +199,7 @@ func NewRegistry(incarnation string, ringSize int) *Registry {
 	return &Registry{
 		streams:     map[string]*Stream{},
 		orders:      map[int64]*live{},
-		byClOrd:     map[string]int64{},
+		byClOrd:     map[string]map[string]int64{},
 		incarnation: incarnation,
 		ringSize:    ringSize,
 	}
@@ -275,7 +287,7 @@ func (r *Registry) Publish(evs []matching.Event) {
 			r.deliver(e.Order.UserID, Msg{
 				Kind: KindCanceled, ClOrdID: e.Order.ClientOrderID, Reason: ReasonFor(e.Reason),
 			})
-			r.forget(e.Order.ID)
+			r.forget(e.Order)
 
 		case matching.EventReplaced:
 			if e.Order == nil {
@@ -340,8 +352,18 @@ func (r *Registry) Name(o *types.Order) {
 		return
 	}
 	r.nameMu.Lock()
-	r.byClOrd[clOrdKey(o.UserID, o.ClientOrderID)] = o.ID
+	r.nameLocked(o.UserID, o.ClientOrderID, o.ID)
 	r.nameMu.Unlock()
+}
+
+// nameLocked records one name. Callers hold nameMu.
+func (r *Registry) nameLocked(account, clOrdID string, id int64) {
+	m := r.byClOrd[account]
+	if m == nil {
+		m = map[string]int64{}
+		r.byClOrd[account] = m
+	}
+	m[clOrdID] = id
 }
 
 // Adopt seeds the registry from a recovered book, so orders that outlived a
@@ -383,16 +405,11 @@ func (r *Registry) Adopt(orders []*types.Order) {
 	r.nameMu.Lock()
 	for _, o := range orders {
 		if o != nil && o.ClientOrderID != "" {
-			r.byClOrd[clOrdKey(o.UserID, o.ClientOrderID)] = o.ID
+			r.nameLocked(o.UserID, o.ClientOrderID, o.ID)
 		}
 	}
 	r.nameMu.Unlock()
 }
-
-// clOrdKey scopes a client order id to its account. Scoping is the security
-// boundary: without it one client could name another's order simply by guessing
-// a common identifier like "1".
-func clOrdKey(account, clOrdID string) string { return account + "\x00" + clOrdID }
 
 // OrderIDFor resolves a client's own order id to the engine's, within that
 // client's account. It is how a cancel arriving over the wire names an order
@@ -400,7 +417,7 @@ func clOrdKey(account, clOrdID string) string { return account + "\x00" + clOrdI
 func (r *Registry) OrderIDFor(account, clOrdID string) (int64, bool) {
 	r.nameMu.RLock()
 	defer r.nameMu.RUnlock()
-	id, ok := r.byClOrd[clOrdKey(account, clOrdID)]
+	id, ok := r.byClOrd[account][clOrdID]
 	return id, ok
 }
 
@@ -409,17 +426,28 @@ func (r *Registry) OrderIDFor(account, clOrdID string) (int64, bool) {
 // the pump, byClOrd by the matcher — and every path that touches both does so in
 // that sequence, one at a time.
 
-func (r *Registry) forget(id int64) {
-	r.mu.Lock()
-	l, ok := r.orders[id]
-	var key string
-	if ok && l.clOrdID != "" {
-		key = clOrdKey(l.account, l.clOrdID)
+// forget removes an order from the shadow table and drops its name.
+//
+// The identifier comes from the EVENT, not from the shadow table, and that is not a
+// simplification — it is required. The two maps are no longer written together: naming
+// is synchronous and cannot be missed, while the shadow table is maintained by the
+// pump, whose queue discards its oldest batches under backpressure. So an order can be
+// named and never tracked, and a forget that looked the identifier up in the shadow
+// table would find nothing and leave the name behind for the life of the venue.
+//
+// A dropped batch is a worse problem than a leaked map entry — it is a lost execution
+// report — and obgw_publisher_dropped_total exists so it is not a silent one. But a
+// leak that only appears after another failure is still a leak, and this one arrived
+// with the fix for something worse, which is the usual way.
+func (r *Registry) forget(o *types.Order) {
+	if o == nil {
+		return
 	}
-	delete(r.orders, id)
+	r.mu.Lock()
+	delete(r.orders, o.ID)
 	r.mu.Unlock()
 
-	r.unname(key, id)
+	r.unname(o.UserID, o.ClientOrderID, o.ID)
 }
 
 // unname drops a name, but only if it still points at the order being forgotten.
@@ -429,13 +457,18 @@ func (r *Registry) forget(id int64) {
 // Deleting unconditionally would unname the live one on the strength of a dead
 // one's cancellation — the same orphaning bug the split was made to fix, wearing a
 // different hat.
-func (r *Registry) unname(key string, id int64) {
-	if key == "" {
+func (r *Registry) unname(account, clOrdID string, id int64) {
+	if clOrdID == "" {
 		return
 	}
 	r.nameMu.Lock()
-	if cur, ok := r.byClOrd[key]; ok && cur == id {
-		delete(r.byClOrd, key)
+	if m := r.byClOrd[account]; m != nil {
+		if cur, ok := m[clOrdID]; ok && cur == id {
+			delete(m, clOrdID)
+		}
+		// The per-account map is left in place. An account that has traded once will
+		// trade again, and the alternative is churning a map allocation every time a
+		// participant's book empties — which for a market maker is constantly.
 	}
 	r.nameMu.Unlock()
 }
@@ -462,11 +495,8 @@ func (r *Registry) fill(id, qty int64) (account, clOrdID string, leaves int64, o
 		l.remaining = 0
 	}
 	account, clOrdID, leaves = l.account, l.clOrdID, l.remaining
-	var key string
-	if l.remaining == 0 {
-		if l.clOrdID != "" {
-			key = clOrdKey(l.account, l.clOrdID)
-		}
+	exhausted := l.remaining == 0
+	if exhausted {
 		delete(r.orders, id)
 	}
 	r.mu.Unlock()
@@ -475,7 +505,17 @@ func (r *Registry) fill(id, qty int64) (account, clOrdID string, leaves int64, o
 	// when one lock covered both maps and became a concurrent map write the moment the
 	// matcher started naming orders under its own. Neither the race detector nor 480
 	// tests reached it; thirty seconds of soak crashed the process on it.
-	r.unname(key, id)
+	//
+	// One case this cannot close, stated rather than left to be discovered: an order
+	// whose acceptance batch the pump dropped is named but not tracked, so the early
+	// return above fires and its name survives a fill that exhausts it. Unlike a
+	// cancel, a trade event carries no client identifier, so there is nothing to unname
+	// it by. Closing it would mean tracking remaining quantity on the matching
+	// goroutine, which is the shadow table again — a real cost on the hot path to
+	// recover one map entry in a venue that has already lost an execution report.
+	if exhausted {
+		r.unname(account, clOrdID, id)
+	}
 	return account, clOrdID, leaves, true
 }
 

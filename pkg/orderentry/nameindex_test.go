@@ -90,7 +90,7 @@ func TestALateForgetDoesNotUnnameAReusedIdentifier(t *testing.T) {
 	reg.track(second)
 
 	// Only now does the pump get round to the first order's cancellation.
-	reg.forget(1)
+	reg.forget(first)
 
 	id, ok := reg.OrderIDFor("alice", "reuse")
 	if !ok {
@@ -111,7 +111,7 @@ func TestForgettingTheCurrentOrderStillRemovesTheName(t *testing.T) {
 	NewNameIndex(reg).OnEvents([]matching.Event{{Kind: matching.EventAccepted, Order: o}})
 	reg.track(o)
 
-	reg.forget(3)
+	reg.forget(o)
 	if _, ok := reg.OrderIDFor("alice", "gone"); ok {
 		t.Error("the name outlived the order")
 	}
@@ -206,8 +206,40 @@ func TestNamingAndFillingConcurrentlyIsSafe(t *testing.T) {
 			o.ID = int64(i)
 			reg.track(o)
 			reg.fill(int64(i), 5)
-			reg.forget(int64(i))
+			reg.forget(o)
 		}
 	}()
 	wg.Wait()
+}
+
+// TestADroppedAcceptanceDoesNotLeakTheName is the asymmetry the lock split created,
+// and it is a regression this test exists to have caught.
+//
+// Naming is synchronous and cannot be missed. Everything else the Registry holds is
+// maintained by the pump, whose queue DROPS its oldest batches under backpressure. So
+// an order can be named and never tracked, and forget() — which used to derive the
+// client's identifier from the shadow table — then had nothing to look it up by and
+// left the name behind forever.
+//
+// Before the split the two maps were written together and failed together, so this
+// could not happen. It is a leak that arrived with the fix for a worse bug, which is
+// the usual way.
+func TestADroppedAcceptanceDoesNotLeakTheName(t *testing.T) {
+	reg := NewRegistry("INC1", 4096)
+	o := nameOrder(t, "alice", "dropped", 100, 5)
+	o.ID = 21
+
+	// The matcher names it. The pump never sees the acceptance: its batch was
+	// discarded under backpressure, so track() is never called.
+	NewNameIndex(reg).OnEvents([]matching.Event{{Kind: matching.EventAccepted, Order: o}})
+	if _, ok := reg.OrderIDFor("alice", "dropped"); !ok {
+		t.Fatal("the order was not named")
+	}
+
+	// The cancellation does get through.
+	reg.Publish([]matching.Event{{Kind: matching.EventCanceled, Order: o}})
+
+	if _, ok := reg.OrderIDFor("alice", "dropped"); ok {
+		t.Error("the name outlived the order because the pump never saw it accepted; byClOrd grows without bound")
+	}
 }
