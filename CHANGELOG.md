@@ -7,6 +7,50 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- **`marketdata.Feed`** — the venue's public market-data stream: one sequenced
+  broadcast of book deltas, trade prints and venue-state changes, with
+  snapshot-plus-delta recovery.
+
+  The guarantee, stated so it can be falsified: for one incarnation the sequence is
+  dense and gap-free from 1, and **`Snapshot(at Seq S)` plus every update after `S`
+  equals the engine's book**. A subscriber can start anywhere and be exactly right.
+  Asserted from many different starting points across a 2,000-command random tape,
+  including from sequence 0.
+
+  What makes it true is that `Snapshot` captures the book *and* its sequence under one
+  lock. Reading them separately is precisely the bug the order-entry side shipped in
+  v0.12.0, where a report claimed consistency with a sequence the client had not
+  reached and a change got applied twice.
+
+  It is deliberately **not** `pkg/orderentry`. Order entry is private and per-account,
+  and a client that falls behind is owed the messages it missed — an execution report
+  it never sees is a position it does not know it has. Market data is public and
+  identical for everyone, so a subscriber that falls too far behind is simply told the
+  current state. One stream instead of a registry, and a fresh snapshot instead of a
+  refusal.
+
+  Retention is bounded, because an unbounded ring turns one stalled subscriber into a
+  venue-wide memory leak, and an evicted cursor is refused explicitly rather than
+  served a truncated slice that looks complete.
+
+### Fixed
+
+- **A manual halt told nobody.** `Engine.Halt`, `Resume` and `SetCancelOnly` set the
+  state and emitted nothing. Only the *automatic* transitions — a guardrail trip, a
+  band-breach pause — reached the event stream, so the one halt a venue most needs to
+  broadcast, an operator deliberately stopping trading, reached no consumer, no
+  market-data feed and no client.
+
+  All three now emit, and only on an actual transition: halting an already-halted
+  venue produces nothing, because an event that describes no change is worse than
+  none. Cancel-only gets its own kind (`EventCancelOnly`) rather than being reported
+  as a halt — a subscriber told the venue is halted when it is still accepting
+  cancels would draw the wrong conclusion about whether it can get out of a position.
+
+  Found by writing a market-data test that asserted a halt appears in the feed.
+
 ## [0.14.0] - 2026-07-30
 
 A depth bug that had been wrong in public, and the measurements that found it.

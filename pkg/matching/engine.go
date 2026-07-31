@@ -1234,19 +1234,43 @@ func (e *Engine) outsideBand(price int64) bool {
 
 // Halt suspends trading; every subsequent order is rejected until Resume.
 func (e *Engine) Halt() {
+	// Announce the transition, not the call. An operator halting an already-halted
+	// venue should not produce a second Halted, and a consumer counting them would
+	// otherwise see an event that describes nothing.
+	//
+	// This used to emit nothing at all: only the AUTOMATIC transitions (a guardrail
+	// trip, a band-breach pause) told anyone. So the one halt a venue most needs to
+	// broadcast — the operator deliberately stopping trading — reached no consumer,
+	// no market-data feed and no client, which is the opposite of the intended
+	// priority.
+	if e.state == StateHalted {
+		return
+	}
 	e.state = StateHalted
+	e.emitStateChange(EventHalted, "")
 }
 
 // SetCancelOnly puts the engine in cancel-only mode: cancels are accepted but new
 // liquidity is rejected (ErrNewOrdersHalted). Used to wind a venue down under
 // stress before a full halt or auction reopen.
 func (e *Engine) SetCancelOnly() {
+	if e.state == StateCancelOnly {
+		return
+	}
 	e.state = StateCancelOnly
+	// Its own kind rather than Halted: a subscriber told the venue is halted when it
+	// is actually accepting cancels would draw the wrong conclusion about whether it
+	// can still get out of a position.
+	e.emitStateChange(EventCancelOnly, "")
 }
 
 // Resume returns the engine to normal (Open) trading.
 func (e *Engine) Resume() {
+	if e.state == StateOpen {
+		return
+	}
 	e.state = StateOpen
+	e.emitStateChange(EventResumed, "")
 }
 
 // State reports the current trading state.

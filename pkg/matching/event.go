@@ -18,15 +18,16 @@ import "github.com/intrepidkarthi/orderbook/pkg/types"
 type EventKind uint8
 
 const (
-	EventAccepted  EventKind = iota // order entered the book (rested, or began filling)
-	EventRejected                   // order refused (with Reason)
-	EventTrade                      // an execution (a fill)
-	EventCanceled                   // order removed: cancelled, or terminated without resting
-	EventTriggered                  // a stop or trailing stop fired and became a live order
-	EventReplaced                   // order changed size in place, keeping queue position
-	EventBookDelta                  // DEPRECATED and never emitted; see the note below
-	EventHalted                     // engine entered Halted (guardrail trip or band-breach pause)
-	EventResumed                    // engine returned to Open (e.g. band-breach pause elapsed)
+	EventAccepted   EventKind = iota // order entered the book (rested, or began filling)
+	EventRejected                    // order refused (with Reason)
+	EventTrade                       // an execution (a fill)
+	EventCanceled                    // order removed: cancelled, or terminated without resting
+	EventTriggered                   // a stop or trailing stop fired and became a live order
+	EventReplaced                    // order changed size in place, keeping queue position
+	EventBookDelta                   // DEPRECATED and never emitted; see the note below
+	EventHalted                      // engine entered Halted (operator, guardrail trip, or band-breach pause)
+	EventResumed                     // engine returned to Open (manual resume, or a band-breach pause elapsed)
+	EventCancelOnly                  // engine entered cancel-only: cancels accepted, new liquidity refused
 )
 
 func (k EventKind) String() string {
@@ -43,6 +44,8 @@ func (k EventKind) String() string {
 		return "TRIGGERED"
 	case EventReplaced:
 		return "REPLACED"
+	case EventCancelOnly:
+		return "CANCEL_ONLY"
 	case EventBookDelta:
 		return "BOOK_DELTA"
 	case EventHalted:
