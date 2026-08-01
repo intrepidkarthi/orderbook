@@ -359,6 +359,25 @@ reconstruct per-order remaining quantity — see `TestEventStreamReconstructsBoo
 Without that proof the field would have been a guess, and once the golden vectors
 were committed it could never have been added.
 
+### What `2` (unknown order) does and does not mean
+
+A message that names an order — `Cancel`, `Reduce`, `ReplaceOrder` — is resolved from
+the client's own identifier to the engine's order id **when the command reaches the
+front of the matching queue**, not when the gateway receives it. Every command the
+client sent earlier has been applied by then, including the `Enter` that created the
+order.
+
+So `2` means the order genuinely is not live for this account: never accepted, already
+filled, already cancelled, or never the client's to begin with. It does not mean "not
+yet" — a client may send `Enter` and `Cancel` back to back without waiting for the
+acknowledgement, and the cancel will find its order.
+
+This was not true in v0.16.0 and earlier. Resolution happened on the gateway's read
+loop, ahead of the queue, so under load a cancel could be refused for an order whose `Enter` was
+still queued in front of it. A client is right not to retry a definitive `2`, so those
+orders stayed in the book, addressable by nobody — measured at 12,843 of them in thirty
+seconds at 10,000 messages a second. See [SOAK.md](SOAK.md).
+
 ### Reason codes
 
 | Code | Meaning | | Code | Meaning |

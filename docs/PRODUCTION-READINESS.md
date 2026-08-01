@@ -60,6 +60,8 @@ Each row names the evidence, because a checklist that only asserts is worth noth
 | The event stream reconstructs the book | Replayed into an L3 book identical to the engine's, across 22 scenarios covering every order class |
 | Recovery is exact | Snapshot + log tail rebuilds a byte-identical engine, including all three sequence counters, the duplicate guard and conditional-order state |
 | The log cannot silently corrupt | CRC-32C per record; a complete record failing its checksum refuses to start the venue rather than truncating |
+| Neither can the snapshot | CRC-32C over the whole file, refused the same way. It is the base the log is replayed on top of, so a wrong one is worse than a wrong record — and it had no check at all until writing the runbook for it showed the procedure would have been "you cannot detect this" |
+| Nothing leaks over an hour | 9,000,170 messages at 2,500/s: across 101 samples spanning 50 minutes the goroutine and descriptor counts did not move by one and the heap floor moved by 0.2 MiB |
 | The hot path allocates nothing | Measured against `runtime.MemStats`, not the rounded `allocs/op` column: cancel 0.0002/op, maker churn 0.009/op |
 | Level aggregates match the orders | Invariant asserted after full fills, after removals, and across a 2,000-operation churn |
 | Market data cannot drift from the book | Derived L2 compared against the engine's own snapshot after every command of a random tape |

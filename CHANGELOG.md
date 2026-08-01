@@ -9,6 +9,21 @@ versions may include breaking changes).
 
 ### Fixed
 
+- **The snapshot had no integrity check, for four releases.** Every log record carries a
+  CRC-32C and a complete record that fails it refuses to start the venue. The snapshot
+  is the *base* those records are replayed on top of — so a wrong snapshot is strictly
+  worse than a wrong record — and it had nothing. A torn snapshot was already impossible
+  (`WriteSnapshot` renames a fully-synced temp file into place), but media corruption
+  was not: most bit flips break the JSON and the parser catches them, while a flip
+  inside a number parses perfectly and silently restores a book that never existed.
+
+  Now the same shape as the log — magic prefix, CRC, body — and refused the same way. A
+  file without the magic is a pre-checksum snapshot and is read without one, so an
+  upgrade does not cost a venue its ability to recover; the next checkpoint rewrites it.
+
+  Found while writing the runbook for "corrupt snapshot" and discovering the honest
+  procedure would have been *"you cannot detect this"*.
+
 - **Orders that no client could cancel.** Under sustained load the reference gateway
   refused a cancel for an order that was live in its own book. A client does not retry
   a definitive "no such order", so the order stayed there, addressable by nobody, until
@@ -37,6 +52,17 @@ versions may include breaking changes).
   a soak crashed the process on in thirty seconds.
 
 ### Added
+
+- **[docs/RUNBOOKS.md](docs/RUNBOOKS.md)** — procedures for a torn log, a corrupt log
+  record, a corrupt snapshot, a stuck matching goroutine, a mass cancel that pauses the
+  venue, an evicted subscriber, a publisher dropping batches, and a book at its ceiling.
+  Each written from the code that produces the failure: the signal, what the engine has
+  already done by the time you look, what to do, and what makes it worse. Alert
+  thresholds are tabulated, and it ends with what has *no* runbook — failover, trade
+  bust, credential revocation, clock disagreement.
+
+  Operational readiness stays **weak** despite it. None of this has been rehearsed, and
+  a procedure nobody has practised under pressure is a document, not a capability.
 
 - **`pkg/observability`** — a Prometheus collector attached to the engine as an
   `EventSink`, so it counts what the book saw rather than what a gateway believed it

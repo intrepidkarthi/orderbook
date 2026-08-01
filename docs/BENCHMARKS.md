@@ -243,12 +243,24 @@ Every figure on this page is a microbenchmark measured over seconds. They are th
 tool for "did this change make matching slower", and the wrong tool for "can this run a
 venue".
 
-Not measured anywhere: sustained load over hours or days, memory growth and GC
-behaviour under continuous pressure, goroutine and file-descriptor counts across a long
-session, or the gateway with hundreds of concurrent connections rather than a handful.
-Those are the numbers a capacity plan is built from, and this project does not have
-them. See [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md), which is explicit about
-what that means for the claim.
+Sustained load is now measured separately, by `cmd/obsoak`, and lives in
+[SOAK.md](SOAK.md) rather than on this page — an hour at 2,500 messages a second
+through a real socket, a real protocol and a durable log, with memory, goroutine and
+file-descriptor counts sampled throughout. It found a correctness defect no benchmark
+here could have, and it corrected a capacity figure this project had published.
+
+Still not measured anywhere: **days rather than hours**, the gateway with hundreds of
+concurrent connections rather than 25, and any workload but the harness's own maker/taker
+mix. A capacity plan needs those and this project does not have them. See
+[PRODUCTION-READINESS.md](PRODUCTION-READINESS.md), which is explicit about what that
+means for the claim.
+
+One warning that belongs here more than anywhere: **absolute throughput figures do not
+survive a machine that is doing something else.** The first capacity numbers published
+in SOAK.md failed to reproduce four hours later on the same code, because the host had
+got busier and the measurement recorded nothing about that. The interleaved A/B against
+a worktree that this page uses for every figure is the reason its numbers hold up, and
+it was not applied there. Do not compare throughput across runs without it.
 
 ## Notes on the numbers
 

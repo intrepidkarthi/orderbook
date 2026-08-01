@@ -235,16 +235,40 @@ blocking.
 
 ## Observability
 
-Record latency into a lock-free, zero-allocation histogram on the critical path
-and compute **p50/p99/p999 on a separate goroutine** — averaging pre-computed
-percentiles across shards hides the tail, and not correcting for coordinated
-omission makes your tail numbers lie. Expose via a scraped `/metrics` endpoint
-reading atomics the matcher only increments:
+Some of this now ships. `pkg/observability` is a Prometheus collector that attaches to
+the engine as an `EventSink` — so it counts what the book saw, not what your gateway
+believed it sent — and `cmd/obgw -admin` serves it alongside `/healthz` and `/readyz`
+on a separate port. No new dependency; the exposition format is written directly.
 
-- latency percentiles (p50/p99/p999) for submit / cancel / match
-- command-queue depth, book depth (order count)
-- match rate, reject rate (by reason)
-- WAL fsync latency, snapshot duration
+What it gives you:
+
+- command-queue depth and capacity, book depth, top of book, trading phase
+- order lifecycle counters, with **expiries counted apart from cancels** (together they
+  make a venue look like its participants were pulling orders when its own clock was)
+- **rejections broken down by reason** — "rejections are up" is not actionable, "they
+  are all price-band" is
+- `orderbook_last_event_sequence`, which is the metric to alert on for a stalled
+  matcher: every rate metric reads zero for a stall and for a quiet market alike
+- goroutines, live heap and open file descriptors, for the leaks that only appear over
+  hours
+
+What you still have to build:
+
+- **latency percentiles per operation.** `observability.Histogram` is there and
+  `cmd/obgw` feeds one for inbound message handling, but nothing wires submit / cancel /
+  match. Record into a lock-free histogram on the critical path and compute
+  p50/p99/p999 on a separate goroutine — averaging pre-computed percentiles across
+  shards hides the tail, and not correcting for coordinated omission makes your tail
+  numbers lie.
+- **WAL fsync latency and snapshot duration.** Both stop the matching goroutine when
+  they go slow, and neither is instrumented.
+- **Tracing, structured logging, dashboards and alert thresholds.** Thresholds worth
+  starting from are tabulated in [RUNBOOKS.md](RUNBOOKS.md).
+
+One constraint to preserve if you extend it: **nothing a scrape touches may go through
+the command queue.** An endpoint that enqueued would answer promptly while the venue
+was healthy and hang exactly when the matcher stalled, losing the reading at the only
+moment anybody wanted it.
 
 The repo's `BenchmarkLatency_CancelHeavy` shows the shape to target: **p50 ~83 ns,
 p99 ~167 ns, p999 ~292 ns** on a cancel-heavy mix.
