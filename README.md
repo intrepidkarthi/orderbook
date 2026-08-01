@@ -319,7 +319,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [SOAK.md](docs/SOAK.md) | Sustained load: what `cmd/obsoak` measures, the methodology that took three wrong versions to get right, and the correctness defect the first hour of it found. |
 | [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) | What a venue actually needs, with an honest status for each item — what ships, what is deliberately absent, and what you would have to build. Production readiness is a property of a deployment, not of a library, and this says so. |
 | [PROTOCOL.md](docs/PROTOCOL.md) | The binary order-entry protocol `cmd/obgw` speaks: framing, session and resume, every message, the reason-code vocabulary, and what is deliberately absent from the wire. |
-| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.16.0) with breaking-change notes. |
+| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.17.0) with breaking-change notes. |
 
 ---
 

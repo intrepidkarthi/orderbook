@@ -7,6 +7,8 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-01
+
 ### Fixed
 
 - **The snapshot had no integrity check, for four releases.** Every log record carries a
@@ -85,30 +87,6 @@ versions may include breaking changes).
 - **[docs/SOAK.md](docs/SOAK.md)** — what it measures, the methodology that took three
   wrong versions to get right, and what it found.
 
-### Changed
-
-- **Corrected: the capacity figures published in `docs/SOAK.md` did not reproduce.**
-  5,000 msg/s comfortable, 7,000 clean and 10,000 saturating became 3,500 clean and
-  5,000 saturating four hours later, on the same machine and the same code. Ruled out
-  as a code regression by an interleaved A/B against a worktree at the earlier commit —
-  three rounds, alternating, indistinguishable. The difference was a desktop that had
-  been idle in the morning and was running a window server and browsers by the evening;
-  the measurement controlled for none of that and recorded none of it.
-
-  This project therefore does not know what rate the venue sustains. It knows the shape
-  — the durable path through a socket and a protocol runs three orders of magnitude
-  below the in-process benchmarks, and the command queue gives first — and it knows two
-  numbers taken under conditions it failed to write down. Third published figure
-  corrected against itself; second where the documentation was flattering.
-
-  What held at every rate and on both arms: a bounded book, no orphaned orders, no
-  dropped batches, no leaked goroutines or descriptors, p50 of 5 ms below saturation.
-  Timing figures are a property of the host; correctness findings are a property of the
-  code. `obsoak` now runs a fixed-work probe before and after each run and prints it
-  first, so a run carries the evidence of its own conditions.
-
-### Added
-
 - **[docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md)** — what a venue
   actually needs, with an honest status for each item and the evidence named so it can
   be checked rather than trusted.
@@ -124,15 +102,6 @@ versions may include breaking changes).
   health checks, no rehearsed drills), and **sustained load testing** — every
   performance figure in this repository is a microbenchmark over seconds, and nobody
   has run this at volume for a day.
-
-### Changed
-
-- `docs/BENCHMARKS.md` now states what its numbers cannot tell you: no sustained load,
-  no memory or goroutine growth over a long session, no multi-client gateway test, and
-  therefore no capacity plan. The figures answer "did this change make matching
-  slower", not "can this run a venue".
-
-### Added
 
 - **The closing auction, and indicative pricing through an auction.** v0.16.0 shipped
   pre-open and the opening uncross; this completes the session at both ends.
@@ -159,6 +128,33 @@ versions may include breaking changes).
   several times the traffic of the order flow itself, for information nobody can act on
   at that granularity. Real venues publish on a timer, and the timer is a venue
   decision — the same reasoning that keeps the calendar out of the engine.
+
+### Changed
+
+- **Corrected: the capacity figures published in `docs/SOAK.md` did not reproduce.**
+  5,000 msg/s comfortable, 7,000 clean and 10,000 saturating became 3,500 clean and
+  5,000 saturating four hours later, on the same machine and the same code. Ruled out
+  as a code regression by an interleaved A/B against a worktree at the earlier commit —
+  three rounds, alternating, indistinguishable. The difference was a desktop that had
+  been idle in the morning and was running a window server and browsers by the evening;
+  the measurement controlled for none of that and recorded none of it.
+
+  This project therefore does not know what rate the venue sustains. It knows the shape
+  — the durable path through a socket and a protocol runs three orders of magnitude
+  below the in-process benchmarks, and the command queue gives first — and it knows two
+  numbers taken under conditions it failed to write down. Third published figure
+  corrected against itself; second where the documentation was flattering.
+
+  What held at every rate and on both arms: a bounded book, no orphaned orders, no
+  dropped batches, no leaked goroutines or descriptors, p50 of 5 ms below saturation.
+  Timing figures are a property of the host; correctness findings are a property of the
+  code. `obsoak` now runs a fixed-work probe before and after each run and prints it
+  first, so a run carries the evidence of its own conditions.
+
+- `docs/BENCHMARKS.md` now states what its numbers cannot tell you: no sustained load,
+  no memory or goroutine growth over a long session, no multi-client gateway test, and
+  therefore no capacity plan. The figures answer "did this change make matching
+  slower", not "can this run a venue".
 
 ## [0.16.0] - 2026-07-31
 
