@@ -256,10 +256,12 @@ Named because a gap you know about is worth more than a page that pretends other
 - **A trade printed in error.** There is no bust or correction path. Once a trade is
   published there is no way to amend it, and that interacts badly with an append-only
   event stream. Design it before you need it.
-- **A compromised credential.** There is no key rotation, no revocation, and the
-  built-in `StaticAccounts` holds plaintext with no hashing. Removing the account from
-  the credential file and restarting is the whole of the current procedure, and it drops
-  every other session too. Replace `orderentry.Authenticator` before you need this.
+- **A compromised credential.** There is no key rotation and no revocation. The
+  gateway's table now holds digests rather than plaintext, which changes what a memory
+  disclosure is worth and nothing about this gap: removing the account from the
+  credential file and restarting is still the whole of the procedure, and it still
+  drops every other session too. Replace `orderentry.Authenticator` before you need
+  this.
 - **Clock disagreement.** No clock-synchronisation attestation and no procedure for a
   host whose clock has jumped, which matters because time-in-force deadlines and the
   audit trail both read it.
