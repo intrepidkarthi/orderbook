@@ -4,10 +4,21 @@ Procedures for the failures this venue can actually have, written from the code 
 produces them. Each names the signal you will see first, what the code has already
 done by the time you look, what to do, and what will make it worse.
 
-**These have not been rehearsed.** They are derived from behaviour that is tested, and
-a procedure nobody has practised under pressure is a document, not a capability.
-[PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) counts operational readiness as weak
-for that reason and will keep doing so until somebody has run the drill.
+**Every entry here is drilled in CI** — see `cmd/obgw/drills_test.go`. Each drill
+induces the real failure rather than a simulation of its symptoms, asserts the signal
+this page tells you to look for, and where a procedure is prescribed, runs it. The
+corrupt-snapshot drill really deletes the file and restarts, and checks the replayed
+book is identical and its orders still nameable.
+
+That is not the same as being ready. A drill proves the page is not *stale* — that no
+reason string was renamed out from under it, no status code changed, no fallback quietly
+stopped falling back. It proves nothing about whether a human can follow it at three in
+the morning on a venue that is losing money. **Nobody has done that**, which is why
+[PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) still counts operational readiness as
+weak, and will until somebody has.
+
+Each drill was itself verified to fail against deliberately broken code, because a drill
+that cannot fail is decoration.
 
 Two rules that apply to every entry below:
 

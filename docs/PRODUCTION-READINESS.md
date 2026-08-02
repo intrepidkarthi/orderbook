@@ -189,9 +189,18 @@ log was CRC-checked per record and the snapshot it is applied on top of had no
 integrity check at all. That is fixed, and it is the second time in two weeks that
 documenting something carefully found a defect in it.
 
-What does not exist: any of it rehearsed. A procedure nobody has practised under
-pressure is a document, not a capability, and this stays **weak** until somebody has
-run the drill. There is also no failover procedure, no trade-bust path, no credential
+The procedures are also executable. `cmd/obgw/drills_test.go` runs one drill per entry
+on every CI run: it corrupts a real log record and asserts the venue refuses to start,
+blocks a real journal write and asserts `/readyz` reports a stall while `/healthz` stays
+up, overflows a real publisher and asserts the drop counter moves, fills a book to its
+ceiling and asserts the rejection carries the exact label this page tells you to alert
+on. Each was verified to fail against deliberately broken code.
+
+What that buys is narrower than it sounds, and the distinction matters: **a drill proves
+the runbook is not stale, not that anyone can follow it.** It catches a renamed reason
+string or a fallback that stopped falling back. It says nothing about a human executing
+the procedure under pressure on a venue that is losing money, and nobody has done that.
+This stays **weak** until somebody has. There is also no failover procedure, no trade-bust path, no credential
 revocation and no clock-disagreement procedure — all named at the end of RUNBOOKS.md
 rather than left to be discovered.
 
