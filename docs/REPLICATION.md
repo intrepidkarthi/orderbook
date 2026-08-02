@@ -51,14 +51,15 @@ Verified against the code at the time of writing, not quoted from other docs:
    `wal.Recover(config, snapPath, walPath)` (`pkg/wal/wal.go`) — CRC-checked
    snapshot plus log tail, already exercised by `cmd/obgw` checkpointing.
 
-And one seam this spec needs that does **not** exist publicly, named now rather
-than discovered at implementation time:
+And the one seam this spec found missing on paper, since closed:
 
 5. **A canonical state digest.** Divergence detection requires primary and follower
-   to compare books cheaply. Today the digest lives in test helpers only
-   (`snapDigest`, `pkg/matching/runner_recovery_test.go`). Promoting a stable,
-   documented digest into the library is part of this work — until then, "the
-   follower has the same book" is an assertion nobody can make in production.
+   to compare books cheaply. When this spec was first written the digest lived in
+   test helpers only (`snapDigest`, `pkg/wal/runner_recovery_test.go`) — that was
+   deliverable #1, and it has shipped: `EngineSnapshot.Digest`
+   (`pkg/matching/snapshot.go`) fingerprints everything recovery must reproduce,
+   normalises exactly what a legitimate replay may differ in, and the recovery
+   suite now consumes it, so a regression in the digest fails crash-recovery tests.
 
 ## 3. The reference topology
 
@@ -160,7 +161,8 @@ deliberately broken code before it counts:
 
 ## 7. Deliverables
 
-1. `matching` or `wal`: a public, documented, stable **state digest** (§2.5).
+1. ✅ `matching`: a public, documented **state digest** (§2.5) —
+   `EngineSnapshot.Digest`.
 2. `examples/replication` (or `cmd/obha`): primary-side log shipping, follower
    tail, promotion — small enough to read in one sitting, like
    `examples/gateway`.

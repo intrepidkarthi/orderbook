@@ -9,6 +9,17 @@ versions may include breaking changes).
 
 ### Added
 
+- **`matching.EngineSnapshot.Digest`** — the crash-recovery suite's book
+  fingerprint, promoted from a test helper to a contract
+  ([REPLICATION.md](docs/REPLICATION.md) deliverable #1). Covers everything
+  recovery must reproduce; normalises exactly the fields a legitimate replay may
+  differ in (order timestamps, pause deadline, guard window start, WALSeq); does
+  not mutate its receiver. A comparison fingerprint between processes running the
+  same release, deliberately nothing stronger — pinning a canonical encoding would
+  turn every snapshot change into a wire-format negotiation. A perturbation test
+  asserts every meaningful field class moves it, and the recovery tests consume
+  the public method, so a digest regression fails crash recovery.
+
 - **`orderentry.HashedAccounts`** — StaticAccounts with the plaintext removed: a
   SHA-256 digest table, constant-time compare, deny by default, and the blank-secret
   rule kept in digest form (`HashSecret("")` is refused at construction, because by
