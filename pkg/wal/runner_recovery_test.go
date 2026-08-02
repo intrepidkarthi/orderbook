@@ -1,13 +1,9 @@
 package wal
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -67,43 +63,13 @@ func buildTape(n int) []tapeCmd {
 	return out
 }
 
-// snapDigest fingerprints everything recovery must reproduce — the resting book,
-// all three sequence counters, the duplicate guard, and the conditional-order
-// state that used to vanish across a restore.
-//
-// Wall-clock fields are normalised away first. A replayed order is stamped with
-// the clock at replay time, not the clock at original submission, so an engine
-// rebuilt from the log is legitimately not byte-identical in its timestamps. That
-// is a property of replaying a command log, not a recovery defect; everything
-// else must match exactly.
+// snapDigest was this file's private fingerprint until EngineSnapshot.Digest
+// was promoted to the library (see docs/REPLICATION.md); it stays as a shim so
+// the recovery tests are consumers of the public contract — if the digest's
+// normalisation ever regresses, the crash-recovery suite is what notices.
 func snapDigest(t *testing.T, snap *matching.EngineSnapshot) string {
 	t.Helper()
-	snap.WALSeq = 0 // a log position, not engine state
-	snap.PausedUntil = time.Time{}
-	snap.Guard.Start = time.Time{}
-	for _, o := range snap.Orders {
-		normaliseTimes(o)
-	}
-	for _, s := range snap.Stops {
-		normaliseTimes(s.Order)
-	}
-	for i := range snap.Trailing {
-		normaliseTimes(snap.Trailing[i].Order)
-	}
-	b, err := json.Marshal(snap)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
-
-func normaliseTimes(o *types.Order) {
-	if o == nil {
-		return
-	}
-	o.CreatedAt = time.Time{}
-	o.UpdatedAt = time.Time{}
+	return snap.Digest()
 }
 
 func tapeDigest(t *testing.T, e *matching.Engine) string {

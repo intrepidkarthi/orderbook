@@ -1,6 +1,9 @@
 package matching
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -255,4 +258,78 @@ func RestoreEngine(config Config, snap *EngineSnapshot) (*Engine, error) {
 		return nil, err
 	}
 	return e, nil
+}
+
+// Digest fingerprints everything recovery must reproduce — the resting book in
+// price-time order, pending stops, iceberg reserves, OCO pairings, trailing
+// stops with their ratchet, the duplicate guard, the mark price, the engine
+// state, and all three sequence counters. Two engines that applied the same
+// commands have equal digests; two engines whose books have diverged do not.
+// It exists so that "the follower has the same book" is a comparison either
+// side of a wire can actually make — the recovery tests' assertion, promoted
+// from a test helper to a contract (see docs/REPLICATION.md).
+//
+// Wall-clock fields are normalised away: order timestamps, the band-breach
+// pause deadline, and the guardrail window start. A replayed order is stamped
+// with the clock at replay time, not the clock at original submission, so an
+// engine rebuilt from the log is legitimately not byte-identical in its
+// timestamps — a property of replaying a command log, not a divergence. WALSeq
+// is excluded too: it is a log position, not book state, and a follower's
+// checkpoint cadence is its own business.
+//
+// The digest is a COMPARISON fingerprint, not a commitment: it hashes the
+// snapshot's JSON encoding, so it is stable between processes running the same
+// release and nothing stronger. Renaming a field or reordering the struct
+// changes every digest, deliberately without ceremony — pinning a canonical
+// encoding would turn every snapshot change into a wire-format negotiation,
+// for a value whose only job is to be equal or not equal right now.
+//
+// The receiver is not modified. The snapshot's own deep-copy guarantee is what
+// makes that cheap to promise: Orders, Stops and Trailing already own their
+// orders, so normalising onto shallow copies here cannot reach live engine
+// state.
+func (s *EngineSnapshot) Digest() string {
+	n := *s
+	n.WALSeq = 0
+	n.PausedUntil = time.Time{}
+	n.Guard.Start = time.Time{}
+	n.Orders = normalisedOrders(s.Orders)
+	n.Stops = make([]*types.StopOrder, 0, len(s.Stops))
+	for _, st := range s.Stops {
+		c := *st
+		c.Order = normalisedOrder(st.Order)
+		n.Stops = append(n.Stops, &c)
+	}
+	n.Trailing = make([]TrailingEntry, len(s.Trailing))
+	for i, te := range s.Trailing {
+		te.Order = normalisedOrder(te.Order)
+		n.Trailing[i] = te
+	}
+	b, err := json.Marshal(&n)
+	if err != nil {
+		// Every field of EngineSnapshot is plain data; an error here is a defect
+		// in this package (a func or channel added to the snapshot), not a
+		// runtime condition a caller could handle.
+		panic(fmt.Sprintf("matching: EngineSnapshot not marshalable: %v", err))
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func normalisedOrders(orders []*types.Order) []*types.Order {
+	out := make([]*types.Order, 0, len(orders))
+	for _, o := range orders {
+		out = append(out, normalisedOrder(o))
+	}
+	return out
+}
+
+func normalisedOrder(o *types.Order) *types.Order {
+	if o == nil {
+		return nil
+	}
+	c := *o
+	c.CreatedAt = time.Time{}
+	c.UpdatedAt = time.Time{}
+	return &c
 }
