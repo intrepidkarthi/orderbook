@@ -1,6 +1,7 @@
 package orderentry
 
 import (
+	"crypto/sha256"
 	"math"
 	"strings"
 	"testing"
@@ -112,6 +113,114 @@ func TestTheDecoyIsSizedFromTheRealSecrets(t *testing.T) {
 	// nothing and returns instantly.
 	if got := len(NewStaticAccounts(nil).decoy); got == 0 {
 		t.Error("no decoy with an empty account set; the unknown path would short-circuit")
+	}
+}
+
+// TestHashedAccountsDefaultsToDeny — the digest table inherits the one default where
+// being wrong is unrecoverable: an empty configuration must not produce an open venue.
+func TestHashedAccountsDefaultsToDeny(t *testing.T) {
+	a := NewHashedAccounts(nil)
+	if a.Count() != 0 {
+		t.Errorf("Count = %d, want 0", a.Count())
+	}
+	if a.Authenticate("alice", "") {
+		t.Error("an empty credential set admitted an empty password")
+	}
+	if a.Authenticate("alice", "anything") {
+		t.Error("an empty credential set admitted a login")
+	}
+}
+
+// TestHashedAccountsRefusesTheBlankSecretDigest — an entry whose digest is
+// HashSecret("") is the blank-password open door in digest form. It must be refused
+// at construction, because by Authenticate time it is indistinguishable from a real
+// credential that a blank password happens to match.
+func TestHashedAccountsRefusesTheBlankSecretDigest(t *testing.T) {
+	a := NewHashedAccounts(map[string][sha256.Size]byte{
+		"alice": HashSecret(""),
+		"":      HashSecret("pw"),
+		"bob":   HashSecret("pw2"),
+	})
+	if a.Count() != 1 {
+		t.Errorf("Count = %d, want only bob", a.Count())
+	}
+	if a.Authenticate("alice", "") {
+		t.Error("a blank password authenticated against its own digest")
+	}
+	if a.Authenticate("", "pw") {
+		t.Error("an account with a blank name authenticated")
+	}
+	if !a.Authenticate("bob", "pw2") {
+		t.Error("a valid account was refused")
+	}
+}
+
+func TestHashedAccountsRefusesAWrongSecret(t *testing.T) {
+	a := NewHashedAccounts(map[string][sha256.Size]byte{"alice": HashSecret("s3cret")})
+	for _, secret := range []string{"", "s3cre", "s3cret ", "S3cret", "s3cretx"} {
+		if a.Authenticate("alice", secret) {
+			t.Errorf("secret %q was accepted", secret)
+		}
+	}
+	if !a.Authenticate("alice", "s3cret") {
+		t.Error("the correct secret was refused")
+	}
+}
+
+// TestHashedAccountsHashesBeforeTheLookup — the presented secret must be hashed
+// whether or not the account exists. At this length the hash dominates everything else
+// in the call, so a version that looks up first and skips it for an unknown account
+// fails this by an order of magnitude rather than vanishing into noise — the lesson of
+// TestAnUnknownAccountDoesTheSameWorkAsAWrongSecret, kept. The same caveat applies:
+// this proves the code does the work, not that the work was load-bearing at realistic
+// secret lengths.
+func TestHashedAccountsHashesBeforeTheLookup(t *testing.T) {
+	secret := strings.Repeat("x", 1<<16)
+	a := NewHashedAccounts(map[string][sha256.Size]byte{"alice": HashSecret(secret)})
+	wrong := strings.Repeat("y", 1<<16)
+
+	const n = 2000
+	measure := func(account string) time.Duration {
+		start := time.Now()
+		for i := 0; i < n; i++ {
+			if a.Authenticate(account, wrong) {
+				t.Fatal("test premise broken: a wrong secret authenticated")
+			}
+		}
+		return time.Since(start)
+	}
+	measure("alice") // warm up
+	measure("nobody")
+	// Interleaved, so drift lands on both arms rather than whichever ran second.
+	known := measure("alice") + measure("alice")
+	unknown := measure("nobody") + measure("nobody")
+
+	ratio := float64(known) / float64(unknown)
+	if math.IsNaN(ratio) || ratio > 4 || ratio < 0.25 {
+		t.Errorf("known-account path %v, unknown-account path %v (ratio %.2f) — one is skipping the hash, and that difference enumerates accounts",
+			known, unknown, ratio)
+	}
+}
+
+// TestHashedAccountsIsSafeForConcurrentUse — called from every connection's goroutine,
+// so this is the ordinary case rather than an edge one.
+func TestHashedAccountsIsSafeForConcurrentUse(t *testing.T) {
+	a := NewHashedAccounts(map[string][sha256.Size]byte{"alice": HashSecret("pw")})
+	done := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		go func(i int) {
+			defer func() { done <- struct{}{} }()
+			for j := 0; j < 5000; j++ {
+				if i%2 == 0 {
+					a.Authenticate("alice", "pw")
+				} else {
+					a.Authenticate("mallory", "pw")
+				}
+			}
+		}(i)
+	}
+	for i := 0; i < 8; i++ {
+		<-done
 	}
 }
 

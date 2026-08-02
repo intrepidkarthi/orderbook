@@ -1,6 +1,7 @@
 package orderentry
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 )
 
@@ -93,4 +94,79 @@ func (a *StaticAccounts) Authenticate(account, secret string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(secret), []byte(want)) == 1
+}
+
+// HashSecret is the digest form HashedAccounts stores and compares: SHA-256 over the
+// raw bytes of the secret. It is exported so that provisioning tooling and the
+// credential loader agree on the form by construction rather than by convention.
+func HashSecret(secret string) [sha256.Size]byte {
+	return sha256.Sum256([]byte(secret))
+}
+
+// HashedAccounts is an in-memory table of SHA-256 secret digests, comparing in
+// constant time. It is StaticAccounts with the plaintext removed: a memory disclosure
+// of a process using it yields digests, not passwords.
+//
+// # Why the hash is fast, and when that is wrong
+//
+// SHA-256 rather than a slow, memory-hard hash (argon2, scrypt, bcrypt) is a scoping
+// decision, not an oversight. These are machine credentials: the venue issues them, so
+// it can issue them from a CSPRNG at 128 bits or more, and against a secret like that
+// a fast hash is enough — an attacker holding the digest cannot enumerate a 128-bit
+// space however cheap each guess is. What a memory-hard hash would add is protection
+// for low-entropy, human-chosen passwords, and it would add it in the worst possible
+// place: this function runs on the pre-authentication login path, so a memory-hard
+// hash there hands every unauthenticated peer a CPU-and-memory amplification
+// primitive aimed at the accept loop. If your secrets are chosen by humans, the fix
+// is not a slower hash here — it is implementing Authenticator over a real credential
+// system, which is what the seam is for.
+//
+// Still absent, as with StaticAccounts: rotation, revocation and expiry. The
+// difference between the two is confined to what a memory disclosure is worth.
+//
+// The decoy arithmetic from StaticAccounts simplifies here rather than repeating:
+// every digest is sha256.Size bytes, so the unknown-account path compares against a
+// zero digest of the same width and no length averaging is needed.
+type HashedAccounts struct {
+	accounts map[string][sha256.Size]byte
+	decoy    [sha256.Size]byte
+}
+
+// NewHashedAccounts builds an authenticator over an account→digest map.
+//
+// An empty map authenticates nobody. An account with a blank name is refused, and so
+// is an account whose digest is HashSecret(""): storing that one would mean a blank
+// password authenticated, which is the same open door the blank-secret rule in
+// NewStaticAccounts exists to close, arrived at in digest form.
+func NewHashedAccounts(accounts map[string][sha256.Size]byte) *HashedAccounts {
+	blank := HashSecret("")
+	a := &HashedAccounts{accounts: make(map[string][sha256.Size]byte, len(accounts))}
+	for user, digest := range accounts {
+		if user == "" || digest == blank {
+			continue
+		}
+		a.accounts[user] = digest
+	}
+	return a
+}
+
+// Count reports how many usable accounts were configured, so a caller can warn about
+// an empty credential list without reading the credentials.
+func (a *HashedAccounts) Count() int { return len(a.accounts) }
+
+// Authenticate reports whether the secret's digest matches the account's.
+//
+// The presented secret is hashed BEFORE the account lookup, unconditionally. Hashing
+// dominates the cost of this call at any realistic secret length, so a version that
+// looked up first and skipped the hash for an unknown account would make a bad
+// username measurably cheaper than a bad password — the enumeration channel from
+// StaticAccounts, wearing a different implementation.
+func (a *HashedAccounts) Authenticate(account, secret string) bool {
+	got := HashSecret(secret)
+	want, ok := a.accounts[account]
+	if !ok {
+		subtle.ConstantTimeCompare(got[:], a.decoy[:])
+		return false
+	}
+	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
 }
