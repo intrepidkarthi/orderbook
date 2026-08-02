@@ -251,8 +251,12 @@ back it.
 
 Named because a gap you know about is worth more than a page that pretends otherwise.
 
-- **Failover.** There is no replication and no failover procedure, by design — see
-  [EXCHANGE-ARCHITECTURE.md](EXCHANGE-ARCHITECTURE.md).
+- **Failover.** There is no replication and no failover procedure. The topology
+  decision stays yours by design — see
+  [EXCHANGE-ARCHITECTURE.md](EXCHANGE-ARCHITECTURE.md) — but the reference
+  primary-backup example that would prove the seams and produce this runbook entry is
+  now specified in [REPLICATION.md](REPLICATION.md), including the drill that replaces
+  this bullet.
 - **A trade printed in error.** There is no bust or correction path. Once a trade is
   published there is no way to amend it, and that interacts badly with an append-only
   event stream. Design it before you need it.

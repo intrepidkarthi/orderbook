@@ -252,6 +252,11 @@ quorum getting it wrong.
 You will need: a replication mechanism, a tested failover procedure, split-brain
 protection, and a decision about what "committed" means to you.
 
+The seams have also never had a consumer, which on this project's record is the part
+to distrust: [REPLICATION.md](REPLICATION.md) specifies the reference primary-backup
+example and CI drill that would prove them, and names the seam already found missing
+on paper (a public state digest exists only as a test helper).
+
 ### Multi-symbol — partial
 
 `matching.Shards` routes by symbol across independent engines. But order ids and event
