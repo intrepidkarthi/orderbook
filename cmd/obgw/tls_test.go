@@ -220,6 +220,108 @@ func TestAWorldReadableCredentialFileIsCalledOut(t *testing.T) {
 	}
 }
 
+// TestAPreHashedEntryAuthenticates — the round trip that makes -hash-secret worth
+// having: an entry written in digest form admits the password it was made from, and
+// mixes with plaintext entries in the same file, because a migration that requires
+// rewriting every line at once is a migration that gets scheduled and never run.
+func TestAPreHashedEntryAuthenticates(t *testing.T) {
+	var entry strings.Builder
+	if err := printHashedSecret(strings.NewReader("s3cret\n"), &entry); err != nil {
+		t.Fatalf("printHashedSecret: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "accounts")
+	content := "alice:" + entry.String() + "bob:plainpw\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	accts, err := loadAccounts("", path)
+	if err != nil {
+		t.Fatalf("loadAccounts: %v", err)
+	}
+	auth := orderentry.NewHashedAccounts(accts)
+	if !auth.Authenticate("alice", "s3cret") {
+		t.Error("a pre-hashed entry refused the password it was generated from")
+	}
+	if !auth.Authenticate("bob", "plainpw") {
+		t.Error("a plaintext entry in the same file was refused")
+	}
+	if auth.Authenticate("alice", "wrong") {
+		t.Error("a wrong password authenticated against a pre-hashed entry")
+	}
+}
+
+// TestAMalformedDigestIsRefusedByLineNumber — one mistyped hex digit must not fall
+// back to "treat it as a very strange password", because that manufactures an account
+// whose real secret nobody knows. The line is located for the operator, and the entry
+// content — which for the plaintext-misfiled-as-digest case IS a secret — stays out
+// of the log.
+func TestAMalformedDigestIsRefusedByLineNumber(t *testing.T) {
+	var buf strings.Builder
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+
+	const almostDigest = "sha256:not-hex-do-not-log-me"
+	path := filepath.Join(t.TempDir(), "accounts")
+	if err := os.WriteFile(path, []byte("alice:"+almostDigest+"\ncarol:pw\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	accts, err := loadAccounts("", path)
+	if err != nil {
+		t.Fatalf("loadAccounts: %v", err)
+	}
+	if _, ok := accts["alice"]; ok {
+		t.Error("a malformed digest produced an account")
+	}
+	if _, ok := accts["carol"]; !ok {
+		t.Error("the valid line after a malformed one was lost")
+	}
+	if strings.Contains(buf.String(), "not-hex-do-not-log-me") {
+		t.Errorf("a refused entry reached the log by content:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "line 1") {
+		t.Errorf("the malformed digest was not located for the operator:\n%s", buf.String())
+	}
+}
+
+// TestPlaintextEntriesAreCalledOut — hashing at load fixes what the process holds,
+// not what the file does. The count is logged so an operator can watch it reach zero;
+// the secrets themselves, as everywhere in this file, do not appear.
+func TestPlaintextEntriesAreCalledOut(t *testing.T) {
+	var buf strings.Builder
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+
+	path := filepath.Join(t.TempDir(), "accounts")
+	if err := os.WriteFile(path, []byte("alice:plain-one\nbob:plain-two\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := loadAccounts("", path); err != nil {
+		t.Fatalf("loadAccounts: %v", err)
+	}
+	if !strings.Contains(buf.String(), "2 plaintext secret(s)") {
+		t.Errorf("plaintext entries drew no call-out:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "plain-one") || strings.Contains(buf.String(), "plain-two") {
+		t.Errorf("a secret reached the log:\n%s", buf.String())
+	}
+}
+
+// TestHashSecretRefusesEmptyInput — piping nothing into -hash-secret must be an
+// error, not the digest of "", because that digest is exactly the entry
+// NewHashedAccounts refuses, and producing it here would teach the operator a form
+// the loader then silently drops.
+func TestHashSecretRefusesEmptyInput(t *testing.T) {
+	var out strings.Builder
+	if err := printHashedSecret(strings.NewReader(""), &out); err == nil {
+		t.Error("an empty stdin produced a credential entry")
+	}
+	if err := printHashedSecret(strings.NewReader("\n"), &out); err == nil {
+		t.Error("a bare newline produced a credential entry")
+	}
+}
+
 // TestTwoCredentialSourcesAreRefused — two sources of truth for who may trade is a
 // question nobody wants to be answering during an incident.
 func TestTwoCredentialSourcesAreRefused(t *testing.T) {

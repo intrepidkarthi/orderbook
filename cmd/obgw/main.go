@@ -22,12 +22,19 @@
 // permissions are checked and a world-readable one draws a warning. Neither path ever
 // logs a secret: a malformed entry is reported by line number, never by content.
 //
-// Where credentials LIVE is still yours. Config.Auth takes an orderentry.Authenticator,
-// and the built-in one holds plaintext in memory with no hashing, rotation or
-// revocation — correct about constant-time comparison and deny-by-default, and
-// unsuitable for production for reasons its own documentation lists.
+// An entry is either "user:password" or "user:sha256:<64 hex>", the latter produced by
+// -hash-secret. Whichever form arrives, the process's credential table holds digests:
+// a plaintext entry is hashed at load and the venue says how many it had to. What that
+// does not fix is the file itself — a plaintext entry is still plaintext on disk — and
+// the transient copies parsing leaves behind, which are garbage to the collector, not
+// zeroed. An inline -accounts string is worse: the flag package keeps it reachable for
+// the life of the process, digest table or not.
 //
-//	obgw -addr :9000 -symbol BTC-USD -accounts alice:s3cret,bob:hunter2 -admin 127.0.0.1:9100
+// Where credentials LIVE is still yours. Config.Auth takes an orderentry.Authenticator;
+// the wiring here is HashedAccounts, whose documentation states what a fast hash does
+// and does not buy, and there is still no rotation, revocation or expiry behind it.
+//
+//	obgw -addr :9000 -symbol BTC-USD -accounts-file /etc/obgw/accounts -admin 127.0.0.1:9100
 //
 // The admin listener is a separate port on purpose: it is for whoever runs the venue,
 // and it should be reachable from a monitoring network that participants cannot reach
@@ -35,10 +42,14 @@
 package main
 
 import (
+	"bufio"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -56,7 +67,8 @@ func main() {
 		adminAddr    = flag.String("admin", "", "admin HTTP listen address for /metrics, /healthz and /readyz (empty = unobserved)")
 		symbol       = flag.String("symbol", "BTC-USD", "the single instrument this gateway serves")
 		accounts     = flag.String("accounts", "", "comma-separated user:password pairs (VISIBLE IN ps OUTPUT — prefer -accounts-file)")
-		accountsFile = flag.String("accounts-file", "", "file of user:password lines; # comments allowed")
+		accountsFile = flag.String("accounts-file", "", "file of user:password or user:sha256:<64 hex> lines; # comments allowed")
+		hashSecret   = flag.Bool("hash-secret", false, "read a secret on stdin, print its sha256: credential-file form, and exit")
 		tlsCert      = flag.String("tls-cert", "", "PEM certificate; with -tls-key, wraps every listener in TLS")
 		tlsKey       = flag.String("tls-key", "", "PEM private key")
 		rate         = flag.Float64("rate", 1000, "per-account orders/second")
@@ -67,11 +79,18 @@ func main() {
 	)
 	flag.Parse()
 
+	if *hashSecret {
+		if err := printHashedSecret(os.Stdin, os.Stdout); err != nil {
+			log.Fatalf("obgw: %v", err)
+		}
+		return
+	}
+
 	accts, err := loadAccounts(*accounts, *accountsFile)
 	if err != nil {
 		log.Fatalf("obgw: %v", err)
 	}
-	auth := orderentry.NewStaticAccounts(accts)
+	auth := orderentry.NewHashedAccounts(accts)
 
 	tlsCfg, err := loadTLS(*tlsCert, *tlsKey)
 	if err != nil {
@@ -138,7 +157,13 @@ func main() {
 // loadAccounts reads credentials from a file when one is given, and from the command
 // line otherwise. Both may not be set: two sources of truth for who may trade is a
 // question nobody wants to be answering during an incident.
-func loadAccounts(inline, path string) (map[string]string, error) {
+//
+// Whatever form the entries arrive in, what comes back is digests: a plaintext entry
+// is hashed here, so the credential table the process holds for its lifetime never
+// contains a password. The count of plaintext entries is reported — the file still
+// exposes those on disk, and pretending otherwise is how a "hashed" credential file
+// keeps its passwords.
+func loadAccounts(inline, path string) (map[string][sha256.Size]byte, error) {
 	if inline != "" && path != "" {
 		return nil, errors.New("-accounts and -accounts-file are mutually exclusive")
 	}
@@ -155,21 +180,33 @@ func loadAccounts(inline, path string) (map[string]string, error) {
 	if fi, statErr := os.Stat(path); statErr == nil && fi.Mode().Perm()&0o077 != 0 {
 		log.Printf("obgw: %s is readable by other users (mode %04o); chmod 600 it", path, fi.Mode().Perm())
 	}
-	out := map[string]string{}
+	out := map[string][sha256.Size]byte{}
+	plain := 0
 	for i, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		user, pass, ok := strings.Cut(line, ":")
-		if !ok || user == "" || pass == "" {
+		user, rest, ok := strings.Cut(line, ":")
+		if !ok || user == "" || rest == "" {
 			// The LINE NUMBER, never the line. This is exactly where a helpful
 			// "ignoring bad entry %q" writes a password into a log — and unlike a
 			// process list, a log is kept, shipped and indexed.
-			log.Printf("obgw: %s line %d is malformed (want user:password); ignoring it", path, i+1)
+			log.Printf("obgw: %s line %d is malformed (want user:password or user:sha256:<64 hex>); ignoring it", path, i+1)
 			continue
 		}
-		out[user] = pass
+		digest, wasPlain, ok := parseSecret(rest)
+		if !ok {
+			log.Printf("obgw: %s line %d has a malformed sha256: digest; ignoring it", path, i+1)
+			continue
+		}
+		if wasPlain {
+			plain++
+		}
+		out[user] = digest
+	}
+	if plain > 0 {
+		log.Printf("obgw: %s holds %d plaintext secret(s), hashed at load — the file itself still exposes them; generate sha256: entries with -hash-secret", path, plain)
 	}
 	return out, nil
 }
@@ -197,19 +234,63 @@ func loadTLS(certPath, keyPath string) (*tls.Config, error) {
 // A malformed entry is reported by POSITION, not by content. The obvious version of
 // this logged the offending pair, which meant one typo in a credential list wrote a
 // password to the log.
-func parseAccounts(s string) map[string]string {
-	out := map[string]string{}
+func parseAccounts(s string) map[string][sha256.Size]byte {
+	out := map[string][sha256.Size]byte{}
 	for i, pair := range strings.Split(s, ",") {
 		pair = strings.TrimSpace(pair)
 		if pair == "" {
 			continue
 		}
-		user, pass, ok := strings.Cut(pair, ":")
-		if !ok || user == "" || pass == "" {
+		user, rest, ok := strings.Cut(pair, ":")
+		if !ok || user == "" || rest == "" {
 			log.Printf("obgw: ignoring malformed entry %d of -accounts (want user:password)", i+1)
 			continue
 		}
-		out[user] = pass
+		digest, _, ok := parseSecret(rest)
+		if !ok {
+			log.Printf("obgw: ignoring malformed sha256: digest at entry %d of -accounts", i+1)
+			continue
+		}
+		out[user] = digest
 	}
 	return out
+}
+
+// parseSecret turns the text after the first colon of a credential entry into the
+// digest the table stores. A "sha256:" prefix marks a pre-hashed entry — 64 hex
+// digits, the output of -hash-secret; anything else is a plaintext secret, hashed
+// here. The prefix is therefore reserved: a password that itself begins with
+// "sha256:" cannot be expressed as a plaintext entry, and a digest that does not
+// parse is refused rather than guessed at, because falling back to "treat it as a
+// very strange password" would turn one mistyped hex digit into an account whose
+// real secret nobody knows.
+func parseSecret(rest string) (digest [sha256.Size]byte, plaintext, ok bool) {
+	hexDigest, pre := strings.CutPrefix(rest, "sha256:")
+	if !pre {
+		return orderentry.HashSecret(rest), true, true
+	}
+	raw, err := hex.DecodeString(hexDigest)
+	if err != nil || len(raw) != sha256.Size {
+		return digest, false, false
+	}
+	copy(digest[:], raw)
+	return digest, false, true
+}
+
+// printHashedSecret reads one line and prints the sha256: entry form for a credential
+// file. The secret arrives on stdin rather than argv for the same reason
+// -accounts-file exists: an argument is in the host's process list for every user on
+// the box. Nothing here echoes, logs or retains the input.
+func printHashedSecret(in io.Reader, out io.Writer) error {
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("read secret: %w", err)
+	}
+	line = strings.TrimRight(line, "\r\n")
+	if line == "" {
+		return errors.New("no secret on stdin")
+	}
+	digest := orderentry.HashSecret(line)
+	_, err = fmt.Fprintf(out, "sha256:%s\n", hex.EncodeToString(digest[:]))
+	return err
 }
