@@ -17,7 +17,7 @@ supported surface, and the codec is deliberately unexported.
 | **Payloads** | This repository's own, fixed-width big-endian |
 | **Dependencies** | None. A 2-byte length and a 1-byte type. |
 | **Transport security** | **None.** Assumes a trusted network or a TLS wrapper below. |
-| **Credentials** | A shared secret in the clear. Suitable for a lab, not a venue. |
+| **Credentials** | A shared secret, over TLS when the venue is given a certificate and in the clear when it is not. The wire carries the secret either way; what protects it is the transport. |
 | **Instruments** | One per gateway |
 | **Stability** | Frozen by `internal/wire/testdata/*.hex`; changing a layout means bumping `Version` |
 | **Current version** | 2 |

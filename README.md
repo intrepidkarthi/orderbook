@@ -43,7 +43,7 @@ and gap-free resume across a disconnect, and a public market-data feed with
 snapshot-plus-delta recovery. Bounded backpressure at every stage.
 
 What does not, and is yours: **TLS and credential storage** (the reference sends a
-shared secret in the clear and says so), **multi-symbol routing** (order ids and
+shared secret over TLS, with no hashing or rotation, and says so), **multi-symbol routing** (order ids and
 sequences are per-engine, so several symbols means several engines and a router
 above them), **clearing and settlement**, and **any HA topology** — the library
 ships the seams for primary-backup (deterministic apply, an ordered command log,

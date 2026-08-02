@@ -31,7 +31,7 @@ in front of it.
 | Performance and its honesty | **Strong** — measured, published, corrected |
 | Observability | **Partial** — Prometheus metrics and health endpoints ship; no tracing |
 | Operational readiness | **Weak** — endpoints, thresholds and runbooks; none of it rehearsed |
-| Security at the edge | **Weak by design** — no TLS, secrets in the clear |
+| Security at the edge | **Partial** — TLS and a credential seam ship; no hashing, rotation or revocation |
 | High availability | **Seams only** — deliberately no consensus |
 | Sustained load / soak at venue scale | **Partial** — a harness, and an hour of evidence |
 | Clearing, settlement, margin, fees | **Absent by design** |
@@ -204,11 +204,21 @@ This stays **weak** until somebody has. There is also no failover procedure, no 
 revocation and no clock-disagreement procedure — all named at the end of RUNBOOKS.md
 rather than left to be discovered.
 
-### Security at the edge — weak, and deliberately so
+### Security at the edge — partial
 
-The reference gateway sends a shared secret in the clear and says so. No TLS, no
-credential storage, no key rotation, no per-account authorisation beyond authentication.
-Market data is anonymous by design.
+What exists now: TLS on every listener (`-tls-cert`/`-tls-key`, TLS 1.2 floor,
+handshake on the connection's own goroutine so a stalled peer cannot hold up the accept
+loop). Credentials load from a permission-checked file rather than a command line, and
+neither path ever logs a secret — a malformed entry is reported by line number, because
+the obvious version of that parser printed the offending line and a log is kept, shipped
+and indexed. `orderentry.Authenticator` is the seam for where credentials actually live,
+and the built-in `StaticAccounts` compares in constant time, denies by default, and
+refuses an account with a blank secret.
+
+What does not exist: hashing, rotation, revocation, expiry, and any per-account
+authorisation beyond authentication. `StaticAccounts` holds plaintext in the process, so
+a core dump contains every password on the venue — it is a correct *default*, not a
+credential store, and its own documentation says so. Market data is anonymous by design.
 
 What *is* handled: authentication defaults to deny, a client cannot name another
 account's order because the wire has no field for it, payloads are fixed-width and

@@ -7,6 +7,48 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- **TLS on every listener** (`obgw -tls-cert -tls-key`), TLS 1.2 floor, `crypto/tls`
+  and therefore no new dependency. The handshake runs on the connection's own goroutine
+  inside the login deadline that already bounds a silent peer, so connect-and-stall
+  cannot hold up the accept loop — asserted, not assumed.
+
+- **`orderentry.Authenticator`**, the seam for where credentials actually live. Storage,
+  hashing, rotation and who may read them are properties of a deployment and a
+  regulator, and a library that picked would be wrong for most of the people using it.
+  The interface is one method.
+
+  `StaticAccounts` is the built-in default and is correct about the things a default
+  can be correct about: constant-time comparison, deny by default, and an account with
+  a blank secret is not an account. It is explicit that it is not a credential store —
+  plaintext in memory, no hashing, no rotation, and a core dump contains every password
+  on the venue.
+
+- **`-accounts-file`**, preferred over `-accounts`, because anything on a command line
+  is in the host's process list for every user on the box. Permissions are checked and
+  a world-readable file draws a warning.
+
+### Fixed
+
+- **The credential parser logged secrets.** A malformed entry was reported by printing
+  it, so one typo in a credential list wrote a password to the log — and unlike a
+  process list, a log is kept, shipped and indexed. Malformed entries are now reported
+  by line number, never by content, and a test asserts no secret reaches the log.
+
+- **Password comparison was not constant time.** `want != req.Password` short-circuits
+  on the first differing byte. More useful in practice: an unknown account returned
+  before comparing anything, so a bad username was measurably faster than a bad
+  password — which turns the login endpoint into a way to enumerate the venue's
+  participants, one connection at a time, with nothing in an audit trail that looks
+  like an attack.
+
+  The test for this was itself wrong first time round: at 64-byte secrets it passed
+  against a deliberately short-circuiting implementation, because the comparison costs
+  less than the map lookup preceding it. Resized until it fails by 7860× against the
+  broken version, and the comment says what that does and does not prove.
+
+
 ## [0.17.0] - 2026-08-01
 
 ### Fixed
