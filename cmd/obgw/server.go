@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -28,7 +29,20 @@ type Config struct {
 	// Accounts maps username to password. Authentication defaults to DENY: an
 	// empty map rejects every login rather than admitting everyone, because the
 	// failure mode of the other default is an open venue.
+	//
+	// Ignored when Auth is set. Prefer Auth: this field holds plaintext secrets in
+	// the process, and if it came from a command line it is also in `ps` output for
+	// every user on the host.
 	Accounts map[string]string
+	// Auth decides logins. When nil, one is built from Accounts.
+	//
+	// This is the seam a real deployment replaces. Credential storage is the one
+	// decision a library must not make for you — see orderentry.Authenticator.
+	Auth orderentry.Authenticator
+	// TLS, when set, wraps every listener. Nil means the venue speaks plaintext and
+	// sends credentials in the clear, which is a thing to do on a loopback interface
+	// during development and nowhere else.
+	TLS *tls.Config
 	// OutboundDepth bounds each connection's send queue. A client that stops
 	// reading is disconnected rather than allowed to back up into the venue.
 	OutboundDepth int
@@ -112,6 +126,7 @@ type Server struct {
 
 	// metrics is a sink like the others, so it counts exactly what the book saw
 	// rather than what the gateway believed it sent.
+	auth      orderentry.Authenticator
 	metrics   *observability.Collector
 	applyHist *observability.Histogram
 	admin     admin
@@ -213,9 +228,15 @@ func NewServer(cfg Config) (*Server, error) {
 	// away everything it had just read back from disk.
 	runner := matching.NewRunnerFor(recovered, rc)
 
+	auth := cfg.Auth
+	if auth == nil {
+		auth = orderentry.NewStaticAccounts(cfg.Accounts)
+	}
+
 	srv := &Server{
 		wal:       w,
 		cfg:       cfg,
+		auth:      auth,
 		runner:    runner,
 		metrics:   col,
 		applyHist: col.Histogram(applyLatencyMetric),
@@ -235,13 +256,13 @@ func (s *Server) Addr() net.Addr { return s.ln.Addr() }
 
 // Listen binds the socket(s) without serving, so a test can learn the port.
 func (s *Server) Listen() error {
-	ln, err := net.Listen("tcp", s.cfg.Addr)
+	ln, err := s.listen(s.cfg.Addr)
 	if err != nil {
 		return err
 	}
 	s.ln = ln
 	if s.cfg.MDAddr != "" {
-		mdLn, err := net.Listen("tcp", s.cfg.MDAddr)
+		mdLn, err := s.listen(s.cfg.MDAddr)
 		if err != nil {
 			_ = ln.Close()
 			return err
@@ -259,6 +280,24 @@ func (s *Server) Listen() error {
 		return err
 	}
 	return nil
+}
+
+// listen binds addr, wrapped in TLS when the venue has been given a certificate.
+//
+// The handshake happens on the connection's own goroutine, inside the login deadline
+// that already bounds a silent peer — so a client that completes a TCP connection and
+// then stalls the handshake is dropped by the same timeout that drops one which
+// connects and never logs in. A handshake on the accept loop would let one slow peer
+// hold up every other connection.
+func (s *Server) listen(addr string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	if s.cfg.TLS == nil {
+		return ln, nil
+	}
+	return tls.NewListener(ln, s.cfg.TLS), nil
 }
 
 // MDAddr reports the bound market-data address, valid after Listen when configured.
@@ -461,8 +500,10 @@ func (s *Server) handle(conn net.Conn) {
 		return
 	}
 
-	want, ok := s.cfg.Accounts[req.Username]
-	if !ok || want == "" || want != req.Password {
+	// One call, one bool, and deliberately no branch on which half was wrong. A
+	// venue that answers "no such account" faster than "wrong password" will tell
+	// anyone who asks which of its participants exist.
+	if !s.auth.Authenticate(req.Username, req.Password) {
 		_ = wire.WritePacket(conn, wire.PacketLoginRejected, []byte{wire.RejectNotAuthorised})
 		return
 	}
