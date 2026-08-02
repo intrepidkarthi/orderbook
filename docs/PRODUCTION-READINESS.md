@@ -211,14 +211,26 @@ handshake on the connection's own goroutine so a stalled peer cannot hold up the
 loop). Credentials load from a permission-checked file rather than a command line, and
 neither path ever logs a secret — a malformed entry is reported by line number, because
 the obvious version of that parser printed the offending line and a log is kept, shipped
-and indexed. `orderentry.Authenticator` is the seam for where credentials actually live,
-and the built-in `StaticAccounts` compares in constant time, denies by default, and
-refuses an account with a blank secret.
+and indexed. `orderentry.Authenticator` is the seam for where credentials actually live;
+both built-ins compare in constant time, deny by default, and refuse an account with a
+blank secret.
 
-What does not exist: hashing, rotation, revocation, expiry, and any per-account
-authorisation beyond authentication. `StaticAccounts` holds plaintext in the process, so
-a core dump contains every password on the venue — it is a correct *default*, not a
-credential store, and its own documentation says so. Market data is anonymous by design.
+Digests at rest: the gateway's credential table holds SHA-256 digests, not passwords —
+`user:sha256:<hex>` file entries load as-is (`obgw -hash-secret` generates them), and a
+plaintext entry is hashed at load, with the count logged so an operator can watch it
+reach zero. Three boundaries of that claim, stated rather than implied: a plaintext
+entry is still plaintext *on disk*; parsing leaves transient copies that are garbage to
+the collector, not zeroed; and the hash is deliberately fast — right for the
+machine-issued, high-entropy secrets a venue should be handing out, and no protection
+for a human-chosen password an attacker can brute-force offline from a dumped digest
+file. The doc comment on `HashedAccounts` defends the fast hash (a memory-hard one on
+the pre-auth path is a DoS amplifier aimed at the accept loop); if your secrets are
+human-chosen, the fix is a real credential system behind the seam, not a slower hash.
+
+What does not exist: rotation, revocation, expiry, and any per-account authorisation
+beyond authentication. `StaticAccounts`, the plaintext built-in, remains what its own
+documentation says it is — a correct *default*, not a credential store. Market data is
+anonymous by design.
 
 What *is* handled: authentication defaults to deny, a client cannot name another
 account's order because the wire has no field for it, payloads are fixed-width and
@@ -286,8 +298,9 @@ In the order that will actually help:
 2. **Soak it at your volume.** `cmd/obsoak` will do it; see [SOAK.md](SOAK.md). Days,
    not minutes, with your order mix, and watch the floor of the heap rather than its
    trend. This is still where the unknowns are.
-3. **Put TLS and real credentials at the edge.** The reference gateway is explicit that
-   it is not suitable as-is.
+3. **Put real credentials at the edge.** TLS and digests-at-rest are in the reference
+   gateway now; rotation, revocation, expiry and where your secrets actually live are
+   not, and the `Authenticator` seam is where your answer goes.
 4. **Decide your HA story and rehearse the failover.** The seams are here; the decision
    and the drill are yours.
 5. **Write the runbooks** for: recovery from a torn log, a corrupt snapshot, a stuck

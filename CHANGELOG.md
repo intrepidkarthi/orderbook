@@ -9,6 +9,31 @@ versions may include breaking changes).
 
 ### Added
 
+- **`orderentry.HashedAccounts`** — StaticAccounts with the plaintext removed: a
+  SHA-256 digest table, constant-time compare, deny by default, and the blank-secret
+  rule kept in digest form (`HashSecret("")` is refused at construction, because by
+  authenticate time it is a real credential that a blank password matches). The hash
+  is deliberately fast and the doc comment defends that: these are machine
+  credentials a venue issues from a CSPRNG, where SHA-256 is enough — and a
+  memory-hard hash on the pre-auth login path would hand every unauthenticated peer
+  a CPU-and-memory amplification primitive aimed at the accept loop. Human-chosen
+  passwords are the seam's job, not a slower hash's. The digest is computed before
+  the account lookup, unconditionally, with a timing test sized so that skipping it
+  for an unknown account fails by an order of magnitude.
+
+- **`sha256:` credential entries and `obgw -hash-secret`.** The gateway's credential
+  table now holds digests whichever form the file used: `user:sha256:<64 hex>`
+  entries load as-is, `user:password` entries are hashed at load and counted, and
+  the count is logged so an operator can watch it reach zero. `-hash-secret` reads a
+  secret on stdin (never argv — the process list again) and prints the entry form.
+  A malformed digest is refused rather than treated as a very strange password — one
+  mistyped hex digit must not manufacture an account whose real secret nobody knows —
+  and is reported by line number, never content, since the likeliest malformed digest
+  is a password misfiled under the prefix. Stated rather than implied: a plaintext
+  entry is still plaintext *on disk*, parsing leaves transient copies that are
+  garbage rather than zeroed, and an inline `-accounts` string stays reachable in the
+  flag package for the life of the process.
+
 - **TLS on every listener** (`obgw -tls-cert -tls-key`), TLS 1.2 floor, `crypto/tls`
   and therefore no new dependency. The handshake runs on the connection's own goroutine
   inside the login deadline that already bounds a silent peer, so connect-and-stall
