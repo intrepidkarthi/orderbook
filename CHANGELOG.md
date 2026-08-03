@@ -5,6 +5,25 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
+## [Unreleased]
+
+### Added
+
+- **The live console** (`web/console.html`, [CONSOLE-SPEC.md](docs/CONSOLE-SPEC.md))
+  — the showcase VisualHFT points at, in the shape this library earns: the real
+  engine compiled to WebAssembly matching a `sim.NoiseTrader` market in the page,
+  with a depth ladder, tape, OFI/CVD/imbalance/Kyle-λ panels computed by the
+  shipping `pkg/signals` code, and `pkg/surveillance` watching every event. Every
+  panel is titled by the exact library call that produces it — the page's second
+  job is adaptability. The spoof button places layered size and pulls it, and the
+  shipping `SpoofDetector` names the account in the alert feed: a visitor
+  manipulates a market and watches surveillance catch it, in a browser tab.
+  `cmd/obwasm` grows `obStep`/`obSignals`/`obAlerts`/`obCancel`/`obSpoof`; the
+  bridge holds all market logic and the page is a renderer. Honesty carried over
+  from the research docs: the OFI panel says *contemporaneous, not predictive*,
+  λ ships with its R², and latency numbers are deliberately absent — browser-WASM
+  timings would be noise presented as measurement.
+
 ## [0.18.0] - 2026-08-03
 
 The replication release: the HA seams get the consumer that would have noticed if

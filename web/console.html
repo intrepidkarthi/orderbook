@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>console — a live market, running the real engine in your browser</title>
+  <meta name="description" content="A live limit-order-book console: the real Go matching engine compiled to WebAssembly, noise-trader flow, order-flow signals (OFI, CVD, imbalance, Kyle's λ) and market surveillance — every panel titled by the library call that produces it." />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    /* Console-specific. Palette note: bid green / ask red are the site's domain
+       tokens and are deutan-hostile as a pair, so color is REINFORCEMENT only —
+       side is always also carried by position (asks above / bids below, sign
+       left/right of zero) and by text (section labels, B/S glyphs). */
+    .console { max-width: 1280px; margin: 0 auto; padding: 18px 20px 40px; }
+    .mkt-bar {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px;
+      padding: 12px 16px; margin-bottom: 14px;
+      background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+    }
+    .mkt-bar .sym { font-weight: 700; letter-spacing: .06em; }
+    .mkt-bar .kv { color: var(--muted); }
+    .mkt-bar .kv b { color: var(--fg); font-weight: 600; margin-left: 6px; }
+    .mkt-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+    .mkt-controls .sep { width: 1px; height: 20px; background: var(--line); }
+    .cbtn {
+      font: inherit; color: var(--fg); background: var(--bg2);
+      border: 1px solid var(--line); border-radius: 7px; padding: 5px 12px; cursor: pointer;
+    }
+    .cbtn:hover { border-color: var(--muted); }
+    .cbtn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+    .cbtn.warn { border-color: var(--gold); color: var(--gold); }
+    .cbtn:disabled { opacity: .45; cursor: default; }
+    .cinp { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; width: 74px; }
+    select.cinp { width: auto; }
+
+    .con-grid { display: grid; grid-template-columns: 250px minmax(360px, 1fr) 330px; gap: 14px; }
+    @media (max-width: 1020px) { .con-grid { grid-template-columns: 1fr; } }
+
+    .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    .panel-head {
+      display: flex; align-items: baseline; gap: 10px; padding: 10px 14px 8px;
+      border-bottom: 1px solid var(--line); flex-wrap: nowrap; white-space: nowrap;
+    }
+    .panel-head .eyebrow { font-size: 11px; letter-spacing: .08em; margin: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
+    .panel-head .call {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+      color: var(--muted); margin-left: auto; text-decoration: none; flex-shrink: 0;
+    }
+    .panel-head .call:hover { color: var(--link); }
+    .panel-cur { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--fg); flex-shrink: 0; }
+    /* Signal tiles are narrow: the head wraps to two rows — human label + live
+       value first, the producing call on its own line — so neither truncates. */
+    .tiles .panel-head { flex-wrap: wrap; }
+    .tiles .panel-head .eyebrow { flex: 1 1 auto; overflow: visible; }
+    .tiles .panel-head .panel-cur { order: 2; }
+    .tiles .panel-head .call { order: 3; flex-basis: 100%; margin-left: 0; margin-top: 2px; }
+
+    /* Ladder */
+    .ladder { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; padding: 8px 0; }
+    .lrow { position: relative; display: flex; justify-content: space-between; padding: 3px 14px; margin: 2px 0; }
+    .lrow .bar { position: absolute; inset: 0 0 0 auto; width: 0; border-radius: 4px 0 0 4px; }
+    .lrow.ask .bar { background: var(--askDim); }
+    .lrow.bid .bar { background: var(--bidDim); }
+    .lrow .p, .lrow .q { position: relative; }
+    .lrow.ask .p { color: var(--ask); }
+    .lrow.bid .p { color: var(--bid); }
+    .lrow .q { color: var(--fg); }
+    .lrow.flash { animation: tradeflash .5s ease-out; }
+    @keyframes tradeflash { from { background: color-mix(in srgb, var(--gold) 22%, transparent); } to { background: transparent; } }
+    @media (prefers-reduced-motion: reduce) { .lrow.flash { animation: none; } }
+    .lmid {
+      display: flex; justify-content: space-between; gap: 10px; padding: 7px 14px; margin: 4px 0;
+      border-top: 1px dashed var(--line); border-bottom: 1px dashed var(--line);
+      color: var(--muted); font-size: 12px;
+    }
+    .lmid b { color: var(--fg); font-weight: 600; }
+    .lsec { padding: 2px 14px; font-size: 10.5px; letter-spacing: .1em; color: var(--muted); }
+
+    /* Tape */
+    .tape { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; padding: 6px 0; max-height: 560px; overflow-y: auto; }
+    .trow { display: flex; gap: 10px; padding: 2.5px 14px; }
+    .trow .side { width: 3.2em; color: var(--muted); }
+    .trow.b .px { color: var(--bid); }
+    .trow.s .px { color: var(--ask); }
+    .trow .qy { margin-left: auto; color: var(--fg); }
+    .tape-empty { padding: 12px 14px; color: var(--muted); font-size: 12.5px; }
+
+    /* Signal tiles */
+    .tiles { display: flex; flex-direction: column; gap: 14px; }
+    .spark { display: block; width: 100%; height: 64px; }
+    .gauge-wrap { padding: 12px 14px 14px; }
+    .gauge { position: relative; height: 14px; background: var(--bg2); border-radius: 7px; overflow: hidden; }
+    .gauge .zero { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--muted); }
+    .gauge .fill { position: absolute; top: 2px; bottom: 2px; border-radius: 5px; }
+    .gauge .fill.pos { left: 50%; background: var(--bid); }
+    .gauge .fill.neg { right: 50%; background: var(--ask); }
+    .gauge-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; margin-top: 4px; font-family: ui-monospace, Menlo, monospace; }
+    .lam { display: flex; align-items: baseline; gap: 14px; padding: 12px 14px 14px; font-family: ui-monospace, Menlo, monospace; }
+    .lam .v { font-size: 24px; font-weight: 650; }
+    .lam .u { color: var(--muted); font-size: 11.5px; }
+    .lam .r2 { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+    /* Surveillance */
+    .surv { margin-top: 14px; border-left: 3px solid var(--gold); }
+    .alist { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; max-height: 180px; overflow-y: auto; padding: 6px 0; }
+    .arow { display: flex; gap: 12px; padding: 4px 14px; align-items: baseline; }
+    .arow .chip { color: var(--gold); border: 1px solid color-mix(in srgb, var(--gold) 45%, transparent); border-radius: 5px; padding: 0 6px; font-size: 11px; }
+    .arow .who { color: var(--fg); font-weight: 600; }
+    .arow .det { color: var(--muted); }
+    .surv-empty { padding: 12px 14px; color: var(--muted); font-size: 13px; }
+
+    .fineprint {
+      margin-top: 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px;
+      color: var(--muted); font-size: 13px; line-height: 1.55;
+    }
+    .fineprint code { font-size: .9em; }
+    .boot { padding: 60px 20px; text-align: center; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
+    .note { padding: 0 14px 10px; color: var(--muted); font-size: 11px; }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <a class="brand" href="index.html">📈 orderbook</a>
+    <div class="nav-links">
+      <a href="index.html#what">What is it</a>
+      <a href="console.html"><b>Live console</b></a>
+      <a href="index.html#features">Features</a>
+      <a href="docs.html">Docs</a>
+      <a class="nav-gh" href="https://github.com/intrepidkarthi/orderbook">GitHub ★</a>
+    </div>
+  </nav>
+
+  <div class="console">
+    <div id="boot" class="boot">loading the engine (WebAssembly)…</div>
+
+    <div id="ui" hidden>
+      <div class="mkt-bar">
+        <span class="sym">DEMO</span>
+        <span class="kv">mid<b id="mv-mid">—</b></span>
+        <span class="kv">spread<b id="mv-spread">—</b></span>
+        <span class="kv">last<b id="mv-last">—</b></span>
+        <span class="kv">step<b id="mv-step">0</b></span>
+        <div class="mkt-controls">
+          <button id="c-run" class="cbtn">Pause</button>
+          <select id="c-speed" class="cinp" aria-label="Simulation speed">
+            <option value="1">1×</option>
+            <option value="2">2×</option>
+            <option value="5">5×</option>
+          </select>
+          <label class="kv" for="c-seed">seed</label>
+          <input id="c-seed" class="cinp" type="number" value="1" />
+          <button id="c-reset" class="cbtn">Reset</button>
+          <span class="sep"></span>
+          <button id="c-buy" class="cbtn">Buy 1.0 mkt</button>
+          <button id="c-sell" class="cbtn">Sell 1.0 mkt</button>
+          <button id="c-spoof" class="cbtn warn">Run a spoof</button>
+        </div>
+      </div>
+
+      <div class="con-grid">
+        <section class="panel">
+          <div class="panel-head">
+            <p class="eyebrow">Tape</p>
+            <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/types/trade.go">MatchResult.Trades</a>
+          </div>
+          <div id="tape" class="tape"><div class="tape-empty">No prints yet.</div></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <p class="eyebrow">Depth ladder</p>
+            <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/orderbook/orderbook.go">engine.Snapshot(10)</a>
+          </div>
+          <div id="ladder" class="ladder"></div>
+        </section>
+
+        <div class="tiles">
+          <section class="panel">
+            <div class="panel-head">
+              <p class="eyebrow">Mid price</p>
+              <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/orderbook/orderbook.go">Snapshot.Mid</a>
+              <span class="panel-cur" id="cur-mid">—</span>
+            </div>
+            <canvas id="sp-mid" class="spark"></canvas>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <p class="eyebrow">Order-flow imbalance</p>
+              <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/signals/ofi.go">signals.OFI.Observe(snap)</a>
+              <span class="panel-cur" id="cur-ofi">—</span>
+            </div>
+            <canvas id="sp-ofi" class="spark"></canvas>
+            <div class="note">contemporaneous, not predictive — <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/research/ofi.md">the study</a></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <p class="eyebrow">Volume delta (CVD)</p>
+              <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/signals/flow.go">signals.CVD.Observe(trades)</a>
+              <span class="panel-cur" id="cur-cvd">—</span>
+            </div>
+            <canvas id="sp-cvd" class="spark"></canvas>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <p class="eyebrow">Depth imbalance · top 5</p>
+              <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/signals/imbalance.go">signals.DepthImbalance(snap, 5)</a>
+              <span class="panel-cur" id="cur-imb">—</span>
+            </div>
+            <div class="gauge-wrap">
+              <div class="gauge"><span class="zero"></span><span id="g-fill" class="fill pos" style="width:0"></span></div>
+              <div class="gauge-scale"><span>−1 · ask-heavy</span><span>0</span><span>bid-heavy · +1</span></div>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <p class="eyebrow">Kyle's λ</p>
+              <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/signals/kyle.go">signals.EstimateLambda(flow, ΔP)</a>
+            </div>
+            <div class="lam">
+              <span class="v" id="lam-v">—</span><span class="u">ticks / 1.0 qty</span>
+              <span class="r2" id="lam-r2">warming up</span>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <section class="panel surv">
+        <div class="panel-head">
+          <p class="eyebrow">Surveillance</p>
+          <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/surveillance/surveillance.go">surveillance.Monitor.Observe(event)</a>
+          <span class="panel-cur" id="cur-alerts">0 alerts</span>
+        </div>
+        <div id="alist" class="alist"><div class="surv-empty">Quiet — the detector is watching every event this page generates. Provoke it: <b>Run a spoof</b> places layered size and pulls it, and the shipping <code>SpoofDetector</code> names the account here.</div></div>
+      </section>
+
+      <div class="fineprint">
+        <b>What this is.</b> The real engine — <code>pkg/matching</code> compiled to WebAssembly — matching
+        a market of <code>sim.NoiseTrader</code> agents, with every panel computed by the shipping library
+        code and titled by the exact call that produced it. Same seed, same market, every time: that is
+        the engine's determinism, demonstrated rather than claimed.
+        <b>What it is not.</b> A trading signal. The noise market contains none by construction, and the
+        <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/research/ofi.md">OFI study</a>
+        found a ~540× R² gap between contemporaneous and predictive even in richer flow. Latency numbers
+        are deliberately absent: browser-WASM timings would be noise presented as measurement — the honest
+        ones live in <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCHMARKS.md">BENCHMARKS.md</a>.
+        <b>Adapt it:</b> <code>go get github.com/intrepidkarthi/orderbook</code> — the console's whole
+        market is ~40 lines against the public API
+        (<a href="https://github.com/intrepidkarthi/orderbook/blob/main/cmd/obwasm/main.go">cmd/obwasm</a>).
+      </div>
+    </div>
+  </div>
+
+  <script src="wasm_exec.js"></script>
+  <script src="console.js"></script>
+</body>
+</html>
