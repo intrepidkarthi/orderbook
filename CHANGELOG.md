@@ -9,6 +9,22 @@ versions may include breaking changes).
 
 ### Added
 
+- **`cmd/obdash` — the operator dashboard** ([CONSOLE-SPEC.md](docs/CONSOLE-SPEC.md)
+  phase 2). Deliberately a sidecar: an ordinary market-data subscriber over the
+  venue's own wire protocol plus a reader of the admin `/metrics` page, re-served
+  to browsers as one embedded page and one Server-Sent Events stream. obgw gains
+  no code, no port and no attack surface, and the market-data protocol gets what
+  PROTOCOL.md always claimed it supports — a subscriber written from the format
+  alone, living outside the venue's test tree. SSE rather than websockets is a
+  recorded decision: strictly one-way traffic, native reconnection, plain HTTP,
+  zero dependencies. The page draws RUNBOOKS.md's two first-look signals — queue
+  depth against capacity with the 75% alert threshold on the meter, and the
+  sequence rate — and never shows a stale number as a healthy one: a dead feed, a
+  failed scrape and an unpublished venue state each say exactly what they are. A
+  slow browser is shed, not buffered without bound — the venue's own rule, applied
+  to the venue's dashboard. Verified end to end against a live obgw under obsoak
+  load at ~400 md messages/second.
+
 - **The live console** (`web/console.html`, [CONSOLE-SPEC.md](docs/CONSOLE-SPEC.md))
   — the showcase VisualHFT points at, in the shape this library earns: the real
   engine compiled to WebAssembly matching a `sim.NoiseTrader` market in the page,

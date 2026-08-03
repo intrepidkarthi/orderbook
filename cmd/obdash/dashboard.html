@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>obdash — venue operations</title>
+  <style>
+    /* Self-contained: obdash serves this page with no other assets. The tokens
+       mirror the project site's (web/style.css) so the two read as one product.
+       Bid green / ask red are deutan-hostile as a pair, so color is always
+       reinforcement — side and state are also position and text. */
+    :root {
+      --bg: #0d1117; --card: #161b22; --line: #21262d;
+      --fg: #e6edf3; --muted: #8b949e;
+      --bid: #3fb950; --ask: #f85149; --gold: #d4a547; --link: #58a6ff;
+      --bidDim: rgba(63,185,80,.14); --askDim: rgba(248,81,73,.13);
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #ffffff; --card: #ffffff; --line: #d0d7de;
+        --fg: #1f2328; --muted: #59636e; --link: #0969da;
+        --bid: #1a7f37; --ask: #cf222e; --gold: #9a6700;
+        --bidDim: rgba(31,136,61,.10); --askDim: rgba(207,34,46,.09);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 18px 20px 40px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .banner {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px;
+      padding: 12px 16px; margin-bottom: 14px; border-radius: 10px;
+      background: var(--card); border: 1px solid var(--line);
+      font-family: ui-monospace, Menlo, monospace; font-size: 13px;
+    }
+    .banner .sym { font-weight: 700; letter-spacing: .06em; }
+    .pill { padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; }
+    .pill.open { color: var(--bid); border-color: var(--bid); }
+    .pill.halted, .pill.disconnected { color: var(--ask); border-color: var(--ask); }
+    .pill.cancel-only, .pill.unknown { color: var(--gold); border-color: var(--gold); }
+    .kv { color: var(--muted); } .kv b { color: var(--fg); font-weight: 600; margin-left: 6px; }
+
+    .grid { display: grid; grid-template-columns: minmax(340px, 1fr) 320px 300px; gap: 14px; }
+    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+    .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    .phead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 10px 14px 8px; border-bottom: 1px solid var(--line); }
+    .phead .t { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+    .phead .src { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--muted); margin-left: auto; }
+
+    .ladder { font-family: ui-monospace, Menlo, monospace; font-size: 13px; padding: 8px 0; }
+    .lrow { position: relative; display: flex; justify-content: space-between; padding: 3px 14px; margin: 2px 0; }
+    .lrow .bar { position: absolute; inset: 0 0 0 auto; border-radius: 4px 0 0 4px; }
+    .lrow.ask .bar { background: var(--askDim); } .lrow.bid .bar { background: var(--bidDim); }
+    .lrow span { position: relative; }
+    .lrow.ask .p { color: var(--ask); } .lrow.bid .p { color: var(--bid); }
+    .lmid { display: flex; justify-content: space-between; padding: 7px 14px; margin: 4px 0; border-top: 1px dashed var(--line); border-bottom: 1px dashed var(--line); color: var(--muted); font-size: 12px; }
+    .lmid b { color: var(--fg); }
+    .lsec { padding: 2px 14px; font-size: 10.5px; letter-spacing: .1em; color: var(--muted); }
+    .empty { padding: 12px 14px; color: var(--muted); font-size: 12.5px; }
+
+    .tape { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; padding: 6px 0; max-height: 420px; overflow-y: auto; }
+    .trow { display: flex; gap: 10px; padding: 2.5px 14px; }
+    .trow .side { width: 3.2em; color: var(--muted); }
+    .trow.b .px { color: var(--bid); } .trow.s .px { color: var(--ask); }
+    .trow .qy { margin-left: auto; }
+
+    .stats { display: flex; flex-direction: column; gap: 14px; }
+    .meter-wrap { padding: 12px 14px 14px; }
+    .meter { position: relative; height: 16px; border-radius: 8px; background: var(--line); overflow: hidden; }
+    .meter .fill { position: absolute; inset: 2px auto 2px 2px; border-radius: 6px; background: var(--bid); min-width: 2px; }
+    .meter .fill.warn { background: var(--gold); } .meter .fill.crit { background: var(--ask); }
+    .meter .mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--muted); opacity: .8; }
+    .meter-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; margin-top: 4px; font-family: ui-monospace, Menlo, monospace; }
+    .statgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); }
+    .stat { background: var(--card); padding: 10px 14px; }
+    .stat .l { color: var(--muted); font-size: 11px; letter-spacing: .05em; }
+    .stat .v { font-family: ui-monospace, Menlo, monospace; font-size: 17px; font-weight: 650; margin-top: 2px; }
+    .scrape-err { padding: 10px 14px; color: var(--ask); font-size: 12.5px; font-family: ui-monospace, Menlo, monospace; }
+    .scrape-err:empty { display: none; }
+
+    .fineprint { margin-top: 14px; padding: 12px 16px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+    .fineprint code { font-family: ui-monospace, Menlo, monospace; font-size: .9em; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="banner">
+      <span class="sym" id="b-sym">—</span>
+      <span class="pill unknown" id="b-state">connecting…</span>
+      <span class="kv">seq<b id="b-seq" class="mono">—</b></span>
+      <span class="kv">md rate<b id="b-rate" class="mono">—</b>/s</span>
+      <span class="kv">last md<b id="b-stale" class="mono">—</b></span>
+      <span class="kv" style="margin-left:auto">obdash — an ordinary subscriber; if this page is wrong, the venue published wrong</span>
+    </div>
+
+    <div class="grid">
+      <section class="panel">
+        <div class="phead"><span class="t">Book</span><span class="src">MsgMDLevel · MsgMDDelta</span></div>
+        <div id="ladder" class="ladder"><div class="empty">Waiting for a snapshot…</div></div>
+      </section>
+
+      <section class="panel">
+        <div class="phead"><span class="t">Prints</span><span class="src">MsgMDTrade</span></div>
+        <div id="tape" class="tape"><div class="empty">No prints yet.</div></div>
+      </section>
+
+      <div class="stats">
+        <section class="panel">
+          <div class="phead"><span class="t">Queue</span><span class="src">orderbook_queue_depth / capacity</span></div>
+          <div class="meter-wrap">
+            <div class="meter"><span id="q-fill" class="fill" style="width:0"></span><span class="mark" style="left:75%" title="RUNBOOKS.md alert threshold"></span></div>
+            <div class="meter-scale"><span id="q-label">— / —</span><span>75% = alert</span></div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="phead"><span class="t">Venue</span><span class="src">admin /metrics</span></div>
+          <div class="statgrid">
+            <div class="stat"><div class="l">resting orders</div><div class="v" id="s-resting">—</div></div>
+            <div class="stat"><div class="l">pending stops</div><div class="v" id="s-stops">—</div></div>
+            <div class="stat"><div class="l">best bid</div><div class="v" id="s-bid">—</div></div>
+            <div class="stat"><div class="l">best ask</div><div class="v" id="s-ask">—</div></div>
+            <div class="stat"><div class="l">spread</div><div class="v" id="s-spread">—</div></div>
+            <div class="stat"><div class="l">last trade</div><div class="v" id="s-last">—</div></div>
+          </div>
+          <div class="scrape-err" id="s-err"></div>
+        </section>
+      </div>
+    </div>
+
+    <div class="fineprint">
+      <b>What this is.</b> A sidecar reading exactly two things any participant or monitoring stack
+      could read: the venue's own market-data stream (<code>internal/wire</code>, snapshot then
+      deltas, applied by sequence) and its admin <code>/metrics</code>. The queue meter and the
+      sequence rate are the two signals <code>RUNBOOKS.md</code> says to watch first — depth
+      approaching capacity, and the sequence standing still while commands wait, which is the only
+      way a stalled matcher is distinguishable from a quiet market. A disconnected feed or a failed
+      scrape is shown as exactly that, never as the last good number.
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let tick = 0.01, lot = 0.001;
+    const P = (t) => (t * tick).toFixed(2);
+    const Q = (l) => (l * lot).toFixed(3);
+
+    function setPill(el, text, cls) { el.textContent = text; el.className = "pill " + cls; }
+
+    function render(p) {
+      tick = p.tick_size; lot = p.lot_size;
+      $("b-sym").textContent = p.symbol;
+      const f = p.feed;
+      if (!f.connected) setPill($("b-state"), "feed disconnected", "disconnected");
+      else if (f.state === "unknown") setPill($("b-state"), "no MDStatus yet", "unknown"); // published on change only; a fresh subscriber honestly does not know
+      else setPill($("b-state"), f.state, f.state);
+      $("b-seq").textContent = f.seq;
+      $("b-rate").textContent = p.seq_rate.toFixed(0);
+      $("b-stale").textContent = f.connected ? (f.stale_ms < 1500 ? "live" : (f.stale_ms / 1000).toFixed(1) + "s ago") : "—";
+
+      // Ladder
+      const maxQ = Math.max(1, ...f.bids.map(l => l.qty), ...f.asks.map(l => l.qty));
+      const row = (cls, l) =>
+        `<div class="lrow ${cls}"><span class="bar" style="width:${100 * l.qty / maxQ}%"></span>` +
+        `<span class="p">${P(l.price)}</span><span class="q">${Q(l.qty)}</span></div>`;
+      const rows = ['<div class="lsec">ASKS · price / size</div>'];
+      for (const l of [...f.asks].reverse()) rows.push(row("ask", l));
+      const bb = f.bids[0], ba = f.asks[0];
+      const mid = bb && ba ? P((bb.price + ba.price) / 2) : "—";
+      const spr = bb && ba ? P(ba.price - bb.price) : "—";
+      rows.push(`<div class="lmid"><span>mid <b>${mid}</b></span><span>spread <b>${spr}</b></span><span>last <b>${f.last_trade ? P(f.last_trade) : "—"}</b></span></div>`);
+      for (const l of f.bids) rows.push(row("bid", l));
+      rows.push('<div class="lsec">BIDS</div>');
+      $("ladder").innerHTML = f.bids.length + f.asks.length ? rows.join("") : '<div class="empty">The book is empty.</div>';
+
+      // Tape
+      $("tape").innerHTML = f.trades.length
+        ? f.trades.map(t => `<div class="trow ${t.aggressor === "buy" ? "b" : "s"}"><span class="side">${t.aggressor === "buy" ? "▲ B" : "▼ S"}</span><span class="px">${P(t.price)}</span><span class="qy">${Q(t.qty)}</span></div>`).join("")
+        : '<div class="empty">No prints yet.</div>';
+
+      // Metrics
+      const m = p.metrics.values || {};
+      const has = (k) => Object.prototype.hasOwnProperty.call(m, k);
+      const num = (k, f) => has(k) ? f(m[k]) : "—";
+      const depth = m["orderbook_queue_depth"], cap = m["orderbook_queue_capacity"];
+      if (has("orderbook_queue_depth") && cap > 0) {
+        const frac = Math.min(1, depth / cap);
+        const fill = $("q-fill");
+        fill.style.width = Math.max(0.5, frac * 100) + "%";
+        fill.className = "fill" + (frac >= 0.9 ? " crit" : frac >= 0.75 ? " warn" : "");
+        $("q-label").textContent = `${depth} / ${cap}`;
+      } else {
+        $("q-label").textContent = "— / —";
+      }
+      $("s-resting").textContent = num("orderbook_resting_orders", v => v.toFixed(0));
+      $("s-stops").textContent = num("orderbook_pending_stops", v => v.toFixed(0));
+      $("s-bid").textContent = num("orderbook_best_bid", P);
+      $("s-ask").textContent = num("orderbook_best_ask", P);
+      $("s-spread").textContent = num("orderbook_spread", P);
+      $("s-last").textContent = num("orderbook_last_trade_price", P);
+      $("s-err").textContent = p.metrics.ok ? "" : "metrics scrape failing: " + (p.metrics.err || "unreachable");
+    }
+
+    const es = new EventSource("/events");
+    es.onmessage = (e) => render(JSON.parse(e.data));
+    es.onerror = () => setPill($("b-state"), "dashboard link lost — retrying", "disconnected");
+  </script>
+</body>
+</html>

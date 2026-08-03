@@ -1,6 +1,6 @@
 # Console — a live market console in the browser
 
-Status: **SPEC + v1.1 implemented** (critic pass: trading panel, digest, OTR/flood, light-theme + narrow-viewport verified) (`web/console.html`, `cmd/obwasm`) · Author:
+Status: **SPEC + v1.1 + phase 2 implemented** (`web/console.html` + `cmd/obwasm`; `cmd/obdash`) · Author:
 Karthikeyan NG · Last updated: 2026-08-03
 
 Companion documents:
@@ -37,10 +37,25 @@ deterministic simulator** — the real engine matching, real `sim.NoiseTrader` a
 providing continuous flow, real `signals` and `surveillance` code computing what the
 panels show. Nothing in the page reimplements library logic; the page is a renderer.
 
-A ws-fed dashboard against a live `obgw` (the true VisualHFT analogue for operators)
-is deliberately **phase 2**, not v1: browsers do not speak the venue's TCP protocol,
-so it needs a websocket proxy — a real component with real decisions — and it
-showcases operations rather than the library. Named here so it is a plan, not a gap.
+The operator dashboard against a live `obgw` (the true VisualHFT analogue for
+operators) was phase 2, and is now **implemented as `cmd/obdash`** — with one
+decision worth recording: **SSE, not websockets**. The dashboard is strictly
+one-way; EventSource reconnects natively with the retry interval the server
+names; it is plain HTTP through every proxy an ops network has; and it costs
+zero dependencies. A websocket buys back none of that for this traffic shape.
+
+obdash is deliberately a *sidecar*, not a feature of the venue: an ordinary
+market-data subscriber over the venue's own wire protocol (fresh subscribe on
+every reconnect — a dashboard owes nothing to its history) plus a reader of the
+admin `/metrics` page. obgw gains no code, no port, no attack surface — and the
+market-data protocol gets what PROTOCOL.md always claimed it supports, a
+subscriber written from the format alone, living outside the venue's test tree.
+The page leans on RUNBOOKS.md's two first-look signals: queue depth against
+capacity with the 75% alert threshold drawn on the meter, and the sequence rate.
+A disconnected feed or failed scrape is shown as exactly that, never as the
+last good number — and a venue that has not published an `MDStatus` since the
+subscriber joined shows "no MDStatus yet", because status is published on
+change and a fresh subscriber honestly does not know.
 
 ## 2. Panels, and the call each one names
 
@@ -112,9 +127,9 @@ another page of the same product, not a bolted-on toy. Canvas sparklines, no cha
 library, no external requests. Numbers are set in the monospace stack. Nothing
 animates that data did not change.
 
-## 5. Non-goals (v1)
+## 5. Non-goals (v1 console)
 
-- **No obgw/websocket feed** — phase 2, see §1.
+- ~~No obgw feed~~ — **shipped as phase 2**, see §1 (`cmd/obdash`).
 - **No latency histograms in the page.** WASM-in-a-browser timings would be noise
   presented as measurement; the honest numbers live in [BENCHMARKS.md](BENCHMARKS.md)
   and the console links them instead of faking its own.
