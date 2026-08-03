@@ -6,7 +6,8 @@
 // admission control, the event stream, and per-account outbound streams that
 // survive a disconnect — compose into a working venue edge. What it deliberately
 // omits is what a real deployment must decide for itself: multi-symbol routing and
-// an HA topology.
+// an HA topology (docs/REPLICATION.md and examples/replication are the reference
+// for the latter).
 //
 // Authentication defaults to deny. With no accounts configured, every login is
 // rejected — an empty configuration must not produce an open venue.

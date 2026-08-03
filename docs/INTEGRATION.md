@@ -209,7 +209,10 @@ recovered book is simply different, with no error:
 
 Replication of the log between datacenters, and the failover policy around it,
 are the operator's — see the HA discussion below for what the library provides
-seams for and what it deliberately does not.
+seams for and what it deliberately does not. The seams are no longer just
+claimed: [REPLICATION.md](REPLICATION.md) specifies the reference primary-backup
+topology, `examples/replication` implements it (the live tail is
+`wal.SetOnAppend`), and drills D1–D6 hold it to the spec on every CI run.
 
 ---
 

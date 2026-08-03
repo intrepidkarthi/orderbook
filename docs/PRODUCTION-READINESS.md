@@ -29,10 +29,10 @@ in front of it.
 | Order-entry and market-data protocols | **Strong** — frozen, both edges served |
 | Market-integrity controls | **Strong** — each mapped to a real case |
 | Performance and its honesty | **Strong** — measured, published, corrected |
-| Observability | **Partial** — Prometheus metrics and health endpoints ship; no tracing |
+| Observability | **Partial** — Prometheus metrics, health endpoints and a reference dashboard ship; no tracing or alert rules |
 | Operational readiness | **Weak** — endpoints, thresholds and runbooks; none of it rehearsed |
-| Security at the edge | **Partial** — TLS and a credential seam ship; no hashing, rotation or revocation |
-| High availability | **Seams only** — deliberately no consensus |
+| Security at the edge | **Partial** — TLS, a credential seam and digests at rest ship; no rotation, revocation or expiry |
+| High availability | **Seams proven** — a drilled reference example; topology and consensus deliberately yours |
 | Sustained load / soak at venue scale | **Partial** — a harness, and an hour of evidence |
 | Clearing, settlement, margin, fees | **Absent by design** |
 | Independent review | **None** |
@@ -165,8 +165,12 @@ Three decisions in there are worth knowing before you rely on it:
   distinguishable from a quiet market.
 - **An empty book reports NaN, not zero.** Zero is a price.
 
-What still does not exist: tracing, structured logging, and any dashboard or alert
-rules. The numbers are exposed; deciding what to alert on is yours.
+What still does not exist: tracing, structured logging, and alert rules. A
+reference dashboard now does — `cmd/obdash`, an ordinary market-data subscriber
+plus a `/metrics` reader that draws the queue meter with the 75% threshold on it
+and refuses to show a stale number as a healthy one. It is a viewing surface,
+not an alerting system: the numbers are exposed and drawn; deciding what pages a
+human is still yours.
 
 *(An earlier version of this document claimed a `Metrics` seam existed, because the
 README's contributing list mentions one. It did not exist and never had — the reference
@@ -303,8 +307,8 @@ real defects. That is a good habit and it is not the same as someone else lookin
 In the order that will actually help:
 
 1. **Instrument it.** `pkg/observability` and the admin edge on `cmd/obgw` are the
-   starting point and not the end of it: you still need dashboards, alert thresholds
-   and tracing. Nothing else on this list is useful until you can see what the venue is
+   starting point and not the end of it: you still need alert thresholds and
+   tracing, and `cmd/obdash` is the starting dashboard, not the end of one. Nothing else on this list is useful until you can see what the venue is
    doing — which is not a slogan. The defect in §1 was invisible from inside the
    process, and the metric that would have shown it did not exist until somebody went
    looking.

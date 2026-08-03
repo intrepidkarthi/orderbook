@@ -4,7 +4,7 @@
   <a href="https://intrepidkarthi.github.io/orderbook/"><img src=".github/readme/demo.gif" alt="orderbook — a limit order book and matching engine in Go: a market order crosses the spread and trades at the maker's price" width="820"></a>
 </p>
 
-<p align="center"><b><a href="https://intrepidkarthi.github.io/orderbook/">▶ Live demo</a></b> — the real engine, compiled to WebAssembly, running in your browser.</p>
+<p align="center"><b><a href="https://intrepidkarthi.github.io/orderbook/">▶ Live demo</a></b> — the real engine, compiled to WebAssembly, running in your browser · <b><a href="https://intrepidkarthi.github.io/orderbook/console.html">▶ Live console</a></b> — a running market with signals and surveillance, every panel titled by the call that produces it.</p>
 
 An embeddable matching core in Go, with a demonstrated network seam:
 integer-exact pricing, a zero-allocation match path, a lock-free single-writer
@@ -46,15 +46,22 @@ reconstruct the book, an operator kill switch, a frozen binary protocol
 ([docs/PROTOCOL.md](docs/PROTOCOL.md)), and `cmd/obgw` — a reference TCP gateway
 serving **both edges**: order entry with authentication, per-account outbound streams
 and gap-free resume across a disconnect, and a public market-data feed with
-snapshot-plus-delta recovery. Bounded backpressure at every stage.
+snapshot-plus-delta recovery. Bounded backpressure at every stage. Around it:
+`EngineSnapshot.Digest` (the book fingerprint replication and recovery agree on),
+`examples/replication` (the drilled primary-backup reference), `cmd/obdash` (an
+operator dashboard that is an ordinary subscriber of the venue's own feed), and a
+[live console](https://intrepidkarthi.github.io/orderbook/console.html) running
+the engine, signals and surveillance in the browser.
 
-What does not, and is yours: **TLS and credential storage** (the reference sends a
-shared secret over TLS, with no hashing or rotation, and says so), **multi-symbol routing** (order ids and
+What does not, and is yours: **credential lifecycle** (the reference speaks TLS and
+holds secret digests, never plaintext — but rotation, revocation and expiry are
+yours, and it says so), **multi-symbol routing** (order ids and
 sequences are per-engine, so several symbols means several engines and a router
 above them), **clearing and settlement**, and **any HA topology** — the library
 ships the seams for primary-backup (deterministic apply, an ordered command log,
-replay mode, snapshot bootstrap) and deliberately not the consensus, because
-bundling one forces a wrong answer on everybody. See
+replay mode, snapshot bootstrap), proves them with a reference example and CI
+drills ([docs/REPLICATION.md](docs/REPLICATION.md)), and deliberately not the
+consensus, because bundling one forces a wrong answer on everybody. See
 [docs/EXCHANGE-ARCHITECTURE.md](docs/EXCHANGE-ARCHITECTURE.md) for why, including
 the venues that lost quorum getting it wrong.
 
@@ -62,9 +69,8 @@ The engine has never run a live market. **Production-readiness is a property of
 your deployment, not of this library** — what is offered here is that the pieces
 you build on are correct, tested, and honest about their edges.
 [docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) is the checklist: what
-ships, what is deliberately absent, what you would have to build, and the three gaps
-(observability, operational readiness, sustained load testing) that no further library
-work can close because they are about your deployment.
+ships, what is deliberately absent, what you would have to build — and which gaps
+no library work can close, because they are properties of your deployment.
 
 ---
 
@@ -302,6 +308,11 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | `pkg/matching` | the single-writer `Engine` and the concurrent `Runner` |
 | `pkg/marketdata` | record, replay, and digest — deterministic recovery primitives |
 | `pkg/observability` | Prometheus counters, gauges and histograms off the event stream |
+| `pkg/wal` | checksummed write-ahead log, snapshots, recovery, and the replication tail |
+| `pkg/orderentry` | authentication, per-account streams with resume, and the naming index |
+| `pkg/gateway` | enforcing pre-trade admission: rate gate, speed-bump hook, audit |
+| `pkg/surveillance` | market-abuse detectors: spoofing, OTR, pinging, ramping, cross-book |
+| `pkg/auction` | uniform-price call auction with randomized close |
 
 ---
 
@@ -325,7 +336,9 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [SOAK.md](docs/SOAK.md) | Sustained load: what `cmd/obsoak` measures, the methodology that took three wrong versions to get right, and the correctness defect the first hour of it found. |
 | [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) | What a venue actually needs, with an honest status for each item — what ships, what is deliberately absent, and what you would have to build. Production readiness is a property of a deployment, not of a library, and this says so. |
 | [PROTOCOL.md](docs/PROTOCOL.md) | The binary order-entry protocol `cmd/obgw` speaks: framing, session and resume, every message, the reason-code vocabulary, and what is deliberately absent from the wire. |
-| [CHANGELOG.md](CHANGELOG.md) | Release history (v0.1.0 → v0.17.0) with breaking-change notes. |
+| [REPLICATION.md](docs/REPLICATION.md) | The primary-backup reference: what "committed" means, the incarnation fence, drills D1–D6 — and §8, what building it actually found versus what the spec predicted. |
+| [CONSOLE-SPEC.md](docs/CONSOLE-SPEC.md) | The live console and the operator dashboard: why a browser WASM market instead of a feed-connected desktop app, and every panel mapped to the call that produces it. |
+| [CHANGELOG.md](CHANGELOG.md) | Release history with breaking-change notes. |
 
 ---
 
