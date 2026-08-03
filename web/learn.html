@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>learn — the order book, by being every player in it</title>
+  <meta name="description" content="An interactive order-book tutorial running on a real matching engine. Post the first order into an empty market, pay the spread, race the queue, walk the book, and make a market — every step verified by the engine itself." />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    /* Tutorial-specific. The ladder assembles as concepts arrive: sizes, bars,
+       the mid strip and the tape are gated by body classes (.lv-sizes, .lv-bars,
+       .lv-mid, .lv-tape) that chapters switch on. Color is reinforcement only —
+       side is always also position and text. */
+    .learn { max-width: 1100px; margin: 0 auto; padding: 18px 20px 48px; }
+
+    /* Chapter rail */
+    .rail { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+    .rail .st {
+      display: flex; align-items: center; gap: 7px; padding: 6px 12px;
+      border: 1px solid var(--line); border-radius: 999px;
+      color: var(--muted); font-size: 12.5px; background: var(--card);
+    }
+    .rail .st .n {
+      font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+      width: 18px; height: 18px; border-radius: 50%; display: inline-flex;
+      align-items: center; justify-content: center; border: 1px solid var(--line);
+    }
+    .rail .st.cur { color: var(--fg); border-color: var(--muted); }
+    .rail .st.cur .n { border-color: var(--gold); color: var(--gold); }
+    .rail .st.done { color: var(--muted); }
+    .rail .st.done .n { border-color: var(--bid); color: var(--bid); }
+
+    .stage { display: grid; grid-template-columns: minmax(340px, 1fr) 380px; gap: 16px; }
+    @media (max-width: 900px) { .stage { grid-template-columns: 1fr; } }
+
+    /* The market panel */
+    .mkt { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; align-self: start; }
+    .mkt-head { display: flex; align-items: baseline; gap: 10px; padding: 10px 14px 8px; border-bottom: 1px solid var(--line); }
+    .mkt-head .t { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+    .mkt-head .live { margin-left: auto; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--muted); }
+
+    .ladder { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13.5px; padding: 10px 0; min-height: 200px; }
+    .void { padding: 44px 20px; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.7; }
+    .void b { color: var(--fg); }
+    .lrow { position: relative; display: flex; justify-content: space-between; padding: 3.5px 16px; margin: 2px 0; }
+    .lrow .bar { position: absolute; inset: 0 0 0 auto; width: 0; border-radius: 4px 0 0 4px; opacity: 0; transition: opacity .4s; }
+    body.lv-bars .lrow .bar { opacity: 1; }
+    .lrow.ask .bar { background: var(--askDim); }
+    .lrow.bid .bar { background: var(--bidDim); }
+    .lrow .p, .lrow .q { position: relative; }
+    .lrow.ask .p { color: var(--ask); }
+    .lrow.bid .p { color: var(--bid); }
+    .lrow .q { color: var(--fg); display: none; }
+    body.lv-sizes .lrow .q { display: inline; }
+    .lrow .own-dot { color: var(--gold); margin-right: 6px; font-size: 10px; }
+    .lrow.flash { animation: lflash .6s ease-out; }
+    @keyframes lflash { from { background: color-mix(in srgb, var(--gold) 24%, transparent); } to { background: transparent; } }
+    @media (prefers-reduced-motion: reduce) { .lrow.flash { animation: none; } .lrow .bar { transition: none; } }
+    .lsec { padding: 2px 16px 4px; font-size: 10.5px; letter-spacing: .12em; color: var(--muted); display: none; }
+    body.lv-sides .lsec { display: block; }
+    .lmid {
+      display: none; justify-content: space-between; gap: 10px; padding: 7px 16px; margin: 5px 0;
+      border-top: 1px dashed var(--line); border-bottom: 1px dashed var(--line);
+      color: var(--muted); font-size: 12px;
+    }
+    body.lv-mid .lmid { display: flex; }
+    .lmid b { color: var(--fg); font-weight: 600; }
+    .lmid .hl { color: var(--gold); }
+
+    .tape-wrap { border-top: 1px solid var(--line); display: none; }
+    body.lv-tape .tape-wrap { display: block; }
+    .tape-t { padding: 8px 16px 2px; font-size: 10.5px; letter-spacing: .12em; color: var(--muted); }
+    .tape { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; padding: 4px 0 8px; max-height: 150px; overflow-y: auto; }
+    .trow { display: flex; gap: 10px; padding: 2.5px 16px; }
+    .trow .side { width: 3.2em; color: var(--muted); }
+    .trow.b .px { color: var(--bid); }
+    .trow.s .px { color: var(--ask); }
+    .trow .qy { margin-left: auto; color: var(--fg); }
+
+    /* The lesson panel */
+    .lesson { display: flex; flex-direction: column; gap: 14px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+    .card .role { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--gold); font-weight: 650; }
+    .card h2 { margin: 6px 0 10px; font-size: 20px; }
+    .card p { margin: 0 0 10px; color: var(--fg); font-size: 14px; line-height: 1.6; }
+    .card p.note { color: var(--muted); font-size: 13px; }
+    .card .datum { font-family: ui-monospace, Menlo, monospace; }
+
+    .goal { border-left: 3px solid var(--gold); }
+    .goal .g-t { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 650; margin-bottom: 6px; }
+    .goal .g-body { font-size: 14px; }
+    .goal.met { border-left-color: var(--bid); }
+    .goal.met .g-t { color: var(--bid); }
+    .goal .g-check { display: none; color: var(--bid); font-weight: 650; margin-top: 8px; font-size: 13.5px; }
+    .goal.met .g-check { display: block; }
+
+    .ctl { display: flex; flex-wrap: wrap; gap: 8px; }
+    .cbtn {
+      font: inherit; font-size: 13.5px; color: var(--fg); background: var(--bg2);
+      border: 1px solid var(--line); border-radius: 7px; padding: 7px 14px; cursor: pointer;
+    }
+    .cbtn:hover { border-color: var(--muted); }
+    .cbtn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+    .cbtn.primary { border-color: var(--gold); color: var(--gold); }
+    .cbtn:disabled { opacity: .4; cursor: default; }
+    .cinp { font: inherit; font-size: 13.5px; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; width: 84px; font-family: ui-monospace, Menlo, monospace; }
+    .ctl label { color: var(--muted); font-size: 12.5px; align-self: center; }
+    .ctl-err { color: var(--ask); font-size: 12.5px; font-family: ui-monospace, Menlo, monospace; min-height: 1em; }
+
+    .next { text-align: right; }
+    .next .cbtn.go { border-color: var(--bid); color: var(--bid); }
+
+    /* Measured-comparison table (chapter 5) */
+    .cmp { width: 100%; border-collapse: collapse; font-family: ui-monospace, Menlo, monospace; font-size: 13px; margin-top: 4px; }
+    .cmp th, .cmp td { text-align: right; padding: 5px 10px; border-bottom: 1px solid var(--line); }
+    .cmp th { color: var(--muted); font-weight: 600; font-size: 11.5px; letter-spacing: .05em; }
+    .cmp td:first-child, .cmp th:first-child { text-align: left; color: var(--muted); }
+    .cmp td { color: var(--fg); }
+
+    .fin a { color: var(--link); }
+    .boot { padding: 60px 20px; text-align: center; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <a class="brand" href="index.html">📈 orderbook</a>
+    <div class="nav-links">
+      <a href="index.html#what">What is it</a>
+      <a href="learn.html"><b>Tutorial</b></a>
+      <a href="console.html">Live console</a>
+      <a href="docs.html">Docs</a>
+      <a class="nav-gh" href="https://github.com/intrepidkarthi/orderbook">GitHub ★</a>
+    </div>
+  </nav>
+
+  <div class="learn">
+    <div id="boot" class="boot">loading the engine (WebAssembly)…</div>
+
+    <div id="ui" hidden>
+      <div class="rail" id="rail" aria-label="Chapters"></div>
+
+      <div class="stage">
+        <section class="mkt">
+          <div class="mkt-head">
+            <span class="t">The market</span>
+            <span class="live" id="mkt-note">empty</span>
+          </div>
+          <div id="ladder" class="ladder"></div>
+          <div class="tape-wrap">
+            <div class="tape-t">THE TAPE · every trade, as it printed</div>
+            <div id="tape" class="tape"></div>
+          </div>
+        </section>
+
+        <div class="lesson">
+          <div class="card" id="narrative"></div>
+          <div class="card goal" id="goal">
+            <div class="g-t">Your objective</div>
+            <div class="g-body" id="goal-text"></div>
+            <div class="g-check" id="goal-check">✓ Done — the book proves it.</div>
+          </div>
+          <div class="card" id="controls"></div>
+          <div class="next"><button id="btn-next" class="cbtn go" disabled>Continue →</button></div>
+        </div>
+      </div>
+
+      <p class="card note" style="margin-top:16px; color:var(--muted); font-size:12.5px;">
+        Nothing on this page is mocked. The book, the prints, and every objective check run on the
+        real matching engine (<code>pkg/matching</code>) compiled to WebAssembly — the same engine in the
+        <a href="console.html">live console</a> and the
+        <a href="https://github.com/intrepidkarthi/orderbook">repository</a>.
+      </p>
+    </div>
+  </div>
+
+  <script src="wasm_exec.js"></script>
+  <script src="learn.js"></script>
+</body>
+</html>

@@ -5,6 +5,25 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
+## [Unreleased]
+
+### Added
+
+- **The interactive tutorial** (`web/learn.html`,
+  [TUTORIAL-SPEC.md](docs/TUTORIAL-SPEC.md)) — learn the order book by being
+  every player in it, on the real engine. Two devices no static explainer has:
+  the ladder assembles itself as concepts arrive (chapter 1 opens on an empty
+  market, because a market is a list of intentions and the list starts empty),
+  and every objective is verified against the engine's actual book state — "get
+  filled before the rival" completes when the book proves it, not when a Next
+  button is pressed. Six chapters: the first seller, the wall builder, the
+  taker, the queue jumper, the whale (the same 8-lot order against a thin and a
+  deep book, with the measured slippage as the lesson), and the market maker,
+  quoting both sides of a live market with honest P&L — including the loss
+  case, when the price moves through the quotes. Browser-verified end to end;
+  the pacing fixes came from watching an impatient automated learner reset its
+  own queue position by re-quoting — which is itself the chapter's lesson.
+
 ## [0.19.0] - 2026-08-03
 
 The showcase release: the library learns to show itself — a live console running
