@@ -2,17 +2,23 @@
 // the WASM bridge (cmd/obwasm): this file draws what obStep/obSignals/obAlerts
 // return and never computes a signal itself (docs/CONSOLE-SPEC.md).
 (async function () {
-  const go = new Go();
-  let result;
-  try {
-    result = await WebAssembly.instantiateStreaming(fetch("obook.wasm"), go.importObject);
-  } catch {
-    const bytes = await (await fetch("obook.wasm")).arrayBuffer();
-    result = await WebAssembly.instantiate(bytes, go.importObject);
-  }
-  go.run(result.instance);
-
   const $ = (id) => document.getElementById(id);
+  try {
+    const go = new Go();
+    let result;
+    try {
+      result = await WebAssembly.instantiateStreaming(fetch("obook.wasm"), go.importObject);
+    } catch {
+      const bytes = await (await fetch("obook.wasm")).arrayBuffer();
+      result = await WebAssembly.instantiate(bytes, go.importObject);
+    }
+    go.run(result.instance);
+  } catch (err) {
+    $("boot").textContent =
+      "The engine failed to load (" + err + "). This page needs WebAssembly and fetch — " +
+      "a current Firefox, Chrome, Safari or Edge. If the browser is current, please open an issue.";
+    return;
+  }
   $("boot").hidden = true;
   $("ui").hidden = false;
 
@@ -23,6 +29,7 @@
   let running = !matchMedia("(prefers-reduced-motion: reduce)").matches;
   let speed = 1;
   let alertCount = 0;
+  let yourPrices = new Set();   // prices where "you" rest, for the ladder markers
   const mids = [], ofis = [], cvds = [];
 
   const push = (arr, v) => { arr.push(v); if (arr.length > RING) arr.shift(); };
@@ -88,15 +95,16 @@
   }
 
   // ---- ladder ---------------------------------------------------------------
-  let lastTradePx = null, flashPx = null;
+  let flashPx = null;
   function renderLadder() {
     const snap = JSON.parse(obSnapshot(10));
     const rows = [];
     const maxSz = Math.max(1e-9, ...snap.asks.map((l) => +l.size), ...snap.bids.map((l) => +l.size));
     const row = (cls, l) => {
       const flash = flashPx === l.price ? " flash" : "";
+      const yours = yourPrices.has((+l.price).toFixed(2)) ? '<span class="own-dot" title="your resting order">●</span>' : "";
       return `<div class="lrow ${cls}${flash}"><span class="bar" style="width:${(100 * l.size) / maxSz}%"></span>` +
-        `<span class="p">${(+l.price).toFixed(2)}</span><span class="q">${(+l.size).toFixed(3)}</span></div>`;
+        `<span class="p">${yours}${(+l.price).toFixed(2)}</span><span class="q">${(+l.size).toFixed(3)}</span></div>`;
     };
     rows.push(`<div class="lsec">ASKS · price / size</div>`);
     for (const l of [...snap.asks].reverse()) rows.push(row("ask", l));  // best ask adjacent to mid
@@ -108,6 +116,26 @@
     return snap;
   }
 
+  // ---- your orders ----------------------------------------------------------
+  function renderOwn() {
+    const res = JSON.parse(obOpenOrders("you"));
+    yourPrices = new Set(res.orders.map((o) => (+o.price).toFixed(2)));
+    const el = $("own");
+    if (!res.orders.length) {
+      el.innerHTML = '<div class="tape-empty">Nothing resting. A limit order away from the touch will sit in the book — marked ● on the ladder.</div>';
+      return;
+    }
+    el.innerHTML = res.orders.map((o) =>
+      `<div class="orow"><span class="oside">${o.side === "BUY" ? "B" : "S"}</span>` +
+      `<span class="${o.side === "BUY" ? "px" : "px"}" style="color:var(--${o.side === "BUY" ? "bid" : "ask"})">${(+o.price).toFixed(2)}</span>` +
+      `<span class="oq">× ${o.qty}</span>` +
+      `<button class="ox" data-id="${o.id}" title="cancel (engine.Cancel)" aria-label="Cancel order ${o.id}">✕</button></div>`
+    ).join("");
+    el.querySelectorAll(".ox").forEach((b) =>
+      b.addEventListener("click", () => { obCancel(+b.dataset.id, "you"); refresh(); })
+    );
+  }
+
   // ---- tape -----------------------------------------------------------------
   const tapeEl = $("tape");
   let tapeCount = 0;
@@ -117,12 +145,11 @@
     for (const t of trades) {
       const buy = t.taker_side === "BUY";
       const div = document.createElement("div");
-      div.className = "trow " + (buy ? "b" : "s");
+      div.className = "trow " + (buy ? "b" : "s") + (+t.quantity >= 2 ? " big" : "");
       div.innerHTML = `<span class="side">${buy ? "▲ B" : "▼ S"}</span><span class="px">${t.price}</span><span class="qy">${t.quantity}</span>`;
       tapeEl.prepend(div);
       tapeCount++;
       flashPx = t.price;
-      lastTradePx = t.price;
     }
     while (tapeEl.children.length > TAPE_MAX) tapeEl.lastChild.remove();
   }
@@ -149,6 +176,7 @@
     $("mv-spread").textContent = fmtP(s.spread);
     $("mv-last").textContent = fmtP(s.last);
     $("mv-step").textContent = s.step;
+    $("mv-digest").textContent = s.digest || "—";
     if (s.mid) push(mids, s.mid);
     push(ofis, s.ofi);
     push(cvds, s.cvd);
@@ -166,18 +194,22 @@
     }
   }
 
+  function refresh() {
+    renderOwn();
+    renderLadder();
+    renderSignals();
+    drainAlerts();
+  }
+
   // ---- main loop ------------------------------------------------------------
   function tick() {
     if (!running || document.hidden) return;
     const out = JSON.parse(obStep(speed));
     appendTrades(out.trades);
-    renderLadder();
-    renderSignals();
-    drainAlerts();
+    refresh();
   }
   setInterval(tick, TICK_MS);
-  renderLadder();
-  renderSignals();
+  refresh();
 
   // ---- controls -------------------------------------------------------------
   $("c-run").addEventListener("click", () => {
@@ -195,20 +227,50 @@
     $("cur-alerts").textContent = "0 alerts";
     $("lam-v").textContent = "—";
     $("lam-r2").textContent = "warming up";
-    renderLadder();
-    renderSignals();
+    refresh();
   });
-  $("c-buy").addEventListener("click", () => { obSubmit("you", "BUY", "MARKET", "0", "1.0"); tick(); });
-  $("c-sell").addEventListener("click", () => { obSubmit("you", "SELL", "MARKET", "0", "1.0"); tick(); });
-  $("c-spoof").addEventListener("click", () => {
-    const res = JSON.parse(obSpoof());
-    if (res.error) return;
-    const btn = $("c-spoof");
-    btn.disabled = true;
-    btn.textContent = "Spoof resting…";
-    // Re-arm once the bridge has auto-cancelled it and the detector has spoken.
-    const iv = setInterval(() => {
-      if (alertCount > 0 || !btn.disabled) { btn.disabled = false; btn.textContent = "Run a spoof"; clearInterval(iv); }
-    }, 500);
+
+  const showErr = (msg) => {
+    $("t-err").textContent = msg;
+    setTimeout(() => { if ($("t-err").textContent === msg) $("t-err").textContent = ""; }, 5000);
+  };
+  $("trade-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const res = JSON.parse(obSubmit("you", $("t-side").value, "LIMIT", $("t-price").value, $("t-qty").value));
+    if (res.error) { showErr(res.error); return; }
+    refresh();
   });
+  $("c-buy").addEventListener("click", () => {
+    const res = JSON.parse(obSubmit("you", "BUY", "MARKET", "0", $("t-qty").value || "1.0"));
+    if (res.error) showErr(res.error);
+    tick();
+  });
+  $("c-sell").addEventListener("click", () => {
+    const res = JSON.parse(obSubmit("you", "SELL", "MARKET", "0", $("t-qty").value || "1.0"));
+    if (res.error) showErr(res.error);
+    tick();
+  });
+
+  // A provocation button disables until its detector has actually spoken (new
+  // alerts beyond the count at press time), with a timeout so a failed attempt
+  // (e.g. an empty book) cannot wedge the button.
+  function provoke(btn, restLabel, busyLabel, call) {
+    btn.addEventListener("click", () => {
+      const res = JSON.parse(call());
+      if (res.error) return;
+      const baseline = alertCount;
+      btn.disabled = true;
+      btn.textContent = busyLabel;
+      const started = Date.now();
+      const iv = setInterval(() => {
+        if (alertCount > baseline || Date.now() - started > 12000) {
+          btn.disabled = false;
+          btn.textContent = restLabel;
+          clearInterval(iv);
+        }
+      }, 300);
+    });
+  }
+  provoke($("c-spoof"), "Run a spoof", "Spoof resting…", () => obSpoof());
+  provoke($("c-flood"), "Run a flood", "Flooding…", () => obFlood());
 })();

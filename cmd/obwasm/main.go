@@ -17,7 +17,7 @@
 //
 // JS globals installed: obReset(seedOrSymbol), obSubmit(user,side,type,price,qty),
 // obSnapshot(depth), obStep(n), obSignals(), obAlerts(since), obCancel(id,user),
-// obSpoof(). Each returns a JSON string.
+// obSpoof(), obFlood(), obOpenOrders(user). Each returns a JSON string.
 package main
 
 import (
@@ -50,6 +50,17 @@ const (
 	spoofLifetime = 500  // seq window for "cancelled soon after placement"
 	spoofSteps    = 3    // auto-cancel this many steps after placement
 	spoofUser     = "spoofer"
+
+	// The flood: a burst of far-from-touch IOC placements that never rest and
+	// never fill — quote stuffing's signature, and exactly what an
+	// order-to-trade ratio scores. Tuned so the burst trips the detector in one
+	// press while fifty noise identities, each placing a handful of orders per
+	// window and trading a third of them, never do.
+	floodOrders   = 30
+	floodUser     = "flooder"
+	otrWindow     = 600 // event seqs
+	otrMinOrders  = 25
+	otrMaxRatio   = 15.0
 )
 
 // console is the whole market: the engine, the agents that trade against it,
@@ -96,6 +107,9 @@ func newConsole(symbol string, seed int64) *console {
 			surveillance.NewSpoofDetector(surveillance.SpoofConfig{
 				MinSize: spoofMinSize, MaxLifetime: spoofLifetime,
 			}),
+			surveillance.NewOTRDetector(surveillance.OTRConfig{
+				Window: otrWindow, MinOrders: otrMinOrders, MaxRatio: otrMaxRatio,
+			}),
 		),
 	}
 }
@@ -110,6 +124,8 @@ func main() {
 	js.Global().Set("obAlerts", js.FuncOf(alertsOut))
 	js.Global().Set("obCancel", js.FuncOf(cancel))
 	js.Global().Set("obSpoof", js.FuncOf(spoof))
+	js.Global().Set("obFlood", js.FuncOf(flood))
+	js.Global().Set("obOpenOrders", js.FuncOf(openOrders))
 	select {} // keep the Go runtime alive for callbacks
 }
 
@@ -258,6 +274,57 @@ func stepN(_ js.Value, args []js.Value) any {
 	return toJSON(stepOut{Step: c.step, Trades: trades, Alerts: len(c.monitor.Alerts())})
 }
 
+// flood() — the quote-stuffing provocation: a burst of tiny IOC orders priced
+// where they can never trade. None rests (IOC), none fills, every placement is
+// observed — and the OTR detector, scoring placements per fill, names the
+// account. As with spoof(), nothing here talks to the detector; it only trades.
+func flood(_ js.Value, _ []js.Value) any {
+	snap := c.engine.Snapshot(1)
+	if len(snap.Bids) == 0 {
+		return errJSON("no book to flood yet — let the market run a moment")
+	}
+	placed := 0
+	for i := range floodOrders {
+		price := snap.Bids[0].Price - int64(10+i%5)
+		o, err := types.NewOrder(floodUser, c.inst.Symbol, types.SideBuy,
+			types.OrderTypeLimit, price, 100, types.TIFImmediateOrCancel)
+		if err != nil {
+			continue
+		}
+		res := c.engine.Process(o)
+		c.observe(o, res)
+		placed++
+	}
+	return toJSON(map[string]any{"ok": true, "user": floodUser, "placed": placed})
+}
+
+type openOrderOut struct {
+	ID    int64  `json:"id"`
+	Side  string `json:"side"`
+	Price string `json:"price"`
+	Qty   string `json:"qty"`
+}
+
+// openOrders(user) — the user's resting orders, so the page can show them,
+// mark their price levels on the ladder, and cancel them by id.
+func openOrders(_ js.Value, args []js.Value) any {
+	user := "you"
+	if len(args) > 0 && args[0].Type() == js.TypeString {
+		user = args[0].String()
+	}
+	orders := c.engine.OpenOrdersFor(user)
+	out := make([]openOrderOut, 0, len(orders))
+	for _, o := range orders {
+		out = append(out, openOrderOut{
+			ID:    o.ID,
+			Side:  string(o.Side),
+			Price: c.inst.TicksToPrice(o.Price).String(),
+			Qty:   c.inst.LotsToQty(o.RemainingQty).String(),
+		})
+	}
+	return toJSON(map[string]any{"orders": out})
+}
+
 type lambdaOut struct {
 	Lambda float64 `json:"lambda"` // ticks per lot of net aggressive flow
 	R2     float64 `json:"r2"`
@@ -266,6 +333,7 @@ type lambdaOut struct {
 
 type signalsJSON struct {
 	Step          int       `json:"step"`
+	Digest        string    `json:"digest"` // EngineSnapshot.Digest, first 12 hex
 	Mid           float64   `json:"mid"`
 	Spread        float64   `json:"spread"`
 	Last          float64   `json:"last"`
@@ -282,6 +350,7 @@ func signalsOut(_ js.Value, _ []js.Value) any {
 	snap := c.engine.Snapshot(bookDepth)
 	out := signalsJSON{
 		Step:          c.step,
+		Digest:        c.engine.TakeSnapshot().Digest()[:12],
 		OFI:           c.ofi.Cumulative() / 1000, // milli lots → units
 		CVD:           float64(c.cvd.Value()) / 1000,
 		Imbalance:     signals.DepthImbalance(snap, 5),

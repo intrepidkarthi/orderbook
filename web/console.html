@@ -117,6 +117,22 @@
     .fineprint code { font-size: .9em; }
     .boot { padding: 60px 20px; text-align: center; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
     .note { padding: 0 14px 10px; color: var(--muted); font-size: 11px; }
+    .trade { padding: 10px 14px 6px; }
+    .trow2 { display: flex; gap: 8px; margin-bottom: 8px; }
+    .trow2 .cinp { flex: 1; min-width: 0; }
+    .trow2 .cbtn { flex: 1; padding: 5px 2px; font-size: 12px; white-space: nowrap; }
+    #t-err:empty { display: none; }
+    #t-err { color: var(--ask); }
+    .own { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; padding: 4px 0 8px; }
+    .orow { display: flex; gap: 8px; align-items: baseline; padding: 2.5px 14px; }
+    .orow .oside { width: 2.6em; color: var(--muted); }
+    .orow .oq { color: var(--muted); }
+    .orow .ox { margin-left: auto; background: none; border: none; color: var(--muted); cursor: pointer; font: inherit; padding: 0 4px; }
+    .orow .ox:hover { color: var(--ask); }
+    .orow .ox:focus-visible { outline: 2px solid var(--link); }
+    .lrow .own-dot { position: relative; color: var(--link); margin-right: 5px; font-size: 10px; }
+    .trow.big .px, .trow.big .qy { font-weight: 700; }
+    .mkt-bar #mv-digest { letter-spacing: 0; }
   </style>
 </head>
 <body>
@@ -141,6 +157,7 @@
         <span class="kv">spread<b id="mv-spread">—</b></span>
         <span class="kv">last<b id="mv-last">—</b></span>
         <span class="kv">step<b id="mv-step">0</b></span>
+        <span class="kv" title="matching.EngineSnapshot.Digest — same seed, same steps ⇒ same digest, on any machine">digest<b id="mv-digest">—</b></span>
         <div class="mkt-controls">
           <button id="c-run" class="cbtn">Pause</button>
           <select id="c-speed" class="cinp" aria-label="Simulation speed">
@@ -152,20 +169,45 @@
           <input id="c-seed" class="cinp" type="number" value="1" />
           <button id="c-reset" class="cbtn">Reset</button>
           <span class="sep"></span>
-          <button id="c-buy" class="cbtn">Buy 1.0 mkt</button>
-          <button id="c-sell" class="cbtn">Sell 1.0 mkt</button>
           <button id="c-spoof" class="cbtn warn">Run a spoof</button>
+          <button id="c-flood" class="cbtn warn">Run a flood</button>
         </div>
       </div>
 
       <div class="con-grid">
-        <section class="panel">
-          <div class="panel-head">
-            <p class="eyebrow">Tape</p>
-            <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/types/trade.go">MatchResult.Trades</a>
-          </div>
-          <div id="tape" class="tape"><div class="tape-empty">No prints yet.</div></div>
-        </section>
+        <div class="tiles">
+          <section class="panel">
+            <div class="panel-head">
+              <p class="eyebrow">Trade as “you”</p>
+              <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/matching/engine.go">engine.Process(order)</a>
+            </div>
+            <form id="trade-form" class="trade">
+              <div class="trow2">
+                <select id="t-side" class="cinp" aria-label="Side"><option value="BUY">Buy</option><option value="SELL">Sell</option></select>
+                <input id="t-price" class="cinp" inputmode="decimal" placeholder="price" aria-label="Limit price" />
+                <input id="t-qty" class="cinp" inputmode="decimal" value="1.0" aria-label="Quantity" />
+              </div>
+              <div class="trow2">
+                <button type="submit" class="cbtn">Place limit</button>
+                <button type="button" id="c-buy" class="cbtn">Buy mkt</button>
+                <button type="button" id="c-sell" class="cbtn">Sell mkt</button>
+              </div>
+              <div id="t-err" class="note" role="alert"></div>
+            </form>
+            <div class="panel-head">
+              <p class="eyebrow">Your resting orders</p>
+              <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/matching/engine.go">engine.OpenOrdersFor("you")</a>
+            </div>
+            <div id="own" class="own"><div class="tape-empty">Nothing resting. A limit order away from the touch will sit in the book — marked ● on the ladder.</div></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <p class="eyebrow">Tape</p>
+              <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/types/trade.go">MatchResult.Trades</a>
+            </div>
+            <div id="tape" class="tape"><div class="tape-empty">No prints yet.</div></div>
+          </section>
+        </div>
 
         <section class="panel">
           <div class="panel-head">
@@ -182,7 +224,7 @@
               <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/orderbook/orderbook.go">Snapshot.Mid</a>
               <span class="panel-cur" id="cur-mid">—</span>
             </div>
-            <canvas id="sp-mid" class="spark"></canvas>
+            <canvas id="sp-mid" class="spark" role="img" aria-label="Mid price history"></canvas>
           </section>
           <section class="panel">
             <div class="panel-head">
@@ -190,7 +232,7 @@
               <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/signals/ofi.go">signals.OFI.Observe(snap)</a>
               <span class="panel-cur" id="cur-ofi">—</span>
             </div>
-            <canvas id="sp-ofi" class="spark"></canvas>
+            <canvas id="sp-ofi" class="spark" role="img" aria-label="Cumulative order-flow imbalance history"></canvas>
             <div class="note">contemporaneous, not predictive — <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/research/ofi.md">the study</a></div>
           </section>
           <section class="panel">
@@ -199,7 +241,7 @@
               <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/signals/flow.go">signals.CVD.Observe(trades)</a>
               <span class="panel-cur" id="cur-cvd">—</span>
             </div>
-            <canvas id="sp-cvd" class="spark"></canvas>
+            <canvas id="sp-cvd" class="spark" role="img" aria-label="Cumulative volume delta history"></canvas>
           </section>
           <section class="panel">
             <div class="panel-head">
@@ -231,7 +273,7 @@
           <a class="call" href="https://github.com/intrepidkarthi/orderbook/blob/main/pkg/surveillance/surveillance.go">surveillance.Monitor.Observe(event)</a>
           <span class="panel-cur" id="cur-alerts">0 alerts</span>
         </div>
-        <div id="alist" class="alist"><div class="surv-empty">Quiet — the detector is watching every event this page generates. Provoke it: <b>Run a spoof</b> places layered size and pulls it, and the shipping <code>SpoofDetector</code> names the account here.</div></div>
+        <div id="alist" class="alist" aria-live="polite"><div class="surv-empty">Quiet — the detector is watching every event this page generates. Provoke it: <b>Run a spoof</b> places layered size and pulls it, and the shipping <code>SpoofDetector</code> names the account here.</div></div>
       </section>
 
       <div class="fineprint">

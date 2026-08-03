@@ -1,6 +1,6 @@
 # Console — a live market console in the browser
 
-Status: **SPEC + v1 implemented** (`web/console.html`, `cmd/obwasm`) · Author:
+Status: **SPEC + v1.1 implemented** (critic pass: trading panel, digest, OTR/flood, light-theme + narrow-viewport verified) (`web/console.html`, `cmd/obwasm`) · Author:
 Karthikeyan NG · Last updated: 2026-08-03
 
 Companion documents:
@@ -56,13 +56,21 @@ Every panel header carries the producing call. That mapping is the spec:
 | Imbalance | top-5 depth imbalance, signed gauge | `signals.DepthImbalance(snap, 5)` |
 | Kyle λ | rolling price-impact fit, λ and R² | `signals.EstimateLambda(flow, dPrice)` |
 | Surveillance | live alert feed | `surveillance.NewMonitor(...).Observe(ev)` |
-| Controls | run/pause/speed/seed, submit, spoof | `engine.Process`, `engine.Cancel` |
+| Trade as "you" | limit/market entry, resting orders with cancel, ● markers on the ladder | `engine.Process`, `engine.OpenOrdersFor`, `engine.Cancel` |
+| Market bar | mid/spread/last/step and the book digest | `EngineSnapshot.Digest` |
+| Controls | run/pause/speed/seed, spoof, flood | — |
 
-The **spoof button** is the showcase's teeth: it places layered away-from-touch size
-under a throwaway account and cancels it seconds later, and the SpoofDetector names
-that account in the alert feed. The visitor manipulates a market and watches
-surveillance catch it, in a browser tab, with the shipping detector — no mock alert,
-no scripted timeline.
+The **spoof and flood buttons** are the showcase's teeth. Spoof places layered
+away-from-touch size under a throwaway account and cancels it seconds later; the
+SpoofDetector names the account. Flood fires a burst of far-from-touch IOC
+placements that never rest and never fill — quote stuffing's signature — and the
+OTRDetector prints its own arithmetic ("30 orders / 0 fills = OTR 30.0, limit
+15.0"). The visitor manipulates a market and watches surveillance catch it, in a
+browser tab, with the shipping detectors — no mock alert, no scripted timeline.
+
+The **digest in the market bar** makes the determinism claim falsifiable from the
+page: same seed, same number of steps, same `EngineSnapshot.Digest` — on any
+machine, in any browser.
 
 Honesty rules carried over from the research write-ups: the OFI panel says
 *contemporaneous, not predictive* where it shows the signal (the study found a ~540×
