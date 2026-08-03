@@ -241,21 +241,29 @@ rather than allowed to back up into the venue.
 What is not: transport security, secrets management, DoS resistance beyond per-account
 rate limits and bounded queues, and any kind of penetration testing.
 
-### High availability — seams only
+### High availability — seams proven, topology still yours
 
-Deterministic apply, an ordered command log, replay mode and snapshot bootstrap are all
-here, which is what a primary-backup topology needs. The consensus is deliberately not,
-because bundling one forces a wrong answer on everybody — see
-[EXCHANGE-ARCHITECTURE.md](EXCHANGE-ARCHITECTURE.md), including the venues that lost
-quorum getting it wrong.
+Deterministic apply, an ordered command log, replay mode and snapshot bootstrap are
+what a primary-backup topology needs, and they now have the thing this project's
+record says to demand before believing a seam: a consumer.
+[REPLICATION.md](REPLICATION.md) specifies it and `examples/replication` is it — a
+primary shipping its log over TCP, a follower that bootstraps from a snapshot taken
+mid-stream and never stops replaying, and promotion into a live venue. Six drills run
+on every CI pass: books digest-equal to an uninterrupted control, mid-stream
+bootstrap, promotion preserving exactly the applied prefix, the incarnation fence
+refusing a dead primary's cursor, refusals replaying as refusals, and a slow follower
+shed without the matcher waiting.
 
-You will need: a replication mechanism, a tested failover procedure, split-brain
-protection, and a decision about what "committed" means to you.
+Building the consumer promptly found the fifth phantom — the log-tail hook's first
+shape handed subscribers a pointer into state the matcher keeps mutating, a data race
+the recovery tests could never see and the drills' first `-race` run did. That is the
+argument for the whole exercise, stated as a result instead of a thesis.
 
-The seams have also never had a consumer, which on this project's record is the part
-to distrust: [REPLICATION.md](REPLICATION.md) specifies the reference primary-backup
-example and CI drill that would prove them, and names the seam already found missing
-on paper (a public state digest exists only as a test helper).
+Still yours, by design: consensus, split-brain *prevention* (the incarnation fence
+detects, it does not prevent), automatic failover, synchronous replication, and what
+"committed" means to you. The reference picks async shipping with a measured loss
+window and says so — see [EXCHANGE-ARCHITECTURE.md](EXCHANGE-ARCHITECTURE.md) for why
+bundling a consensus would force a wrong answer on everybody.
 
 ### Multi-symbol — partial
 
@@ -306,8 +314,11 @@ In the order that will actually help:
 3. **Put real credentials at the edge.** TLS and digests-at-rest are in the reference
    gateway now; rotation, revocation, expiry and where your secrets actually live are
    not, and the `Authenticator` seam is where your answer goes.
-4. **Decide your HA story and rehearse the failover.** The seams are here; the decision
-   and the drill are yours.
+4. **Decide your HA story and rehearse the failover.** The seams are proven, the
+   reference topology exists and its failover procedure is drilled
+   ([REPLICATION.md](REPLICATION.md), [RUNBOOKS.md](RUNBOOKS.md)); the topology
+   decision, split-brain prevention, and the rehearsal on *your* deployment are still
+   yours.
 5. **Write the runbooks** for: recovery from a torn log, a corrupt snapshot, a stuck
    matching goroutine, a mass cancel that pauses the venue, and a subscriber that has
    fallen off the retention ring.

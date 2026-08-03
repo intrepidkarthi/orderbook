@@ -9,6 +9,28 @@ versions may include breaking changes).
 
 ### Added
 
+- **Replication: the consumer the HA seams never had**
+  ([REPLICATION.md](docs/REPLICATION.md), spec'd before any code existed).
+  `wal.SetOnAppend` is the live tail — each appended record's payload bytes, in
+  log order, under the writer's lock, with CommandLog's obligations.
+  `examples/replication` is the reference primary-backup topology: a primary
+  shipping its log over TCP through bounded per-follower buffers (a follower that
+  falls behind is cut, never waited on — a skipped entry would be a silent gap,
+  and a book missing one command is not behind, it is different), a follower that
+  bootstraps from a snapshot taken mid-stream and never stops replaying, and
+  promotion into a live venue with a fresh log, a base snapshot, and a new
+  incarnation as the client fence. Drills D1–D6 run on every CI pass, each
+  verified to fail against deliberately broken code. RUNBOOKS.md gains the
+  failover procedure; PRODUCTION-READINESS moves high availability from *seams
+  only* to *seams proven — topology still yours*, and not one word further.
+
+  What building it found, recorded in the spec's §8: the four documented seams
+  held — including mid-stream bootstrap, which no recovery test covered — and the
+  fifth phantom was in the *new* seam. The hook's first shape handed subscribers
+  the `wal.Entry`, which holds a pointer to the order the engine keeps mutating;
+  every drill passed and the first `-race` run did not. The hook now hands the
+  record's payload bytes, making the wire byte-identical to the log.
+
 - **`matching.EngineSnapshot.Digest`** — the crash-recovery suite's book
   fingerprint, promoted from a test helper to a contract
   ([REPLICATION.md](docs/REPLICATION.md) deliverable #1). Covers everything

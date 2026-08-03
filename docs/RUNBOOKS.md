@@ -247,16 +247,57 @@ back it.
 
 ---
 
+## Failover to a warm follower
+
+> `cmd/obgw` does not ship replication wiring. This procedure is written against the
+> reference primary-backup topology in `examples/replication` (specified in
+> [REPLICATION.md](REPLICATION.md)) and applies to anything built on the same seams.
+> Its drills live in `examples/replication/main_test.go` rather than
+> `cmd/obgw/drills_test.go`.
+
+**Signal.** Yours to define, and that is the first line on purpose: promotion is a
+manual decision, because automatic failover is a liveness-versus-safety trade this
+library refuses to make for you. What you will actually see: the primary's `/readyz`
+dark or its host gone, and the follower's applied sequence no longer advancing because
+the feed died with the primary.
+
+**What the code has done.** The follower holds a verified prefix of the primary's log:
+gapless by construction — it treats a gap as terminal rather than something later
+entries repair — and digest-equal (`EngineSnapshot.Digest`) to an engine fed the same
+commands. The distance between the primary's last written sequence and the follower's
+applied sequence is the loss window, and it was on a gauge before the failure, not
+discovered after it.
+
+**What to do.**
+
+1. Confirm the primary is actually gone, not partitioned. This procedure does not
+   fence a primary that still runs — see *what makes it worse*.
+2. Record the follower's applied sequence. It is the promoted venue's birth
+   certificate: every command at or below it is preserved, everything after it is the
+   loss window clients will reconcile.
+3. Promote — stop the tail, write the promoted book as the new venue's base snapshot,
+   open a fresh log, hand the engine to a Runner (`Follower.Promote` in the
+   reference). A follower with a known defect refuses promotion; do not override it —
+   serving a book known to be wrong is strictly worse than serving nothing.
+4. Mint a **new incarnation id** for the new venue's Registry. This is the client
+   fence: sequence numbers are scoped to one incarnation, so a cursor from the dead
+   primary is refused rather than served different content under numbers the client
+   believes it already has.
+5. Repoint clients. They re-login and reconcile in-flight orders with Query — the same
+   reconciliation an ordinary reconnect already requires.
+
+**What makes it worse.** Reusing the old incarnation id, which turns the fence into
+fiction. Promoting while the old primary may still be alive: two live incarnations are
+*detectable* by clients but nothing here *prevents* them — split-brain prevention is
+consensus, and it is yours by design ([REPLICATION.md](REPLICATION.md) §5, §8). And
+skipping step 2, because a loss window nobody wrote down is a dispute with every
+client whose order fell inside it.
+
+---
+
 ## What has no runbook
 
 Named because a gap you know about is worth more than a page that pretends otherwise.
-
-- **Failover.** There is no replication and no failover procedure. The topology
-  decision stays yours by design — see
-  [EXCHANGE-ARCHITECTURE.md](EXCHANGE-ARCHITECTURE.md) — but the reference
-  primary-backup example that would prove the seams and produce this runbook entry is
-  now specified in [REPLICATION.md](REPLICATION.md), including the drill that replaces
-  this bullet.
 - **A trade printed in error.** There is no bust or correction path. Once a trade is
   published there is no way to amend it, and that interacts badly with an append-only
   event stream. Design it before you need it.

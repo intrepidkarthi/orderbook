@@ -1,7 +1,8 @@
 # Replication — Proving the HA Seams
 
-Status: **SPEC — no code exists.** This document precedes the implementation on
-purpose · Author: Karthikeyan NG · Last updated: 2026-08-02
+Status: **implemented** — `examples/replication` + drills D1–D6 in CI; written as a
+spec before any code existed, and §8 records what building it actually found ·
+Author: Karthikeyan NG · Last updated: 2026-08-03
 
 Companion documents:
 - [`PRODUCTION-READINESS.md`](PRODUCTION-READINESS.md) — where "high availability:
@@ -163,16 +164,39 @@ deliberately broken code before it counts:
 
 1. ✅ `matching`: a public, documented **state digest** (§2.5) —
    `EngineSnapshot.Digest`.
-2. `examples/replication` (or `cmd/obha`): primary-side log shipping, follower
-   tail, promotion — small enough to read in one sitting, like
-   `examples/gateway`.
-3. A **failover runbook entry** in [RUNBOOKS.md](RUNBOOKS.md), replacing the "no
-   failover procedure" line with the §5 procedure.
-4. **Drills D1–D6** in CI.
-5. A PRODUCTION-READINESS edit moving "High availability" from *seams only* to
-   *seams proven — topology still yours*, and not one word further.
+2. ✅ `examples/replication`: primary-side log shipping (`wal.SetOnAppend` → a
+   bounded per-follower buffer), follower tail, promotion — three files, read
+   in one sitting.
+3. ✅ The **failover runbook entry** in [RUNBOOKS.md](RUNBOOKS.md) — the §5
+   procedure, replacing the "no failover procedure" gap line.
+4. ✅ **Drills D1–D6** in CI (`examples/replication/main_test.go`), each
+   verified to fail against deliberately broken code.
+5. ✅ The PRODUCTION-READINESS edit: "High availability" is *seams proven —
+   topology still yours*, and not one word further.
 
-## 8. Non-goals, so nobody discovers them as surprises
+## 8. What building it found — prediction versus result
+
+§1 argued the seams were the largest unconsumed claim and predicted the fifth
+phantom, and §6 even named D2 (mid-stream bootstrap) as its most likely home. The
+prediction was right in kind and wrong in place, which is worth recording
+precisely because that is how these findings usually go:
+
+- **The four seams held.** Deterministic apply, the ordered log, replay mode and
+  snapshot bootstrap composed exactly as documented. Mid-stream bootstrap — the
+  case no recovery test covered — worked on the first run and is now pinned by D2.
+- **The fifth phantom was in the NEW seam, not the old ones.** The log-tail hook's
+  first shape handed subscribers the `wal.Entry` — which holds a pointer to the
+  order the engine keeps mutating as it fills. Every drill passed; the first
+  `-race` run did not. The recovery tests could never have seen it, because
+  recovery replays after the engine is done. The fix (hand the record's payload
+  bytes, already produced to write the file) made the wire byte-identical to the
+  log and the API impossible to misuse in that particular way.
+
+One drill exists that the spec did not ask for: promotion refuses a book with a
+known defect (a detected gap), because serving a book known to be wrong is
+strictly worse than serving nothing.
+
+## 9. Non-goals, so nobody discovers them as surprises
 
 - **No consensus, no quorum, no automatic failover.** The embedder's first job if
   they need split-brain *prevention* rather than detection.
