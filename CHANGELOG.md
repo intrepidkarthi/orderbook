@@ -5,7 +5,12 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
-## [Unreleased]
+## [0.19.0] - 2026-08-03
+
+The showcase release: the library learns to show itself — a live console running
+the engine, signals and surveillance in the browser, and an operator dashboard
+that is an ordinary subscriber of the venue's own feed — and stops calling
+itself production-grade, for the reasons below.
 
 ### Changed
 
