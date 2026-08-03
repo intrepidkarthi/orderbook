@@ -6,10 +6,12 @@
 
 <p align="center"><b><a href="https://intrepidkarthi.github.io/orderbook/">▶ Live demo</a></b> — the real engine, compiled to WebAssembly, running in your browser.</p>
 
-A production-grade embeddable matching core in Go, with a demonstrated network
-seam: integer-exact pricing, a zero-allocation match path, a lock-free
-single-writer core, deterministic and machine-checked crash recovery, and a
-reference order-entry gateway that speaks a frozen binary protocol over TCP.
+An embeddable matching core in Go, with a demonstrated network seam:
+integer-exact pricing, a zero-allocation match path, a lock-free single-writer
+core, deterministic and machine-checked crash recovery, and a reference
+order-entry gateway that speaks a frozen binary protocol over TCP. And one
+document most libraries don't have: an honest account of what production takes
+and how far this goes ([docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md)).
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/intrepidkarthi/orderbook.svg)](https://pkg.go.dev/github.com/intrepidkarthi/orderbook)
 [![CI](https://github.com/intrepidkarthi/orderbook/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/intrepidkarthi/orderbook/actions/workflows/ci.yml)
@@ -32,8 +34,12 @@ grounded in a real enforcement case or incident, catalogued in
 reproducible market-microstructure research harness and an interactive
 WebAssembly demo that runs the real engine in the browser.
 
-**Scope.** *Production-grade* describes the core; *embeddable* concedes the venue
-is not here. Both qualifiers are load-bearing.
+**Scope.** *Embeddable* concedes the venue is not here — and no adjective in
+this README claims what only a deployment can prove. Production readiness is a
+property of a deployment, not of code:
+[docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) is the honest
+account of what is solid, what is partial, and what is yours. Nobody runs this
+in production today, and this paragraph will say so until someone does.
 
 What ships: the matching core, durable recovery, an event stream proven to
 reconstruct the book, an operator kill switch, a frozen binary protocol

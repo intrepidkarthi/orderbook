@@ -7,6 +7,30 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Changed
+
+- **"Production-grade" is retired from every header.** The README tagline, the
+  site's hero and section headings, and the docs-page intro no longer carry the
+  adjective, because it fails this project's own tests three ways: the readiness
+  doc's thesis is that production readiness is a property of a deployment, not of
+  code; the claim asserts an outcome nobody has verified (independent review:
+  none; production deployments: zero); and claim-in-the-header,
+  truth-in-the-footnote is the pattern this repository criticizes everywhere
+  else. The headers now carry the verifiable properties — deterministic,
+  integer-exact, drilled — and the README says plainly that nobody runs this in
+  production today, until someone does.
+
+### Fixed
+
+- **The docs page published pre-correction benchmark figures and a stale "latest"
+  version — for twelve releases.** web/docs.html still showed the v0.6.0-era
+  numbers (cancel 253 ns, p999 292 ns, match 352 ns) that v0.13.0/v0.14.0
+  re-measured, and named v0.6.0 as the latest release. Flagged, credit where due,
+  by a knowledge-graph pass over the repository that marked the page's link to
+  the benchmark corrections AMBIGUOUS. Figures now match docs/BENCHMARKS.md, and
+  the hardcoded version references are gone rather than updated — a hand-written
+  "latest" is a claim that goes stale by construction.
+
 ### Added
 
 - **`cmd/obdash` — the operator dashboard** ([CONSOLE-SPEC.md](docs/CONSOLE-SPEC.md)

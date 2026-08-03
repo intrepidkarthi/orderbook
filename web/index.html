@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>orderbook — a fast, embeddable limit order book &amp; matching engine in Go</title>
-  <meta name="description" content="A production-grade central limit order book and matching engine written in Go. Integer-exact (int64), deterministic, every real-world order type, with pre-trade risk and anti-manipulation defenses — and it runs live in your browser via WebAssembly." />
+  <meta name="description" content="A central limit order book and matching engine written in Go. Integer-exact (int64), deterministic, every real-world order type, with pre-trade risk and anti-manipulation defenses — and it runs live in your browser via WebAssembly." />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -25,7 +25,7 @@
 
   <header id="top" class="hero">
     <span class="eyebrow">OPEN SOURCE · GO · MIT</span>
-    <h1>A limit order book &amp; matching engine,<br />built for production — in Go.</h1>
+    <h1>A limit order book &amp; matching engine in Go —<br />deterministic, integer-exact, honest about production.</h1>
     <p class="lede">
       The piece of software at the heart of every exchange: it holds every buy and sell
       order and matches them, fairly and fast. This one is <strong>embeddable</strong>,
@@ -41,7 +41,7 @@
     </div>
     <div class="stat-row">
       <div><b>6&nbsp;ns</b><span>best bid/ask read</span></div>
-      <div><b>~2.8M/s</b><span>match round-trip</span></div>
+      <div><b>~3.0M/s</b><span>match round-trip</span></div>
       <div><b>0</b><span>alloc on the hot path</span></div>
       <div><b>int64</b><span>exact pricing, no floats</span></div>
     </div>
@@ -172,7 +172,7 @@
 
     <!-- PRODUCTION -->
     <section id="production" class="sec">
-      <h2>Why it’s production-grade</h2>
+      <h2>Built to venue standards — and honest about the rest</h2>
       <div class="prod-grid">
         <div class="prod">
           <h3>Money is never a float</h3>
@@ -190,7 +190,7 @@
         <div class="prod">
           <h3>Fast, with real numbers</h3>
           <p>O(1) best bid/ask, O(1) cancel, O(log n) inserts via a map + binary-search price
-          ladder. Measured: <b>6&nbsp;ns</b> top-of-book reads, <b>~2.8M</b> match round-trips/s
+          ladder. Measured: <b>~6&nbsp;ns</b> top-of-book reads, <b>~3.0M</b> match round-trips/s
           per core, and <b>0</b> allocations on the submit/cancel/match hot path. Benchmarks run
           in CI on every push.</p>
         </div>

@@ -40,7 +40,7 @@
     <main class="docs-main">
       <section id="overview">
         <h1>Documentation</h1>
-        <p><code>orderbook</code> is a production-grade Go library for running a central
+        <p><code>orderbook</code> is a deterministic, integer-exact Go library for running a central
         limit order book (CLOB) and matching engine — the core of an exchange, a trading
         simulator, or any system where buyers and sellers meet at a price. It is embeddable,
         uses <b>integer-exact</b> pricing (int64 ticks and lots, never floats), has a
@@ -50,8 +50,7 @@
         <pre class="code"><code>go get github.com/intrepidkarthi/orderbook/pkg/matching</code></pre>
         <p>New to order books? Start with the <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">from-scratch guide</a>.
         For the full API, see <a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">pkg.go.dev</a>;
-        for release history, the <a href="https://github.com/intrepidkarthi/orderbook/blob/main/CHANGELOG.md">changelog</a>
-        (latest: <b>v0.6.0</b>, the market-integrity release).</p>
+        for release history, the <a href="https://github.com/intrepidkarthi/orderbook/blob/main/CHANGELOG.md">changelog</a>.</p>
       </section>
 
       <section id="architecture">
@@ -266,15 +265,15 @@ types      (Order, Trade, iceberg, errors)</code></pre>
         <table class="tbl">
           <thead><tr><th>Operation</th><th>ns/op</th><th>allocs/op</th></tr></thead>
           <tbody>
-            <tr><td>Best bid/ask read</td><td>6.3</td><td>0</td></tr>
-            <tr><td>Cancel (drain)</td><td>253</td><td>0</td></tr>
-            <tr><td>Cancel / replace (MM churn)</td><td>180</td><td>0</td></tr>
-            <tr><td>Match round-trip (<code>Match</code>)</td><td>352</td><td>0</td></tr>
-            <tr><td>Match round-trip (<code>Process</code> wrapper)</td><td>491</td><td>4</td></tr>
+            <tr><td>Best bid/ask read</td><td>5.8</td><td>0</td></tr>
+            <tr><td>Cancel (drain)</td><td>273</td><td>~0</td></tr>
+            <tr><td>Cancel / replace (MM churn)</td><td>172</td><td>~0</td></tr>
+            <tr><td>Match round-trip (<code>Match</code>)</td><td>329</td><td>0</td></tr>
+            <tr><td>Match round-trip (<code>Process</code> wrapper)</td><td>419</td><td>4</td></tr>
           </tbody>
         </table>
         <p><b>Tail latency</b> — a ~90%-cancel / 10%-new mix against a warm book:
-        <b>p50 83 ns · p99 167 ns · p999 292 ns</b>, 0 allocs/op. The zero-alloc
+        <b>p50 83 ns · p99 167 ns · p999 250 ns</b>, 0 allocs/op. The zero-alloc
         <code>Match(order, buf)</code> path appends value trades into a caller buffer;
         <code>Process</code> is the ergonomic wrapper (4 allocs) for when convenience beats the
         last nanosecond.</p>
@@ -294,7 +293,7 @@ types      (Order, Trade, iceberg, errors)</code></pre>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/EXCHANGE-ARCHITECTURE.md">EXCHANGE-ARCHITECTURE.md</a></td><td>How real venues (MetaTrader, Binance, Coinbase, Nasdaq/LMAX/CME/IEX, dYdX/Hyperliquid) implement matching, and the incidents that shaped this design.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCHMARKS.md">BENCHMARKS.md</a></td><td>Performance results, methodology, and how to reproduce.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">LEARN.md</a></td><td>Order books and market making from first principles.</td></tr>
-            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/CHANGELOG.md">CHANGELOG.md</a></td><td>Release history (v0.1.0 → v0.6.0) with breaking-change notes.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/CHANGELOG.md">CHANGELOG.md</a></td><td>Release history with breaking-change notes.</td></tr>
             <tr><td><a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">pkg.go.dev</a></td><td>Generated API reference for every package, with runnable examples.</td></tr>
           </tbody>
         </table>
