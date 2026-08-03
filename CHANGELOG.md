@@ -5,7 +5,10 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
-## [Unreleased]
+## [0.18.0] - 2026-08-03
+
+The replication release: the HA seams get the consumer that would have noticed if
+they were phantoms, and the edge stops holding plaintext.
 
 ### Added
 
