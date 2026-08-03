@@ -146,6 +146,32 @@ type Writer struct {
 	// that file's framing rather than switching mid-file, which would leave a log
 	// no reader could parse. Rotate to get checksums on an old file.
 	checksummed bool
+	onAppend    func(Entry)
+}
+
+// SetOnAppend registers fn to be called after every successful append, with the
+// entry exactly as recorded — sequence assigned, in log order. It is the live
+// tail: a log shipper subscribes here and sees the same stream a reader of the
+// file would, without polling the file (see docs/REPLICATION.md).
+//
+// The obligations mirror CommandLog's, because fn runs on the appending
+// goroutine — the matching goroutine when this Writer is a Runner's command log
+// — and under the Writer's lock, which is what makes "in log order" a guarantee
+// rather than a probability. So fn must not block, and must not call back into
+// this Writer; hand the entry to a buffered channel and do the real work on the
+// other side. A shipper that cannot keep up must shed its consumer, never slow
+// this call.
+//
+// The entry is not necessarily durable when fn sees it: append precedes Sync.
+// A consumer that must never run ahead of the primary's disk should key its
+// shipping on its own Sync cadence rather than on this hook.
+//
+// A nil fn clears the hook. Not safe to call concurrently with appends — set it
+// before the Writer is handed to a Runner.
+func (w *Writer) SetOnAppend(fn func(Entry)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onAppend = fn
 }
 
 // Open opens (creating if needed) a WAL file for appending, recovering the last
@@ -243,6 +269,9 @@ func (w *Writer) append(e Entry) (int64, error) {
 	}
 	if _, err := w.w.Write(b); err != nil {
 		return 0, err
+	}
+	if w.onAppend != nil {
+		w.onAppend(e)
 	}
 	return w.seq, nil
 }
