@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -9,7 +10,10 @@ import (
 
 // TestOnAppendSeesTheFileStream — the hook's promise is that a subscriber sees
 // the same stream a reader of the file would: same entries, same order, same
-// sequence numbers. Asserted by comparing the hook's capture against ReadAll.
+// sequence numbers. Asserted by decoding the hook's payload bytes and comparing
+// against ReadAll. The hook hands bytes rather than an Entry because an Entry
+// holds pointers into live engine state; the decode below is what a real
+// subscriber does, where the engine is not.
 func TestOnAppendSeesTheFileStream(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wal.log")
 	w, err := Open(path)
@@ -18,7 +22,16 @@ func TestOnAppendSeesTheFileStream(t *testing.T) {
 	}
 
 	var hooked []Entry
-	w.SetOnAppend(func(e Entry) { hooked = append(hooked, e) })
+	var seqs []int64
+	w.SetOnAppend(func(seq int64, record []byte) {
+		var e Entry
+		if err := json.Unmarshal(record, &e); err != nil {
+			t.Errorf("hook payload is not a record: %v", err)
+			return
+		}
+		hooked = append(hooked, e)
+		seqs = append(seqs, seq)
+	})
 
 	if _, err := w.AppendSubmit(newOrder(t, "alice", types.SideBuy, 100, 5)); err != nil {
 		t.Fatalf("AppendSubmit: %v", err)
@@ -55,8 +68,8 @@ func TestOnAppendSeesTheFileStream(t *testing.T) {
 			t.Errorf("entry %d: file (seq=%d kind=%d) != hook (seq=%d kind=%d)",
 				i, onDisk[i].Seq, onDisk[i].Kind, hooked[i].Seq, hooked[i].Kind)
 		}
-		if int64(i+1) != hooked[i].Seq {
-			t.Errorf("hook entry %d has seq %d; the stream must be gapless from 1", i, hooked[i].Seq)
+		if int64(i+1) != hooked[i].Seq || seqs[i] != hooked[i].Seq {
+			t.Errorf("entry %d: hook seq arg %d, payload seq %d; the stream must be gapless from 1", i, seqs[i], hooked[i].Seq)
 		}
 	}
 }
@@ -73,7 +86,7 @@ func TestOnAppendIsNotCalledForARefusedAppend(t *testing.T) {
 	defer w.Close()
 
 	calls := 0
-	w.SetOnAppend(func(Entry) { calls++ })
+	w.SetOnAppend(func(int64, []byte) { calls++ })
 
 	// An order whose UserID is grown past MaxRecordBytes cannot be marshalled
 	// into a legal record; the append is refused.
@@ -101,7 +114,7 @@ func TestOnAppendNilClearsAndDefaultIsSilent(t *testing.T) {
 		t.Fatalf("append with no hook: %v", err)
 	}
 	calls := 0
-	w.SetOnAppend(func(Entry) { calls++ })
+	w.SetOnAppend(func(int64, []byte) { calls++ })
 	if _, err := w.AppendCancel(2, "alice"); err != nil {
 		t.Fatalf("append with hook: %v", err)
 	}

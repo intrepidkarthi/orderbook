@@ -78,9 +78,14 @@ func (f *Follower) tail() {
 			f.engine = eng
 			f.applied = fr.Snapshot.WALSeq
 			f.mu.Unlock()
-		case fr.Entry != nil:
+		case fr.Record != nil:
+			var e wal.Entry
+			if err := json.Unmarshal(fr.Record, &e); err != nil {
+				f.fail(fmt.Errorf("undecodable record: %w", err))
+				return
+			}
 			f.mu.Lock()
-			switch e := *fr.Entry; {
+			switch {
 			case f.engine == nil:
 				f.mu.Unlock()
 				f.fail(errors.New("entry before snapshot"))

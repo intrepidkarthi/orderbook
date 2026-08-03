@@ -16,9 +16,13 @@ import (
 const shipBuffer = 1024
 
 // frame is one wire message, newline-delimited JSON. Exactly one field is set.
+// Record carries a log record's payload bytes verbatim — the same bytes the
+// primary's file holds — embedded as raw JSON rather than re-encoded, because
+// the hook hands bytes precisely so no goroutine but the matcher ever touches
+// the live entry (see wal.SetOnAppend).
 type frame struct {
 	Snapshot *matching.EngineSnapshot `json:"snapshot,omitempty"`
-	Entry    *wal.Entry               `json:"entry,omitempty"`
+	Record   json.RawMessage          `json:"record,omitempty"`
 }
 
 // hello is the follower's opening message. Have is the highest log sequence it
@@ -38,7 +42,7 @@ type Primary struct {
 	ln      net.Listener
 
 	mu   sync.Mutex
-	subs map[chan wal.Entry]struct{}
+	subs map[chan []byte]struct{}
 
 	shed atomic.Int64
 	wg   sync.WaitGroup
@@ -51,7 +55,7 @@ func NewPrimary(symbol, walPath, addr string) (*Primary, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Primary{wal: w, walPath: walPath, subs: map[chan wal.Entry]struct{}{}}
+	p := &Primary{wal: w, walPath: walPath, subs: map[chan []byte]struct{}{}}
 	w.SetOnAppend(p.fanout)
 	p.Runner = matching.NewRunner(matching.RunnerConfig{Engine: matching.DefaultConfig(symbol), Log: w})
 
@@ -86,11 +90,11 @@ func (p *Primary) Shed() int64 { return p.shed.Load() }
 // skipped entry would be a silent gap in that follower's stream, and a follower
 // with a gap has a different book that no later entry repairs. A cut follower
 // knows it was cut and reconnects with its position.
-func (p *Primary) fanout(e wal.Entry) {
+func (p *Primary) fanout(_ int64, record []byte) {
 	p.mu.Lock()
 	for ch := range p.subs {
 		select {
-		case ch <- e:
+		case ch <- record:
 		default:
 			delete(p.subs, ch)
 			close(ch)
@@ -100,7 +104,7 @@ func (p *Primary) fanout(e wal.Entry) {
 	p.mu.Unlock()
 }
 
-func (p *Primary) unsubscribe(ch chan wal.Entry) {
+func (p *Primary) unsubscribe(ch chan []byte) {
 	p.mu.Lock()
 	if _, ok := p.subs[ch]; ok {
 		delete(p.subs, ch)
@@ -138,7 +142,7 @@ func (p *Primary) serve(conn net.Conn) {
 		return
 	}
 
-	ch := make(chan wal.Entry, shipBuffer)
+	ch := make(chan []byte, shipBuffer)
 	p.mu.Lock()
 	p.subs[ch] = struct{}{}
 	p.mu.Unlock()
@@ -167,14 +171,18 @@ func (p *Primary) serve(conn net.Conn) {
 			if entries[i].Seq <= h.Have {
 				continue
 			}
-			if enc.Encode(frame{Entry: &entries[i]}) != nil {
+			// These entries are private decodes off the disk — nothing mutates
+			// them — so re-encoding here is safe in a way it is not for a live
+			// entry.
+			b, err := json.Marshal(&entries[i])
+			if err != nil || enc.Encode(frame{Record: b}) != nil {
 				return
 			}
 		}
 	}
 
-	for e := range ch {
-		if enc.Encode(frame{Entry: &e}) != nil {
+	for rec := range ch {
+		if enc.Encode(frame{Record: rec}) != nil {
 			return
 		}
 	}

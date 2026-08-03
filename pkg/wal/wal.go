@@ -146,29 +146,36 @@ type Writer struct {
 	// that file's framing rather than switching mid-file, which would leave a log
 	// no reader could parse. Rotate to get checksums on an old file.
 	checksummed bool
-	onAppend    func(Entry)
+	onAppend    func(seq int64, record []byte)
 }
 
 // SetOnAppend registers fn to be called after every successful append, with the
-// entry exactly as recorded — sequence assigned, in log order. It is the live
-// tail: a log shipper subscribes here and sees the same stream a reader of the
-// file would, without polling the file (see docs/REPLICATION.md).
+// record's payload bytes exactly as written — sequence assigned, in log order.
+// It is the live tail: a log shipper subscribes here and sees the same stream a
+// reader of the file would, without polling the file (see docs/REPLICATION.md).
 //
-// The obligations mirror CommandLog's, because fn runs on the appending
-// goroutine — the matching goroutine when this Writer is a Runner's command log
-// — and under the Writer's lock, which is what makes "in log order" a guarantee
-// rather than a probability. So fn must not block, and must not call back into
-// this Writer; hand the entry to a buffered channel and do the real work on the
-// other side. A shipper that cannot keep up must shed its consumer, never slow
-// this call.
+// Bytes, not an Entry, and the -race run of the replication drills is why. An
+// Entry holds pointers into live engine state — the order the engine is about
+// to mutate as it fills — so an Entry handed to another goroutine is a data
+// race wearing a convenience API. The payload bytes were already produced to
+// write the record and are never touched again: fn may retain the slice, hand
+// it to another goroutine, or write it to a wire verbatim, and a subscriber
+// that wants the Entry back decodes it where the engine is not.
 //
-// The entry is not necessarily durable when fn sees it: append precedes Sync.
+// The remaining obligations mirror CommandLog's, because fn runs on the
+// appending goroutine — the matching goroutine when this Writer is a Runner's
+// command log — and under the Writer's lock, which is what makes "in log
+// order" a guarantee rather than a probability. fn must not block, and must
+// not call back into this Writer; a shipper that cannot keep up must shed its
+// consumer, never slow this call.
+//
+// The record is not necessarily durable when fn sees it: append precedes Sync.
 // A consumer that must never run ahead of the primary's disk should key its
 // shipping on its own Sync cadence rather than on this hook.
 //
 // A nil fn clears the hook. Not safe to call concurrently with appends — set it
 // before the Writer is handed to a Runner.
-func (w *Writer) SetOnAppend(fn func(Entry)) {
+func (w *Writer) SetOnAppend(fn func(seq int64, record []byte)) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.onAppend = fn
@@ -271,7 +278,7 @@ func (w *Writer) append(e Entry) (int64, error) {
 		return 0, err
 	}
 	if w.onAppend != nil {
-		w.onAppend(e)
+		w.onAppend(w.seq, b)
 	}
 	return w.seq, nil
 }
