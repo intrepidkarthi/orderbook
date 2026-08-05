@@ -58,6 +58,12 @@ type Config struct {
 	// CheckpointEvery bounds how much log a restart must replay. Zero disables
 	// checkpointing, which is legal but means replay grows without limit.
 	CheckpointEvery time.Duration
+	// SyncEveryCommand fsyncs each command before it is applied, so durability
+	// precedes acknowledgement. Off by default: it puts a disk write in the
+	// matching path and costs roughly 210× the group-committed default. Leaving
+	// it off means an acknowledged order can be lost if the process dies inside
+	// the 20ms sync window — see syncingLog and pkg/wal's package comment.
+	SyncEveryCommand bool
 	// MDAddr, when set, starts a market-data listener on its own port. Order entry
 	// is authenticated and per-account; market data is anonymous and identical for
 	// everyone. Sharing one port would put an unauthenticated subscriber on the same
@@ -220,7 +226,11 @@ func NewServer(cfg Config) (*Server, error) {
 	// segfault on the first run with durability disabled.
 	rc := matching.RunnerConfig{Engine: eng, QueueSize: 8192}
 	if w != nil {
-		rc.Log = w
+		if cfg.SyncEveryCommand {
+			rc.Log = &syncingLog{w: w}
+		} else {
+			rc.Log = w
+		}
 	}
 	// recovered is nil without a WAL, in which case NewRunnerFor builds a fresh
 	// engine from the config. With one, the recovered book is what we serve —
@@ -320,7 +330,12 @@ func (s *Server) Serve() error {
 		}()
 	}
 	if s.wal != nil {
-		go s.syncLoop()
+		// The group-commit loop is what creates the durability window. In
+		// per-command mode every record is already on disk before it was
+		// applied, so the ticker would only re-sync a synced file.
+		if !s.cfg.SyncEveryCommand {
+			go s.syncLoop()
+		}
 		if s.cfg.CheckpointEvery > 0 && s.cfg.SnapshotPath != "" {
 			go s.checkpointLoop()
 		}

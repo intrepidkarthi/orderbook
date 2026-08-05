@@ -40,6 +40,17 @@
 // The admin listener is a separate port on purpose: it is for whoever runs the venue,
 // and it should be reachable from a monitoring network that participants cannot reach
 // at all.
+//
+// # Durability window
+//
+// Commands are journalled before they are applied, so the log is never missing
+// something the book did. That is ordered against APPLY, not against the
+// acknowledgement a client receives: by default the log is group-committed every
+// 20ms, so a process that dies inside that window can lose an order it already
+// acknowledged. -sync-every-command closes the window by fsyncing each command
+// before applying it, which is correct and roughly 210× more expensive because
+// the fsync lands on the matching goroutine. Pick one deliberately; the default
+// is throughput, and it is stated rather than hidden.
 package main
 
 import (
@@ -77,6 +88,7 @@ func main() {
 		walPath      = flag.String("wal", "", "write-ahead log path (empty = no durability)")
 		snapPath     = flag.String("snapshot", "", "snapshot path, used with -wal to bound restart time")
 		ckpt         = flag.Duration("checkpoint", 30*time.Second, "checkpoint interval")
+		syncEvery    = flag.Bool("sync-every-command", false, "fsync each command before applying it, so durability precedes acknowledgement (correct, and ~210x slower than the 20ms group commit)")
 	)
 	flag.Parse()
 
@@ -99,17 +111,18 @@ func main() {
 	}
 
 	cfg := Config{
-		Addr:            *addr,
-		MDAddr:          *mdAddr,
-		AdminAddr:       *adminAddr,
-		Symbol:          *symbol,
-		Auth:            auth,
-		TLS:             tlsCfg,
-		RatePerSec:      *rate,
-		Burst:           *burst,
-		WALPath:         *walPath,
-		SnapshotPath:    *snapPath,
-		CheckpointEvery: *ckpt,
+		Addr:             *addr,
+		MDAddr:           *mdAddr,
+		AdminAddr:        *adminAddr,
+		Symbol:           *symbol,
+		Auth:             auth,
+		TLS:              tlsCfg,
+		RatePerSec:       *rate,
+		Burst:            *burst,
+		WALPath:          *walPath,
+		SnapshotPath:     *snapPath,
+		CheckpointEvery:  *ckpt,
+		SyncEveryCommand: *syncEvery,
 	}
 	if auth.Count() == 0 {
 		log.Println("obgw: no accounts configured — every login will be rejected")
@@ -122,6 +135,8 @@ func main() {
 	}
 	if cfg.WALPath == "" {
 		log.Println("obgw: no -wal path — running WITHOUT durability; a crash loses the book")
+	} else if !cfg.SyncEveryCommand {
+		log.Println("obgw: group-committing every 20ms — an acknowledged order can be lost if the process dies inside that window; -sync-every-command closes it at ~210x the cost")
 	}
 	if cfg.AdminAddr == "" {
 		log.Println("obgw: no -admin address — running unobserved; nothing reports queue depth, book size or a stalled matcher")

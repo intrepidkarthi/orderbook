@@ -12,14 +12,35 @@
 // is ~174ms against ~21ms for a 10,000-record tail. Restart time is therefore
 // O(book) + O(tail), dominated by the first term. See docs/BENCHMARKS.md.
 //
-// Records are length-prefixed, CRC-32C-checksummed JSON, written write-ahead
-// (before the engine applies the command) so no acknowledged command is lost.
+// Records are length-prefixed, CRC-32C-checksummed JSON, written write-ahead:
+// appended before the engine applies the command, so the log is never missing
+// something the book did and recovery never produces a book that ran ahead of
+// its own journal.
+//
+// # Durability is the caller's boundary, not this package's
+//
+// An earlier version of this comment said write-ahead ordering meant "no
+// acknowledged command is lost". That was an overclaim, and a reader on
+// r/highfreqtrading was right to push on it. Write-ahead is ordered against
+// APPLY, not against the acknowledgement a client receives. Append writes into a
+// buffer; only Sync makes a record survive the process. Whatever the embedder
+// does between those two points is a window in which an order can be
+// acknowledged and then vanish.
+//
+// Closing that window is the embedder's decision rather than this package's,
+// because the two answers differ by a factor of hundreds. cmd/obgw
+// group-commits every 20ms by default, so a crash loses at most that much, and
+// takes -sync-every-command for anyone who wants acknowledgement to follow
+// durability instead — correct, and roughly 210× the cost (docs/BENCHMARKS.md).
+// Sync before you acknowledge, or state your window. Do not assume this package
+// chose for you.
 //
 // The two failure modes are treated differently on purpose. A crash mid-write
 // leaves a torn tail — a short final record — which the reader stops at cleanly,
-// because that record was never acknowledged. A record that is complete but fails
-// its checksum is media corruption: the bytes changed after they were written, and
-// recovery refuses rather than stopping, since a quiet stop there is
+// because a partial record cannot be applied; whether a client was already told
+// about that command is the ack-window question above. A record that is complete
+// but fails its checksum is media corruption: the bytes changed after they were
+// written, and recovery refuses rather than stopping, since a quiet stop there is
 // indistinguishable from a clean end of log while silently discarding every
 // command after it.
 package wal
