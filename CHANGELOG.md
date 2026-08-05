@@ -7,7 +7,29 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The WAL's durability claim was ordered against the wrong thing.** The package
+  comment said records are written write-ahead "so no acknowledged command is
+  lost." Write-ahead is ordered against *apply*, not against the acknowledgement a
+  client receives: append writes into a buffer, only `Sync` survives the process,
+  and with `obgw` group-committing every 20ms an order could be acknowledged and
+  then vanish. The comment stated the opposite for four releases. A reader on
+  r/highfreqtrading pushed on exactly this and was right. The window is now stated
+  rather than denied, and `obgw -sync-every-command` closes it for anyone who
+  wants acknowledgement to follow durability — correct, and ~210× the cost,
+  because the fsync lands on the matching goroutine.
+
 ### Added
+
+- **Crash-at-every-boundary recovery test.** The suite sampled five checkpoints
+  across a 2000-command tape and compared only the book; the new test kills at
+  every write and emit boundary and compares the trade tape too. Both halves are
+  verified against deliberately broken code: dropping every replayed cancel fails
+  the book assertion, and publishing replayed event batches in reverse order —
+  same event count, so the digest is untouched — fails the tape assertion while
+  the old test passes against the identical sabotage. Also proposed by the same
+  reader.
 
 - **The interactive tutorial** (`web/learn.html`,
   [TUTORIAL-SPEC.md](docs/TUTORIAL-SPEC.md)) — learn the order book by being
