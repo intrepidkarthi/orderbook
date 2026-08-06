@@ -170,12 +170,16 @@ func TestRestoreOrderQuantity(t *testing.T) {
 }
 
 func TestDuplicateAddIgnored(t *testing.T) {
-	ob := New(Config{Symbol: "BTC-USD"})
+	ob := New(Config{Symbol: "BTC-USD", MaxOrders: 1})
 	o := limit(t, "a", types.SideBuy, 100, 1)
 	mustAdd(t, ob, o)
+	sequenceNum := ob.Snapshot(1).SequenceNum
 	mustAdd(t, ob, o) // ignored, no error
 	if ob.Count() != 1 {
 		t.Errorf("count = %d, want 1 (duplicate ignored)", ob.Count())
+	}
+	if got := ob.Snapshot(1).SequenceNum; got != sequenceNum {
+		t.Errorf("sequence = %d, want %d (duplicate ignored)", got, sequenceNum)
 	}
 }
 
