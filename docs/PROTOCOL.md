@@ -133,6 +133,16 @@ of your own orders.
 > silently misread as it. The type byte is why the version freeze exists, and this
 > is what spending it looks like.
 
+> **v2 → v3.** A trade had no name. `Executed` and `MDTrade` reported price,
+> quantity and aggressor, so no message could ever refer back to one specific
+> print — and when the engine gained trade bust
+> ([TRADE-BUST.md](TRADE-BUST.md)) the venue could annul a fill it had never
+> named, with no way to tell the client which one. Both payloads gained
+> `TradeID` (+8 bytes each) and two messages now use it: `Busted` on order entry
+> and `MDBust` on market data. Every other payload is byte-identical to v2 apart
+> from the version field itself, which is the discipline a bump is supposed to
+> carry — licence to move what had to move, not an amnesty for the rest.
+
 ### Inbound
 
 **Enter** — a new order.
@@ -330,7 +340,7 @@ session's and the gateway serves one instrument.
 |---|---|---|
 | **Accepted** `A` | ClOrdID, Price, Quantity, Side | the order is live |
 | **Rejected** `R` | ClOrdID, Reason | the engine looked and declined |
-| **Executed** `X` | ClOrdID, Price, Quantity, LeavesQty, Aggressor | a fill |
+| **Executed** `X` | ClOrdID, Price, Quantity, LeavesQty, Aggressor, TradeID | a fill |
 | **Canceled** `D` | ClOrdID, Reason | the order left the book |
 | **Replaced** `P` | ClOrdID, LeavesQty | size changed in place, queue kept |
 | **CmdReject** `K` | ClOrdID, Reason | the venue would not look at the command |
@@ -338,6 +348,7 @@ session's and the gateway serves one instrument.
 | **QueryEnd** `T` | Count, Seq | the Query reply is complete |
 | **MassCancelAck** `G` | Count, Seq | the mass cancel is complete |
 | **CODAck** `V` | Enabled | the cancel-on-disconnect setting in force |
+| **Busted** `U` | ClOrdID, TradeID | a fill of yours has been annulled |
 
 Each is preceded by its type byte and the version, as above.
 
@@ -460,9 +471,22 @@ code path as order entry, which is the wrong default however carefully it is wri
 | **MDLevel** | `l` | Side, Price, Qty — one level of a snapshot |
 | **MDSnapshotEnd** | `e` | Count, Seq, LastTradePrice — the snapshot is complete |
 | **MDDelta** | `d` | Seq, Side, Price, Qty — one aggregated level change |
-| **MDTrade** | `t` | Seq, Price, Qty, Aggressor — a print |
+| **MDTrade** | `t` | Seq, Price, Qty, Aggressor, TradeID — a print |
 | **MDStatus** | `s` | Seq, State (`O`pen / `H`alted / `C`ancel-only) |
 | **MDIndicative** | `i` | Seq, Price, Volume, Imbalance — what an auction would clear at |
+| **MDBust** | `u` | Seq, TradeID — an earlier print is annulled |
+
+`MDBust` says a print will not settle. It changes no book state and implies none: a
+subscriber that rewinds its own depth on one diverges from the venue, because the
+engine does not rewind either — not the orders, not the stops the print fired, not the
+last trade price. Adjust your tape, not your book; the reasoning is
+[TRADE-BUST.md](TRADE-BUST.md) §2. The private counterpart on order entry is `Busted`,
+and both name the trade with the same `TradeID`, so a drop copy and a feed can be
+reconciled against each other.
+
+Neither carries a reason. Bust reasons are operator free text on a fixed-width wire,
+so carrying one would mean inventing a code vocabulary nobody has asked for; Nasdaq's
+ITCH "Broken Trade" carries the match number and nothing else, for the same reason.
 
 `MDIndicative` is published during pre-open and the closing auction, on the venue's own
 cadence rather than per order: during an auction the indicative price moves on nearly

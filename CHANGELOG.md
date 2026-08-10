@@ -60,13 +60,31 @@ versions may include breaking changes).
   now carries the command that produces the number so the next reader can check it
   instead of believing it. The event-conformance suite is 23 scenarios, not 22.
 
-### Known gaps
+### Changed
 
-- **No external client can be told about a bust.** Neither `wire.Executed` nor
-  `wire.MDTrade` carries a trade id, so the frozen protocol cannot name the print
-  being annulled. In-process consumers are served; the wire needs a `Version` bump on
-  both payloads and a bust message on each edge. Stated in the spec as §4.5 rather
-  than discovered later.
+- **Wire protocol v2 → v3: a trade now has a name.** `Executed` and `MDTrade`
+  reported price, quantity and aggressor but no identifier, so no message could ever
+  refer back to one specific print — which meant a venue with trade bust could annul
+  a fill it had never named, and no client could be told which one. Both payloads
+  gain `TradeID` (+8 bytes each), and two messages use it: **`Busted`** (`U`) on
+  order entry, private to the two counterparties, and **`MDBust`** (`u`) on market
+  data, public. Every other payload is byte-identical to v2 apart from the version
+  field itself — the discipline a bump is supposed to carry, and what the regenerated
+  golden vectors show.
+
+  **Breaking**: `internal/wire` is not importable, but any client built against v2
+  must be rebuilt. `pkg/orderentry.Msg` gains `TradeID` and `KindBusted`.
+
+  Routing the bust turned out to be harder than encoding it, and for a reason that
+  is the whole shape of this feature: **by the time a bust arrives, both orders have
+  usually left the book.** `orderentry.Registry` forgets an order the moment it fills
+  or cancels, so the obvious implementation — look the trade up among live orders —
+  delivers a bust to nobody in the common case. The Registry now keeps a bounded
+  memory of recent prints (`SetFillMemory`, default 65,536, about 26 seconds of tape
+  at the SOAK.md rate) purely so a bust can be routed, and one older than that memory
+  increments `UnroutableBusts` rather than vanishing — "we could not tell the client"
+  is an operational fact somebody has to act on. Size it to your bust window; CME's
+  is eight minutes.
 
 ## [0.20.0] - 2026-08-10
 

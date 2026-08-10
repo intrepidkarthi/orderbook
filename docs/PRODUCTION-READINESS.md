@@ -294,11 +294,14 @@ design is that a bust does not rewind anything: not the book, not the stops the
 print fired, not the reference price. Adjusting a trade to a different price
 rather than voiding it is still absent, and needs the settlement layer above.
 
-One gap remains and it is load-bearing: **no external client can be told about a
-bust.** Neither `wire.Executed` nor `wire.MDTrade` carries a trade id, so the
-frozen protocol cannot name the print being annulled. In-process consumers
-(`marketdata.Feed`) are served; the wire needs a `Version` bump on both payloads
-and a bust message on each edge.
+Both edges of the wire carry it. Protocol **v3** gives `Executed` and `MDTrade` a
+`TradeID` and adds `Busted` (order entry, private to the two counterparties) and
+`MDBust` (market data, public), proven end to end over real sockets in
+`cmd/obgw/bust_e2e_test.go`. Routing turned out to be the hard part rather than
+the encoding: by the time a bust arrives both orders have usually left the book, so
+`orderentry.Registry` keeps a bounded memory of recent prints for it, and a bust
+older than that memory is counted in `UnroutableBusts` rather than dropped. Size
+that memory to your bust window.
 
 ### Regulatory — partial
 

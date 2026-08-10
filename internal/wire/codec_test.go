@@ -47,7 +47,7 @@ func TestOutboundRoundTrips(t *testing.T) {
 		}
 	})
 	t.Run("executed", func(t *testing.T) {
-		want := Executed{Version: Version, ClOrdID: "x-1", Price: 100, Quantity: 3, LeavesQty: 2, Aggressor: SideBuy}
+		want := Executed{Version: Version, ClOrdID: "x-1", Price: 100, Quantity: 3, LeavesQty: 2, Aggressor: SideBuy, TradeID: 9001}
 		b, err := EncodeExecuted(nil, want)
 		if err != nil {
 			t.Fatal(err)
@@ -124,6 +124,8 @@ func TestShortBufferIsAnError(t *testing.T) {
 		"cancel":        func(b []byte) error { _, err := DecodeCancel(b); return err },
 		"accepted":      func(b []byte) error { _, err := DecodeAccepted(b); return err },
 		"executed":      func(b []byte) error { _, err := DecodeExecuted(b); return err },
+		"busted":        func(b []byte) error { _, err := DecodeBusted(b); return err },
+		"mdbust":        func(b []byte) error { _, err := DecodeMDBust(b); return err },
 		"rejected":      func(b []byte) error { _, err := DecodeRejected(b); return err },
 		"canceled":      func(b []byte) error { _, err := DecodeCanceled(b); return err },
 		"replaced":      func(b []byte) error { _, err := DecodeReplaced(b); return err },
@@ -348,20 +350,26 @@ func TestQueryRoundTrips(t *testing.T) {
 // worth a version bump: adding a message must be additive. If this fails, the new
 // types moved something a deployed client already parses.
 func TestNewMessagesDidNotDisturbExistingLayouts(t *testing.T) {
-	if Version != 2 {
+	if Version != 3 {
 		t.Errorf("Version = %d; adding message types must not require a bump", Version)
 	}
 	widths := map[string]int{
 		"Enter": EnterLen, "Cancel": CancelLen, "Accepted": AcceptedLen,
 		"Rejected": RejectedLen, "Executed": ExecutedLen, "Canceled": CanceledLen,
 		"Replaced": ReplacedLen, "CmdReject": CmdRejectLen,
+		"Busted": BustedLen, "MDTrade": MDTradeLen, "MDBust": MDBustLen,
 	}
 	// Derived by hand from the field lists in wire.go, not copied from the
 	// constants — a test that reads the value it is checking proves nothing.
+	//
+	// Executed and MDTrade grew by 8 in v3 (TradeID) and everything else is
+	// unchanged, which is the assertion that matters: a version bump is licence to
+	// move the payloads that needed to move, not an amnesty for the rest.
 	want := map[string]int{
 		"Enter": 58, "Cancel": 22, "Accepted": 39,
-		"Rejected": 24, "Executed": 47, "Canceled": 24,
+		"Rejected": 24, "Executed": 55, "Canceled": 24,
 		"Replaced": 30, "CmdReject": 24,
+		"Busted": 30, "MDTrade": 35, "MDBust": 18,
 	}
 	for name, got := range widths {
 		if got != want[name] {
@@ -445,7 +453,8 @@ func goldenCases(t *testing.T) map[string][]byte {
 		})),
 		"accepted":  must(EncodeAccepted(nil, Accepted{Version: Version, ClOrdID: "cl-1", Price: 30000, Quantity: 250, Side: SideBuy})),
 		"rejected":  must(EncodeRejected(nil, Rejected{Version: Version, ClOrdID: "cl-1", Reason: ReasonPriceBand})),
-		"executed":  must(EncodeExecuted(nil, Executed{Version: Version, ClOrdID: "cl-1", Price: 30000, Quantity: 100, LeavesQty: 150, Aggressor: SideSell})),
+		"executed":  must(EncodeExecuted(nil, Executed{Version: Version, ClOrdID: "cl-1", Price: 30000, Quantity: 100, LeavesQty: 150, Aggressor: SideSell, TradeID: 4242})),
+		"busted":    must(EncodeBusted(nil, Busted{Version: Version, ClOrdID: "cl-1", TradeID: 4242})),
 		"canceled":  must(EncodeCanceled(nil, Canceled{Version: Version, ClOrdID: "cl-1", Reason: ReasonNone})),
 		"replaced":  must(EncodeReplaced(nil, Replaced{Version: Version, ClOrdID: "cl-1", LeavesQty: 40})),
 		"cmdreject": must(EncodeCmdReject(nil, CmdReject{Version: Version, ClOrdID: "cl-9", Reason: ReasonThrottled})),
@@ -459,7 +468,8 @@ func goldenCases(t *testing.T) map[string][]byte {
 		"md_level":        must(EncodeMDLevel(nil, MDLevel{Version: Version, Side: SideBuy, Price: 30000, Qty: 250})),
 		"md_snapshot_end": must(EncodeMDSnapshotEnd(nil, MDSnapshotEnd{Version: Version, Count: 12, Seq: 4096, LastTradePrice: 30000})),
 		"md_delta":        must(EncodeMDDelta(nil, MDDelta{Version: Version, Seq: 4097, Side: SideSell, Price: 30100, Qty: 0})),
-		"md_trade":        must(EncodeMDTrade(nil, MDTrade{Version: Version, Seq: 4098, Price: 30050, Qty: 7, Aggressor: SideBuy})),
+		"md_trade":        must(EncodeMDTrade(nil, MDTrade{Version: Version, Seq: 4098, Price: 30050, Qty: 7, Aggressor: SideBuy, TradeID: 4242})),
+		"md_bust":         must(EncodeMDBust(nil, MDBust{Version: Version, Seq: 4101, TradeID: 4242})),
 		"md_status":       must(EncodeMDStatus(nil, MDStatus{Version: Version, Seq: 4099, State: MDStateHalted})),
 		"md_indicative":   must(EncodeMDIndicative(nil, MDIndicative{Version: Version, Seq: 4100, Price: 30000, Volume: 500, Imbalance: -120})),
 		"mass_cancel":     must(EncodeMassCancel(nil, MassCancel{Version: Version})),

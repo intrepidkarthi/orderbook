@@ -41,7 +41,14 @@ import (
 // v2 added an explicit message-type byte. v1 distinguished messages by payload
 // length, which meant any future message that happened to share a length with an
 // existing one would have been silently misread as it.
-const Version uint8 = 2
+//
+// v3 gave a trade a name. Executed and MDTrade reported price, quantity and
+// aggressor but no identifier, so no message could ever refer back to a specific
+// print — which meant trade bust, once the engine had it
+// (docs/TRADE-BUST.md), could not be delivered to a client at all: the venue
+// would have been annulling a fill it had never named. Both payloads now carry
+// TradeID, and Busted / MDBust are the messages that use it.
+const Version uint8 = 3
 
 // SoupBinTCP packet types. Lowercase letters are client-to-server, uppercase are
 // server-to-client, following the published spec.
@@ -93,6 +100,7 @@ const (
 	MsgQueryEnd      uint8 = 'T' // outbound: the Query reply is complete
 	MsgMassCancelAck uint8 = 'G' // outbound: the mass cancel is complete
 	MsgCODAck        uint8 = 'V' // outbound: cancel-on-disconnect setting accepted
+	MsgBusted        uint8 = 'U' // outbound: one of your fills has been annulled
 )
 
 // Market-data message types.
@@ -112,6 +120,7 @@ const (
 	MsgMDTrade       uint8 = 't' // outbound: a print
 	MsgMDStatus      uint8 = 's' // outbound: a venue state change
 	MsgMDIndicative  uint8 = 'i' // outbound: what an auction would clear at right now
+	MsgMDBust        uint8 = 'u' // outbound: an earlier print is annulled
 )
 
 // Market-data reject reasons. Narrower than the order-entry vocabulary because a
@@ -203,10 +212,29 @@ type MDTrade struct {
 	Price     int64
 	Qty       int64
 	Aggressor uint8
+	// TradeID names this print so an MDBust can refer back to it. Seq would not
+	// do: it is the feed's position, which a subscriber that bootstrapped from a
+	// later snapshot has never seen, and it is not what the other edge calls the
+	// same trade — a drop copy and a market-data feed disagreeing about the name
+	// of one print is a reconciliation bug waiting to be written.
+	TradeID int64
 }
 
 // MDTradeLen is the encoded width of an MDTrade payload.
-const MDTradeLen = 1 + 1 + 8 + 8 + 8 + 1
+const MDTradeLen = 1 + 1 + 8 + 8 + 8 + 1 + 8
+
+// MDBust annuls an earlier print, in the same ordered stream as the print it
+// annuls. It carries no book change and implies none: a subscriber that rewinds
+// its own depth on one of these diverges from the venue. Adjust the tape, not the
+// book — docs/TRADE-BUST.md §2.
+type MDBust struct {
+	Version uint8
+	Seq     uint64 // this message's own feed sequence, like every other MD message
+	TradeID int64  // the annulled print, as reported in MDTrade.TradeID
+}
+
+// MDBustLen is the encoded width of an MDBust payload.
+const MDBustLen = 1 + 1 + 8 + 8
 
 // MDStatus is a venue state change, carried in the same ordered stream as the data it
 // qualifies rather than delivered on the side.
@@ -579,10 +607,37 @@ type Executed struct {
 	Quantity  int64
 	LeavesQty int64
 	Aggressor uint8 // SideBuy or SideSell: which side took liquidity
+	// TradeID is the engine's identifier for this print — the one thing a later
+	// Busted message can use to say which fill it means. Two partial fills of the
+	// same order at the same price are otherwise indistinguishable on this wire,
+	// so without it a bust would be undeliverable rather than merely awkward.
+	//
+	// It is an engine TRADE id, not an order id, and carrying it does not breach
+	// the "a client never sees an engine order id" rule at the top of this
+	// package: a trade id names an event both counterparties took part in, and
+	// discloses nothing about anybody's resting orders.
+	TradeID int64
 }
 
 // ExecutedLen is the encoded width of an Executed payload.
-const ExecutedLen = 1 + 1 + ClOrdIDLen + 8 + 8 + 8 + 1
+const ExecutedLen = 1 + 1 + ClOrdIDLen + 8 + 8 + 8 + 1 + 8
+
+// Busted tells a client that one of its fills has been annulled: the trade will
+// not settle. It does NOT mean the order came back — the book moved on long
+// before the bust, and nothing is re-rested. See docs/TRADE-BUST.md §2.
+//
+// No reason field, deliberately. Bust reasons are operator free text and this is a
+// fixed-width wire, so carrying one would mean inventing a code vocabulary nobody
+// has asked for yet; Nasdaq's ITCH "Broken Trade" carries the match number and
+// nothing else for the same reason. The why reaches the client out of band.
+type Busted struct {
+	Version uint8
+	ClOrdID string // the client's name for the order that filled
+	TradeID int64  // the annulled print, as reported in Executed.TradeID
+}
+
+// BustedLen is the encoded width of a Busted payload.
+const BustedLen = 1 + 1 + ClOrdIDLen + 8
 
 // Canceled reports an order leaving the book, whether the client asked or the
 // venue did (self-trade prevention, an OCO twin, an IOC remainder, a kill switch).

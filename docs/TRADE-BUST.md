@@ -1,7 +1,7 @@
 # Trade Bust — Annulling a Print Without Rewriting History
 
-Status: **implemented, with one edge open** — `pkg/matching/bust.go`, drill D7 in CI;
-written as a spec before any code existed, and §7 records what building it found ·
+Status: **implemented** — `pkg/matching/bust.go`, wire v3, drill D7 in CI; written as
+a spec before any code existed, and §7 records what building it found ·
 Author: Karthikeyan NG · Last updated: 2026-08-10
 
 Companion documents:
@@ -84,7 +84,7 @@ Checked at the time of writing, not quoted from other documents.
    (`pkg/matching/engine_loop.go:87`), `wal.Writer` with per-record CRC-32C, and
    `wal.Recover` = snapshot + tail.
 3. **The event stream is append-only and sequenced.** `Event.Seq`, gap-free, and
-   machine-checked to reconstruct the L3 book across 22 scenarios.
+   machine-checked to reconstruct the L3 book across 23 scenarios.
 4. **The engine has a precedent for an operator-issued state change.** `Halt` /
    `Resume` / `SetCancelOnly` emit a transition, not a call — a second halt of an
    already-halted venue publishes nothing (`pkg/matching/engine.go:1357`). A bust
@@ -112,6 +112,10 @@ anything.
    is the same. So today a venue cannot tell a client *which* of its fills was busted,
    because it never told the client the fill had a name. The threat model's "clean
    trade-bust" claim fails here first, before any of the interesting semantics.
+
+   *Closed after this spec was written:* wire **v3** gives both payloads a `TradeID`
+   and adds `Busted` / `MDBust`. This paragraph is left as it was because §3 records
+   what was true when the design was made, and the gap is why the design has §4.5.
 
 ## 4. The design
 
@@ -188,12 +192,14 @@ cleanly or show us which of §2's four rules is wrong.
 
 ### 4.5 What stays out
 
-- **The wire protocol.** Carrying trade identity to real clients means a `Version` bump
-  on `Executed` and `MDTrade` plus two new message types, against a wire frozen by
-  golden hex. That is its own change with its own compatibility story, and doing it in
-  the same pass as the semantics would mean debugging both at once. Gap §3.6 stays
-  open, and stays *stated* — the core is honest, and no external client can be told
-  about a bust until this lands.
+- **The wire protocol — deferred, then done.** Carrying trade identity to real clients
+  meant a `Version` bump on `Executed` and `MDTrade` plus two new message types,
+  against a wire frozen by golden hex. It was deliberately excluded from the first
+  pass so the semantics and the compatibility story were not debugged at once, and it
+  landed immediately after as wire **v3**: `TradeID` on both payloads, `Busted` (`U`)
+  on order entry, `MDBust` (`u`) on market data. Every other payload is byte-identical
+  to v2 apart from the version field. See §7 for what routing a bust to a client
+  turned out to require.
 - **Rebooking, corrections and price adjustments.** Real venues bust *or* adjust to a
   reference price. Adjustment is a different animal — it changes the economics rather
   than voiding them — and it needs the settlement layer this project deliberately does
@@ -210,7 +216,7 @@ cleanly or show us which of §2's four rules is wrong.
 | 2 | `Engine.Bust` + `EventBusted` + registry in snapshot and digest | Bust refused for unknown/duplicate ids; digest differs between a busted and an unbusted engine; `TestEventStreamReconstructsBook` still passes with busts in the tape | **done** — `pkg/matching/bust_test.go`, and a 23rd conformance scenario |
 | 3 | Bust survives crash and replication | Recovered engine agrees on the bust registry; the replication drills' follower digest-matches a primary that busted mid-stream | **done** — `pkg/wal/bust_recovery_test.go`, drill D7 |
 | 4 | A consumer that would notice | `marketdata.Feed` publishes `UpdateBust` with a trade id, and a subscriber resuming from a sequence before the bust still learns about it | **done** — `pkg/marketdata/bust_test.go` |
-| 5 | The wire can name a trade | `Executed` and `MDTrade` carry a trade id and each edge has a bust message | **open** — see §4.5 and §7 |
+| 5 | The wire can name a trade | `Executed` and `MDTrade` carry a trade id and each edge has a bust message | **done** — wire v3; `cmd/obgw/bust_e2e_test.go` busts across both edges over real sockets |
 
 Every test above was run against deliberately broken code before it counted: the
 registry removed from the snapshot, the wall-clock normalisation removed from the
@@ -281,10 +287,21 @@ rather than silent. Drill D7 is exactly that scenario with the roles reversed, a
 it fails as it should when the bust is dropped. A version negotiation between
 primary and follower is still not there and is still yours.
 
-**What did not get built, and is the reason this is not finished.** The wire cannot
-name a trade, so no external client can be told a fill was busted. The core is
-honest and the in-process consumer is real, but a venue's clients are on the other
-side of `internal/wire`, and until `Executed` and `MDTrade` carry a trade id — a
-`Version` bump on both, against golden hex — trade bust is a feature embedders have
-and customers do not. That is §4.5 as designed, not a surprise; it is restated here
-because a deliverables table with four ticks should not read as "done".
+**The wire landed, and routing the bust was the hard part — not the encoding.** Wire
+v3 gives both payloads a `TradeID` and adds `Busted` / `MDBust`; the golden vectors
+confirm every other payload changed only in its version byte. The market-data edge was
+a two-line translation. Order entry was not, and the reason is the same one that
+shapes §4.1: **by the time a bust arrives, both orders have usually left the book.**
+`orderentry.Registry` forgets an order the moment it is filled or cancelled, so
+looking the trade up in the live-order map finds nothing and tells nobody — the
+implementation that "obviously works" delivers a bust to zero clients in the common
+case. The Registry now keeps a bounded memory of recent prints
+(`SetFillMemory`, default 65,536 ≈ 26s of tape at the SOAK.md rate) purely so a bust
+can be routed, and a bust older than that memory increments `UnroutableBusts` rather
+than disappearing — because "we could not tell the client" is an operational fact
+somebody has to act on, and it is the direct analogue of §6's unbounded-registry
+worry landing somewhere else than predicted.
+
+`TestBustRoutesAfterTheOrdersAreGone` is the test that would have caught the naive
+version, and `cmd/obgw/bust_e2e_test.go` is the end-to-end proof: two counterparties
+and a market-data subscriber, real sockets, all three agreeing on the trade id.

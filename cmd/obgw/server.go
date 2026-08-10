@@ -1389,6 +1389,11 @@ func (sess *session) emit(m orderentry.Msg) {
 		b, err = wire.EncodeExecuted(nil, wire.Executed{
 			Version: wire.Version, ClOrdID: m.ClOrdID,
 			Price: m.Price, Quantity: m.Quantity, LeavesQty: m.LeavesQty, Aggressor: agg,
+			TradeID: m.TradeID,
+		})
+	case orderentry.KindBusted:
+		b, err = wire.EncodeBusted(nil, wire.Busted{
+			Version: wire.Version, ClOrdID: m.ClOrdID, TradeID: m.TradeID,
 		})
 	case orderentry.KindCanceled:
 		b, err = wire.EncodeCanceled(nil, wire.Canceled{Version: wire.Version, ClOrdID: m.ClOrdID, Reason: m.Reason})

@@ -175,6 +175,7 @@ func EncodeExecuted(dst []byte, m Executed) ([]byte, error) {
 	binary.BigEndian.PutUint64(b[off+8:], uint64(m.Quantity))
 	binary.BigEndian.PutUint64(b[off+16:], uint64(m.LeavesQty))
 	b[off+24] = m.Aggressor
+	binary.BigEndian.PutUint64(b[off+25:], uint64(m.TradeID))
 	return dst, nil
 }
 
@@ -191,6 +192,34 @@ func DecodeExecuted(src []byte) (Executed, error) {
 		Quantity:  int64(binary.BigEndian.Uint64(src[off+8:])),
 		LeavesQty: int64(binary.BigEndian.Uint64(src[off+16:])),
 		Aggressor: src[off+24],
+		TradeID:   int64(binary.BigEndian.Uint64(src[off+25:])),
+	}, nil
+}
+
+// EncodeBusted appends a Busted payload to dst.
+func EncodeBusted(dst []byte, m Busted) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, BustedLen)...)
+	b := dst[base:]
+	off := header(b, MsgBusted, m.Version)
+	if err := putFixed(b[off:off+ClOrdIDLen], m.ClOrdID); err != nil {
+		return nil, err
+	}
+	off += ClOrdIDLen
+	binary.BigEndian.PutUint64(b[off:], uint64(m.TradeID))
+	return dst, nil
+}
+
+// DecodeBusted reads a Busted payload from src.
+func DecodeBusted(src []byte) (Busted, error) {
+	if err := checkHeader(src, BustedLen, MsgBusted); err != nil {
+		return Busted{}, err
+	}
+	off := 2 + ClOrdIDLen
+	return Busted{
+		Version: src[1],
+		ClOrdID: getFixed(src[2:off]),
+		TradeID: int64(binary.BigEndian.Uint64(src[off:])),
 	}, nil
 }
 
@@ -771,6 +800,7 @@ func EncodeMDTrade(dst []byte, m MDTrade) ([]byte, error) {
 	binary.BigEndian.PutUint64(b[off+8:], uint64(m.Price))
 	binary.BigEndian.PutUint64(b[off+16:], uint64(m.Qty))
 	b[off+24] = m.Aggressor
+	binary.BigEndian.PutUint64(b[off+25:], uint64(m.TradeID))
 	return dst, nil
 }
 
@@ -785,6 +815,30 @@ func DecodeMDTrade(src []byte) (MDTrade, error) {
 		Price:     int64(binary.BigEndian.Uint64(src[10:])),
 		Qty:       int64(binary.BigEndian.Uint64(src[18:])),
 		Aggressor: src[26],
+		TradeID:   int64(binary.BigEndian.Uint64(src[27:])),
+	}, nil
+}
+
+// EncodeMDBust appends an MDBust payload to dst.
+func EncodeMDBust(dst []byte, m MDBust) ([]byte, error) {
+	base := len(dst)
+	dst = append(dst, make([]byte, MDBustLen)...)
+	b := dst[base:]
+	off := header(b, MsgMDBust, m.Version)
+	binary.BigEndian.PutUint64(b[off:], m.Seq)
+	binary.BigEndian.PutUint64(b[off+8:], uint64(m.TradeID))
+	return dst, nil
+}
+
+// DecodeMDBust reads an MDBust payload from src.
+func DecodeMDBust(src []byte) (MDBust, error) {
+	if err := checkHeader(src, MDBustLen, MsgMDBust); err != nil {
+		return MDBust{}, err
+	}
+	return MDBust{
+		Version: src[1],
+		Seq:     binary.BigEndian.Uint64(src[2:]),
+		TradeID: int64(binary.BigEndian.Uint64(src[10:])),
 	}, nil
 }
 

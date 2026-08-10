@@ -45,6 +45,9 @@ const (
 	KindExecuted
 	KindCanceled
 	KindReplaced
+	// KindBusted reports that a fill this account received has been annulled. The
+	// order is NOT back in the book — see docs/TRADE-BUST.md §2.
+	KindBusted
 )
 
 // Msg is one outbound message on an account's stream. It is a value: everything
@@ -61,6 +64,10 @@ type Msg struct {
 	Side      types.Side
 	Aggressor types.Side
 	Reason    uint16
+	// TradeID names the print: set on KindExecuted, and on the KindBusted that
+	// annuls it. It is the only handle a client has for saying which of two
+	// identical partial fills was voided.
+	TradeID int64
 }
 
 // Stream is one account's outbound sequence, with a bounded ring of recent
@@ -173,6 +180,21 @@ type Registry struct {
 	// not ask again — and the order stayed in the book, uncancellable by anybody, for
 	// the life of the venue. Measured at 12,843 orphaned orders in thirty seconds at
 	// 10,000 messages a second; invisible below about 4,000. See docs/SOAK.md.
+	// fills remembers who was on each side of a recent print, so a bust arriving
+	// later can be routed to the two accounts that need it. The engine does not
+	// retain trades and neither does `orders` — an order is forgotten the moment it
+	// leaves the book, which is exactly when most busts turn up.
+	//
+	// Bounded, and the bound is the venue's real bust window. CME allows eight
+	// minutes; size this to cover yours with margin. A bust of a print older than
+	// the ring is reported by BustReceipts as unroutable rather than silently
+	// dropped, because "we could not tell the client" is an operational fact
+	// somebody has to act on.
+	fills           map[int64]bustParties
+	fillOrder       []int64 // insertion order, for eviction
+	fillMax         int
+	unroutableBusts int
+
 	nameMu sync.RWMutex
 	// Nested rather than keyed on account+"\x00"+clOrdID, for two reasons.
 	//
@@ -202,6 +224,60 @@ func NewRegistry(incarnation string, ringSize int) *Registry {
 		byClOrd:     map[string]map[string]int64{},
 		incarnation: incarnation,
 		ringSize:    ringSize,
+		fills:       map[int64]bustParties{},
+		fillMax:     defaultFillMemory,
+	}
+}
+
+// defaultFillMemory is how many recent prints a Registry remembers for bust
+// routing. At 2,500 trades/second — the sustained rate in docs/SOAK.md — 65,536
+// prints is roughly 26 seconds of tape, which is under CME's eight-minute bust
+// window; a venue that busts on a longer window should raise it with
+// SetFillMemory and pay the memory.
+const defaultFillMemory = 65536
+
+// bustParties is who to tell when a print is annulled: one entry per side, since
+// both counterparties received a KindExecuted for it.
+type bustParties struct {
+	account [2]string
+	clOrdID [2]string
+	n       int
+}
+
+// SetFillMemory sets how many recent prints are retained for bust routing. Call
+// before the venue takes traffic. A value <= 0 restores the default.
+func (r *Registry) SetFillMemory(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n <= 0 {
+		n = defaultFillMemory
+	}
+	r.fillMax = n
+	r.evictFillsLocked()
+}
+
+// rememberFill records a print's counterparties. Callers hold r.mu.
+func (r *Registry) rememberFillLocked(tradeID int64, account, clOrdID string) {
+	if tradeID == 0 {
+		return
+	}
+	p, seen := r.fills[tradeID]
+	if !seen {
+		r.fillOrder = append(r.fillOrder, tradeID)
+	}
+	if p.n < len(p.account) {
+		p.account[p.n] = account
+		p.clOrdID[p.n] = clOrdID
+		p.n++
+	}
+	r.fills[tradeID] = p
+	r.evictFillsLocked()
+}
+
+func (r *Registry) evictFillsLocked() {
+	for len(r.fillOrder) > r.fillMax {
+		delete(r.fills, r.fillOrder[0])
+		r.fillOrder = r.fillOrder[1:]
 	}
 }
 
@@ -300,6 +376,9 @@ func (r *Registry) Publish(evs []matching.Event) {
 
 		case matching.EventTrade:
 			r.publishTrade(e.Trade)
+
+		case matching.EventBusted:
+			r.publishBust(e.TradeID)
 		}
 	}
 }
@@ -321,12 +400,51 @@ func (r *Registry) publishTrade(t *types.Trade) {
 			// stream has regressed and dropping the message silently would hide it.
 			continue
 		}
+		r.mu.Lock()
+		r.rememberFillLocked(t.ID, acct, clOrdID)
+		r.mu.Unlock()
 		r.deliver(acct, Msg{
 			Kind: KindExecuted, ClOrdID: clOrdID,
 			Price: t.Price, Quantity: t.Quantity, LeavesQty: leaves,
-			Aggressor: t.TakerSide,
+			Aggressor: t.TakerSide, TradeID: t.ID,
 		})
 	}
+}
+
+// publishBust tells both sides of an annulled print. It reports nothing to
+// anybody else: a bust is a private message about a specific fill, and the public
+// version of the same fact goes out on the market-data feed.
+//
+// A print older than the fill memory is unroutable. That is a real operational
+// event rather than a no-op, so it increments a counter an operator can read
+// (UnroutableBusts) instead of vanishing.
+func (r *Registry) publishBust(tradeID int64) {
+	if tradeID == 0 {
+		return
+	}
+	r.mu.Lock()
+	p, ok := r.fills[tradeID]
+	if !ok {
+		r.unroutableBusts++
+	}
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	for i := 0; i < p.n; i++ {
+		r.deliver(p.account[i], Msg{
+			Kind: KindBusted, ClOrdID: p.clOrdID[i], TradeID: tradeID,
+		})
+	}
+}
+
+// UnroutableBusts is the number of busts that named a print older than the fill
+// memory, so no client could be told. A non-zero value means the bust window is
+// wider than SetFillMemory allows for.
+func (r *Registry) UnroutableBusts() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.unroutableBusts
 }
 
 func (r *Registry) track(o *types.Order) {
