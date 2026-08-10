@@ -1,6 +1,8 @@
 # Multi-Symbol — One Venue, Many Books
 
-Status: **specified** — no code yet · Author: Karthikeyan NG · Last updated: 2026-08-10
+Status: **partially implemented** — deliverables 1–4 ship (`pkg/matching/id.go`,
+`manifest.go`, durable shards, venue-wide ClOrdID admission); the market-data edge
+and the drills do not · Author: Karthikeyan NG · Last updated: 2026-08-10
 
 Companion documents:
 - [`PRODUCTION-READINESS.md`](PRODUCTION-READINESS.md) — where multi-symbol is
@@ -136,11 +138,25 @@ without a lookup.
 
 ### 4.2 Sequence spaces — per symbol, and said out loud
 
-`Event.Seq`, `TradeSeq` and the market-data feed sequence stay per symbol. They are
-not partitioned, because unlike an order id they are never quoted outside the
-context of their own stream, and inflating them would only invite the belief that
-they can be compared across symbols. The protocol documentation must say that
-comparison is meaningless.
+`Event.Seq` and the market-data feed sequence stay per symbol. They are not
+partitioned, because unlike an order id they are never quoted outside the context of
+their own stream, and inflating them would only invite the belief that they can be
+compared across symbols. The protocol documentation must say that comparison is
+meaningless.
+
+**Trade ids are the exception, and are partitioned.** This paragraph originally
+grouped `TradeSeq` with the two above and that was wrong: `Busted` and `MDBust` name
+a print by id *alone* on both wire edges, so a trade id is quoted outside its stream
+by construction, and an unpartitioned one would let an operator annul an ambiguous
+print at a two-book venue. `Engine.Bust` splits the id and refuses another symbol's
+trade. `EngineSnapshot.TradeSeq` keeps the raw counter, like `Seq`.
+
+| | Partitioned? | Because |
+|---|---|---|
+| Order id | **yes** | named by cancel, audit, drop copy |
+| Trade id | **yes** | named by `Busted` / `MDBust`, alone |
+| `Event.Seq` | no | a cursor into one engine's own stream |
+| Feed sequence | no | a cursor into one feed |
 
 ### 4.3 Durability — one log per shard
 
@@ -217,6 +233,8 @@ deliberately avoided — so it lands as its own deliverable, after the core.
 | 5 | Market data per symbol | Wire v4 `MDSubscribe.Symbol`; two subscribers on two symbols each reconstruct their own book, proven over sockets |
 | 6 | The drills generalise | Replication D1–D7 run against a two-symbol venue |
 
+Status: **1–4 done**, 5 and 6 not started. See §7.
+
 ## 6. How this can fail, stated in advance
 
 - **The manifest is a new single point of failure.** It is small, rarely written and
@@ -239,4 +257,58 @@ deliberately avoided — so it lands as its own deliverable, after the core.
 
 ## 7. What building it found
 
-To be written after, not before — and it goes here whether or not it is flattering.
+Written after. Deliverables 1–4 are done; 5 and 6 are not, and §5's table says so.
+
+**The spec was wrong about trade ids, and the error was mine.** §4.2 originally said
+`Event.Seq`, `TradeSeq` and the feed sequence all stay per symbol, on the grounds
+that a stream cursor is never quoted outside its own stream. That is true of the two
+sequences and false of a trade id, and trade bust is why: `Busted` and `MDBust` name
+a print by id **alone** on both wire edges, so at a two-book venue an unpartitioned
+trade id would have let an operator annul an ambiguous print. Trade ids are
+partitioned like order ids, `Engine.Bust` now splits the id before validating, and
+busting another symbol's trade is `ErrUnknownTrade` rather than a coin flip. Written
+down here because the spec's own §4.2 said otherwise for a day.
+
+**Shard 0 composing to the identity was worth more than expected.** `ComposeID(0,
+seq) == seq`, so every existing single-symbol deployment keeps the ids, snapshots,
+logs and golden vectors it already had, and this whole feature is invisible to them.
+That was a design goal; what was not obvious in advance is that it also made the
+change testable against the existing suite without regenerating anything.
+
+**Refusing is better than serving, and it is a breaking change.** A second symbol
+with no manifest is now refused rather than silently given shard index 0 and
+colliding ids. Two existing tests had to gain a manifest. That is the right trade —
+duplicate ids have no symptom except two orders nobody can tell apart, discovered
+much later — but it does break any embedder running `Shards` multi-symbol today,
+which is exactly what they were unknowingly doing.
+
+**A manifest test passed against its own sabotage.** The first version of the
+bad-CRC case corrupted the file by flipping its first `0` byte. That byte lives
+inside the magic's `\u0001` escape, so with the CRC check disabled the test still
+went green — by detecting a bad magic, not the thing it was named for. It now edits
+a symbol's index through the JSON and leaves the checksum alone. Second time this
+pattern has been caught by running a test against the exact sabotage it claims to
+detect (the first was the bust digest, [TRADE-BUST.md](TRADE-BUST.md) §7), and the
+lesson generalises: a test that can only fail one way is not proof it fails that way.
+
+**§4.5's uniqueness rule was already half-enforced, by a mechanism I had not
+credited.** The engine's `DedupClientOrderIDs` ring already makes a client id
+single-use, deterministically, on the matching goroutine — that *is* FIX's per-day
+uniqueness, and it has been there for releases. What it cannot do is span symbols,
+because the ring belongs to one engine. So the venue-wide check added here is not
+the enforcement §4.5 imagined; it is the cross-symbol complement of an existing
+per-symbol one, and it is admission control rather than a guarantee because the
+naming index it reads is cleared asynchronously by the pump.
+
+That distinction matters and the spec did not draw it: the authoritative check is
+the engine's and it is deterministic; the venue-wide check is advisory and racy at
+the edges. A genuinely venue-wide *deterministic* rule would need the dedup on the
+matching goroutine across shards — which is a cross-shard serialisation point, the
+thing §2 spends the whole document refusing. **That tension is unresolved**, and it
+is the honest status rather than a to-do: for now the cross-symbol case is caught at
+admission and the per-symbol case is caught properly.
+
+**Not built:** deliverable #5 (wire v4 `MDSubscribe.Symbol`) and #6 (the replication
+drills against a two-symbol venue). The core is durable, identified and recoverable
+across symbols; the market-data edge still serves one instrument, so a multi-symbol
+venue cannot yet publish more than one book to external subscribers.

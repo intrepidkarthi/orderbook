@@ -484,6 +484,29 @@ func (r *Registry) nameLocked(account, clOrdID string, id int64) {
 	m[clOrdID] = id
 }
 
+// IsLiveClOrdID reports whether this account already has a live order under that
+// client id, ANYWHERE at the venue.
+//
+// This index has always been keyed by account and client id with no symbol, which
+// was harmless while a venue served one instrument and is a trap the moment it
+// serves two: the same ClOrdID on a second symbol overwrites the first silently,
+// and the account's next cancel retargets to whichever order won. A venue-wide
+// uniqueness rule is what makes wire.Cancel / Reduce / ReplaceOrder able to keep
+// naming an order by client id alone (docs/MULTI-SYMBOL.md §4.5) — so the rule has
+// to be ENFORCED at admission, not assumed of well-behaved clients.
+//
+// FIX already requires ClOrdID uniqueness per firm per day, so this asks nothing
+// unusual of a real client; it simply refuses to be the venue that finds out.
+func (r *Registry) IsLiveClOrdID(account, clOrdID string) bool {
+	if clOrdID == "" {
+		return false
+	}
+	r.nameMu.RLock()
+	_, ok := r.byClOrd[account][clOrdID]
+	r.nameMu.RUnlock()
+	return ok
+}
+
 // Adopt seeds the registry from a recovered book, so orders that outlived a
 // restart can still be named and still generate execution reports.
 //

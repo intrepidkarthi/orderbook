@@ -707,6 +707,15 @@ func (sess *session) buildOrder(b wire.BaseOrder) (*types.Order, uint16) {
 	if b.Symbol != sess.srv.cfg.Symbol {
 		return nil, orderentry.ReasonMalformed
 	}
+	// Venue-wide ClOrdID uniqueness, enforced rather than assumed. The naming index
+	// is keyed by account and client id with no symbol, so a repeat while the first
+	// order is still live would overwrite it and silently retarget this account's
+	// next cancel. Harmless at a one-instrument venue and a trap the moment there
+	// are two — see docs/MULTI-SYMBOL.md §4.5, which spends this rule to keep
+	// Cancel/Reduce/ReplaceOrder naming an order by client id alone.
+	if sess.srv.reg.IsLiveClOrdID(sess.account, b.ClOrdID) {
+		return nil, orderentry.ReasonDuplicateClOrd
+	}
 	side := types.SideBuy
 	if b.Side == wire.SideSell {
 		side = types.SideSell

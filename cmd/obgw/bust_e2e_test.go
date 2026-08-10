@@ -147,3 +147,65 @@ func awaitMDBust(t *testing.T, c *mdClient) wire.MDBust {
 	t.Fatal("no MDBust arrived")
 	return wire.MDBust{}
 }
+
+// TestDuplicateClOrdIDIsRefusedWhileLive — docs/MULTI-SYMBOL.md deliverable #4.
+//
+// The naming index is keyed by account and client id with no symbol, so a repeat
+// while the first order is still live would overwrite it and retarget this
+// account's next cancel to whichever order won. That is invisible at a
+// one-instrument venue and is precisely the assumption §4.5 spends to keep
+// Cancel/Reduce/ReplaceOrder naming an order by client id alone — so it is
+// enforced here rather than hoped for.
+func TestDuplicateClOrdIDIsRefusedWhileLive(t *testing.T) {
+	srv := mdServer(t)
+	c := dial(t, srv)
+	c.mustLogin("alice", "pw1")
+
+	c.enter("dup-1", wire.SideBuy, wire.TypeLimit, wire.TIFGoodTillCancel, 90, 5)
+	if _, ok := c.await(t, wire.AcceptedLen, 3*time.Second); !ok {
+		t.Fatal("the first order was not accepted")
+	}
+
+	// Same client id, still live. The refusal is a CmdReject rather than a
+	// Rejected, and PROTOCOL.md's distinction is the reason: Rejected means the
+	// engine looked and declined, CmdReject means the command never reached it.
+	// A duplicate client id is caught at admission, so the engine never sees it.
+	c.enter("dup-1", wire.SideBuy, wire.TypeLimit, wire.TIFGoodTillCancel, 91, 5)
+	p, ok := c.awaitType(t, wire.MsgCmdReject, 3*time.Second)
+	if !ok {
+		t.Fatal("a duplicate live ClOrdID was not rejected — the account's next cancel now retargets")
+	}
+	r, err := wire.DecodeCmdReject(p)
+	if err != nil {
+		t.Fatalf("DecodeCmdReject: %v", err)
+	}
+	if r.Reason != wire.ReasonDuplicateClOrd {
+		t.Errorf("reject reason = %d, want ReasonDuplicateClOrd (%d)", r.Reason, wire.ReasonDuplicateClOrd)
+	}
+
+	// And it stays refused after the order leaves the book — by a different layer,
+	// which is the part worth knowing. The engine's own DedupClientOrderIDs ring
+	// makes a client id single-use, deterministically, on the matching goroutine.
+	// That is FIX's per-day uniqueness and it was already here; what it could not
+	// do is span symbols, because the ring belongs to one engine.
+	//
+	// So the two checks are complements rather than duplicates: the engine's is
+	// authoritative and per-symbol, the admission check above is venue-wide and
+	// catches the cross-symbol case the ring cannot see.
+	c.cancel("dup-1")
+	if _, ok := c.awaitType(t, wire.MsgCanceled, 3*time.Second); !ok {
+		t.Fatal("cancel not confirmed")
+	}
+	c.enter("dup-1", wire.SideBuy, wire.TypeLimit, wire.TIFGoodTillCancel, 92, 5)
+	p2, ok := c.awaitType(t, wire.MsgRejected, 3*time.Second)
+	if !ok {
+		t.Fatal("a reused client id was accepted after cancel — the engine's dedup ring is not doing its job")
+	}
+	r2, err := wire.DecodeRejected(p2)
+	if err != nil {
+		t.Fatalf("DecodeRejected: %v", err)
+	}
+	if r2.Reason != wire.ReasonDuplicateClOrd {
+		t.Errorf("engine reject reason = %d, want ReasonDuplicateClOrd (%d)", r2.Reason, wire.ReasonDuplicateClOrd)
+	}
+}
