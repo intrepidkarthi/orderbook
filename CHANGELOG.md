@@ -5,7 +5,27 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
-## [Unreleased]
+## [0.22.0] - 2026-08-10
+
+The multi-symbol release, and the third in a row where writing the spec first found
+a defect that predated the feature. `PRODUCTION-READINESS.md` called a multi-symbol
+venue "a routing layer you write." Checking the code instead of the sentence:
+`ShardsConfig` had no way to supply a `CommandLog`, and durability, recovery and
+replication all hang off it — so **a sharded venue could not survive a restart at
+all.** That is not a routing layer, it is most of a venue.
+
+The design decision everything else follows from is a refusal: there is no order of
+events across symbols, because a venue-wide sequence needs a serialisation point
+every command passes through, which is the bottleneck sharding exists to remove.
+Each symbol is its own timeline; what that costs is listed in the spec rather than
+discovered later. Ids are the one thing shared across books, and they are
+*partitioned* rather than centralised precisely so that sharing costs no
+coordination — a shared counter would have made a shard's ids depend on how its
+traffic interleaved with every other shard's, so replaying one log alone would no
+longer reproduce its own ids.
+
+`cmd/obgw` still serves one instrument, and is now the only thing between this
+design and a multi-symbol venue anyone can run.
 
 ### Added
 
@@ -1689,7 +1709,8 @@ trailing), GTC/IOC/FOK, self-trade prevention, a price-band circuit breaker, FIF
 and pro-rata allocation, L1/L2/L3 market data, a surveillance starter kit, and a
 market-microstructure research harness with a WebAssembly demo.
 
-[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.18.0...v0.19.0
