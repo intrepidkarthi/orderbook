@@ -24,6 +24,7 @@ import (
 // network connection.
 type Follower struct {
 	symbol string
+	cfg    matching.Config
 	conn   net.Conn
 	done   chan struct{}
 
@@ -36,6 +37,15 @@ type Follower struct {
 // StartFollower dials the primary and begins tailing. Have=0: the primary
 // answers with a snapshot taken mid-stream, then entries.
 func StartFollower(symbol, addr string) (*Follower, error) {
+	return StartFollowerFor(matching.DefaultConfig(symbol), addr)
+}
+
+// StartFollowerFor is StartFollower with the engine config supplied. A follower of
+// a sharded primary MUST carry the same ShardIndex: replay reproduces ids from the
+// per-shard counter plus the index, and an index that disagrees produces a book
+// whose orders are numbered differently from the primary's — a divergence the
+// digest catches, which is the point of carrying it here rather than hoping.
+func StartFollowerFor(cfg matching.Config, addr string) (*Follower, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -44,7 +54,7 @@ func StartFollower(symbol, addr string) (*Follower, error) {
 		conn.Close()
 		return nil, err
 	}
-	f := &Follower{symbol: symbol, conn: conn, done: make(chan struct{})}
+	f := &Follower{symbol: cfg.Symbol, cfg: cfg, conn: conn, done: make(chan struct{})}
 	go f.tail()
 	return f, nil
 }
@@ -69,7 +79,7 @@ func (f *Follower) tail() {
 		}
 		switch {
 		case fr.Snapshot != nil:
-			eng, err := matching.RestoreEngine(matching.DefaultConfig(f.symbol), fr.Snapshot)
+			eng, err := matching.RestoreEngine(f.cfg, fr.Snapshot)
 			if err != nil {
 				f.fail(fmt.Errorf("bootstrap: %w", err))
 				return

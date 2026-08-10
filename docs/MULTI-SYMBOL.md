@@ -1,8 +1,9 @@
 # Multi-Symbol — One Venue, Many Books
 
-Status: **partially implemented** — deliverables 1–4 ship (`pkg/matching/id.go`,
-`manifest.go`, durable shards, venue-wide ClOrdID admission); the market-data edge
-and the drills do not · Author: Karthikeyan NG · Last updated: 2026-08-10
+Status: **implemented** — all six deliverables; `pkg/matching/id.go`, `manifest.go`,
+durable shards, wire v4, `examples/multisymbol`, drill D8. Written as a spec before
+any code existed, and §7 records what building it found ·
+Author: Karthikeyan NG · Last updated: 2026-08-10
 
 Companion documents:
 - [`PRODUCTION-READINESS.md`](PRODUCTION-READINESS.md) — where multi-symbol is
@@ -233,7 +234,8 @@ deliberately avoided — so it lands as its own deliverable, after the core.
 | 5 | Market data per symbol | Wire v4 `MDSubscribe.Symbol`; two subscribers on two symbols each reconstruct their own book, proven over sockets |
 | 6 | The drills generalise | Replication D1–D7 run against a two-symbol venue |
 
-Status: **1–4 done**, 5 and 6 not started. See §7.
+Status: **all six done.** See §7 for what changed along the way, including two
+places the spec was wrong.
 
 ## 6. How this can fail, stated in advance
 
@@ -308,7 +310,33 @@ thing §2 spends the whole document refusing. **That tension is unresolved**, an
 is the honest status rather than a to-do: for now the cross-symbol case is caught at
 admission and the per-symbol case is caught properly.
 
-**Not built:** deliverable #5 (wire v4 `MDSubscribe.Symbol`) and #6 (the replication
-drills against a two-symbol venue). The core is durable, identified and recoverable
-across symbols; the market-data edge still serves one instrument, so a multi-symbol
-venue cannot yet publish more than one book to external subscribers.
+**The market-data edge landed as wire v4 and a new reference, not as a gateway
+rewrite.** `MDSubscribe` gains `Symbol`; a subscription selects one instrument and
+every message after it belongs to that instrument, so no other market-data payload
+changed and the golden vectors show it. `cmd/obgw` validates the field and refuses
+anything but the one symbol it serves — a real improvement even at one instrument,
+since a subscriber cannot detect being served the wrong book for itself.
+
+The consumer is `examples/multisymbol`: a two-book venue with per-shard feeds and
+logs, serving both books over sockets. That choice was deliberate. Converting
+`cmd/obgw` is a large change to the most-tested component here — one runner, one
+feed, one gate, one recovery path, sixteen call sites and fifteen test files — and
+doing it in the same pass as the protocol would have meant debugging both at once.
+The same argument [TRADE-BUST.md](TRADE-BUST.md) §4.5 made for deferring the wire,
+applied one level up. **`cmd/obgw` still serves one instrument, and that is now the
+only thing standing between this design and a multi-symbol venue anyone can run.**
+
+**Drill D8 was cheap, and §2 is why.** With no order across symbols there is nothing
+to synchronise, so the multi-symbol drill is two independent primary/follower pairs
+and a check that their ids stay disjoint. It comes with a negative control —
+`TestDrillD8Refuses_AFollowerOnTheWrongShard` — because a drill that cannot fail is
+decoration: a follower carrying the wrong shard index rebuilds the same orders under
+different numbers, and the digest catches it.
+
+**One test artifact worth recording**, because it looks like a bug and is not. A
+venue's live engines have an event sink attached; an engine replayed from its log
+with no sink emits nothing, so its `EventSeq` stays at zero and its digest differs
+from the venue it faithfully reproduced. That is a difference in what was
+*published*, not in the book. Real recovery attaches the sink after replay for
+exactly that reason (`cmd/obgw` does); a test comparing against a live engine has to
+match the arms.

@@ -350,7 +350,7 @@ func TestQueryRoundTrips(t *testing.T) {
 // worth a version bump: adding a message must be additive. If this fails, the new
 // types moved something a deployed client already parses.
 func TestNewMessagesDidNotDisturbExistingLayouts(t *testing.T) {
-	if Version != 3 {
+	if Version != 4 {
 		t.Errorf("Version = %d; adding message types must not require a bump", Version)
 	}
 	widths := map[string]int{
@@ -358,18 +358,21 @@ func TestNewMessagesDidNotDisturbExistingLayouts(t *testing.T) {
 		"Rejected": RejectedLen, "Executed": ExecutedLen, "Canceled": CanceledLen,
 		"Replaced": ReplacedLen, "CmdReject": CmdRejectLen,
 		"Busted": BustedLen, "MDTrade": MDTradeLen, "MDBust": MDBustLen,
+		"MDSubscribe": MDSubscribeLen,
 	}
 	// Derived by hand from the field lists in wire.go, not copied from the
 	// constants — a test that reads the value it is checking proves nothing.
 	//
-	// Executed and MDTrade grew by 8 in v3 (TradeID) and everything else is
-	// unchanged, which is the assertion that matters: a version bump is licence to
-	// move the payloads that needed to move, not an amnesty for the rest.
+	// Executed and MDTrade grew by 8 in v3 (TradeID), MDSubscribe grew by SymbolLen
+	// in v4, and everything else is unchanged — which is the assertion that
+	// matters: a version bump is licence to move the payloads that needed to move,
+	// not an amnesty for the rest.
 	want := map[string]int{
 		"Enter": 58, "Cancel": 22, "Accepted": 39,
 		"Rejected": 24, "Executed": 55, "Canceled": 24,
 		"Replaced": 30, "CmdReject": 24,
 		"Busted": 30, "MDTrade": 35, "MDBust": 18,
+		"MDSubscribe": 36,
 	}
 	for name, got := range widths {
 		if got != want[name] {
@@ -463,7 +466,7 @@ func goldenCases(t *testing.T) map[string][]byte {
 		})),
 		"login_accepted":  must(EncodeLoginAccepted(nil, LoginAccepted{Session: "INC0000001", Sequence: 42})),
 		"query":           must(EncodeQuery(nil, Query{Version: Version})),
-		"md_subscribe":    must(EncodeMDSubscribe(nil, MDSubscribe{Version: Version, Incarnation: "INC0000001", Seq: 4096})),
+		"md_subscribe":    must(EncodeMDSubscribe(nil, MDSubscribe{Version: Version, Incarnation: "INC0000001", Seq: 4096, Symbol: "BTC-USD"})),
 		"md_reject":       must(EncodeMDReject(nil, MDReject{Version: Version, Reason: MDRejectEvicted})),
 		"md_level":        must(EncodeMDLevel(nil, MDLevel{Version: Version, Side: SideBuy, Price: 30000, Qty: 250})),
 		"md_snapshot_end": must(EncodeMDSnapshotEnd(nil, MDSnapshotEnd{Version: Version, Count: 12, Seq: 4096, LastTradePrice: 30000})),

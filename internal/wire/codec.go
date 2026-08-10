@@ -681,6 +681,9 @@ func EncodeMDSubscribe(dst []byte, m MDSubscribe) ([]byte, error) {
 		return nil, err
 	}
 	binary.BigEndian.PutUint64(b[off+sessionLen:], m.Seq)
+	if err := putFixed(b[off+sessionLen+8:off+sessionLen+8+SymbolLen], m.Symbol); err != nil {
+		return nil, err
+	}
 	return dst, nil
 }
 
@@ -693,6 +696,7 @@ func DecodeMDSubscribe(src []byte) (MDSubscribe, error) {
 		Version:     src[1],
 		Incarnation: getFixed(src[2 : 2+sessionLen]),
 		Seq:         binary.BigEndian.Uint64(src[2+sessionLen:]),
+		Symbol:      getFixed(src[2+sessionLen+8 : 2+sessionLen+8+SymbolLen]),
 	}, nil
 }
 

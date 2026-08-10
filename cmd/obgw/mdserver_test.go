@@ -36,7 +36,7 @@ func dialMD(t *testing.T, srv *Server) *mdClient {
 func (c *mdClient) subscribe(incarnation string, seq uint64) {
 	c.t.Helper()
 	b, err := wire.EncodeMDSubscribe(nil, wire.MDSubscribe{
-		Version: wire.Version, Incarnation: incarnation, Seq: seq,
+		Version: wire.Version, Incarnation: incarnation, Seq: seq, Symbol: "X",
 	})
 	if err != nil {
 		c.t.Fatalf("EncodeMDSubscribe: %v", err)

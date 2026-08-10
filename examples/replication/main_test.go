@@ -386,3 +386,132 @@ func TestDrillD7_ABustReplicates(t *testing.T) {
 		t.Fatal("the control never busted anything — the drill proves nothing")
 	}
 }
+
+// TestDrillD8_AMultiSymbolVenueReplicates — docs/MULTI-SYMBOL.md deliverable #6.
+//
+// Two symbols, two shards, two logs, two followers, one venue. The drill is
+// deliberately shaped by the decision in MULTI-SYMBOL §2: there is no order across
+// symbols, so there is nothing to synchronise here and the assertion is per symbol.
+// What it does prove is that the pieces compose — a shard's index reaches its
+// follower, each follower digest-matches an uninterrupted engine fed the same
+// commands, and the two symbols' ids stay disjoint across the wire.
+//
+// If a follower were started with the wrong shard index its book would hold the
+// same orders under different numbers, and the digest would catch it. That is
+// asserted below rather than assumed.
+func TestDrillD8_AMultiSymbolVenueReplicates(t *testing.T) {
+	man := matching.NewManifest(filepath.Join(t.TempDir(), "venue.json"))
+	symbols := []string{"BTC-USD", "ETH-USD"}
+	const n = 80
+
+	type arm struct {
+		cfg      matching.Config
+		primary  *Primary
+		follower *Follower
+	}
+	arms := map[string]*arm{}
+
+	for _, sym := range symbols {
+		idx, err := man.IndexFor(sym)
+		if err != nil {
+			t.Fatalf("IndexFor(%s): %v", sym, err)
+		}
+		cfg := matching.DefaultConfig(sym)
+		cfg.ShardIndex = idx
+
+		p, err := NewPrimaryFor(cfg, filepath.Join(t.TempDir(), sym+".wal"), "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("NewPrimaryFor(%s): %v", sym, err)
+		}
+		defer p.Close()
+		f, err := StartFollowerFor(cfg, p.Addr())
+		if err != nil {
+			t.Fatalf("StartFollowerFor(%s): %v", sym, err)
+		}
+		arms[sym] = &arm{cfg: cfg, primary: p, follower: f}
+	}
+
+	// Interleave the two symbols, which is what a real venue does and what a
+	// centralised id counter would have made non-replayable.
+	for i := 1; i <= n; i++ {
+		for _, sym := range symbols {
+			tapeStep(t, arms[sym].primary.Runner, i)
+		}
+	}
+
+	ids := map[int64]string{}
+	for _, sym := range symbols {
+		a := arms[sym]
+		if err := a.follower.WaitApplied(int64(n), 10*time.Second); err != nil {
+			t.Fatalf("%s follower never caught up: %v", sym, err)
+		}
+		got, err := a.follower.Digest()
+		if err != nil {
+			t.Fatalf("%s Digest: %v", sym, err)
+		}
+
+		control := matching.NewEngine(a.cfg)
+		runTape(t, control, 1, n)
+		if want := control.TakeSnapshot().Digest(); got != want {
+			t.Errorf("%s follower diverged from its control:\n  follower %s\n  control  %s", sym, got, want)
+		}
+
+		// Every id this symbol issued belongs to its shard, and to no other.
+		for _, o := range control.TakeSnapshot().Orders {
+			if shard, _ := matching.SplitID(o.ID); shard != a.cfg.ShardIndex {
+				t.Errorf("%s order %d carries shard %d, want %d", sym, o.ID, shard, a.cfg.ShardIndex)
+			}
+			if prev, dup := ids[o.ID]; dup {
+				t.Errorf("id %d issued by both %s and %s", o.ID, prev, sym)
+			}
+			ids[o.ID] = sym
+		}
+	}
+	if len(ids) == 0 {
+		t.Fatal("the tape left no resting orders — the drill proves nothing")
+	}
+}
+
+// TestDrillD8Refuses_AFollowerOnTheWrongShard — the belt for D8's braces. A
+// follower carrying the wrong shard index rebuilds the same orders under different
+// numbers, and the digest must notice. Without partitioned ids there would be
+// nothing to notice.
+func TestDrillD8Refuses_AFollowerOnTheWrongShard(t *testing.T) {
+	man := matching.NewManifest(filepath.Join(t.TempDir(), "venue.json"))
+	idx, err := man.IndexFor("BTC-USD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := matching.DefaultConfig("BTC-USD")
+	cfg.ShardIndex = idx
+
+	p, err := NewPrimaryFor(cfg, filepath.Join(t.TempDir(), "p.wal"), "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	wrong := cfg
+	wrong.ShardIndex = idx + 1
+	f, err := StartFollowerFor(wrong, p.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 40
+	runTape(t, p.Runner, 1, n)
+	if err := f.WaitApplied(int64(n), 10*time.Second); err != nil {
+		t.Fatalf("follower never caught up: %v", err)
+	}
+	got, err := f.Digest()
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
+	snap, err := p.Runner.Checkpoint()
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	if got == snap.Digest() {
+		t.Error("a follower on the wrong shard index matched the primary — ids are not partitioned after all")
+	}
+}

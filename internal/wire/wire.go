@@ -42,13 +42,20 @@ import (
 // length, which meant any future message that happened to share a length with an
 // existing one would have been silently misread as it.
 //
+// v4 let a subscriber say which instrument it wants. MDSubscribe named an
+// incarnation and a sequence but no symbol, so a market-data connection could only
+// ever mean "the one book this venue serves" — which is not a protocol a
+// multi-symbol venue can speak (docs/MULTI-SYMBOL.md §4.5). A subscription now
+// selects exactly one symbol, and every message on that connection belongs to it,
+// so no other market-data payload changed.
+//
 // v3 gave a trade a name. Executed and MDTrade reported price, quantity and
 // aggressor but no identifier, so no message could ever refer back to a specific
 // print — which meant trade bust, once the engine had it
 // (docs/TRADE-BUST.md), could not be delivered to a client at all: the venue
 // would have been annulling a fill it had never named. Both payloads now carry
 // TradeID, and Busted / MDBust are the messages that use it.
-const Version uint8 = 3
+const Version uint8 = 4
 
 // SoupBinTCP packet types. Lowercase letters are client-to-server, uppercase are
 // server-to-client, following the published spec.
@@ -129,6 +136,7 @@ const (
 	MDRejectWrongIncarnation uint8 = 'I' // the cursor belongs to another run of the venue
 	MDRejectEvicted          uint8 = 'E' // too far behind; take a fresh snapshot
 	MDRejectMalformed        uint8 = 'M'
+	MDRejectUnknownSymbol    uint8 = 'S' // this venue does not serve that instrument
 )
 
 // Venue states carried by MDStatus.
@@ -149,10 +157,19 @@ type MDSubscribe struct {
 	Version     uint8
 	Incarnation string
 	Seq         uint64
+	// Symbol selects the instrument. One subscription is one symbol, and that is
+	// what keeps every other market-data payload unchanged: a connection carries
+	// one book, so a delta or a print needs no symbol of its own. A subscriber
+	// watching two instruments opens two connections, which is also how it wants to
+	// be shaped — it can drop one without disturbing the other.
+	//
+	// Sequences are per symbol and are not comparable across them
+	// (docs/MULTI-SYMBOL.md §4.2). Two connections are two timelines.
+	Symbol string
 }
 
 // MDSubscribeLen is the encoded width of an MDSubscribe payload.
-const MDSubscribeLen = 1 + 1 + sessionLen + 8
+const MDSubscribeLen = 1 + 1 + sessionLen + 8 + SymbolLen
 
 // MDReject refuses a subscription with one reason byte.
 type MDReject struct {

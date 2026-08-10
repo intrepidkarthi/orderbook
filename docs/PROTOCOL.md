@@ -133,6 +133,18 @@ of your own orders.
 > silently misread as it. The type byte is why the version freeze exists, and this
 > is what spending it looks like.
 
+> **v3 → v4.** `MDSubscribe` named an incarnation and a sequence but no symbol, so
+> a market-data connection could only ever mean "the one book this venue serves" —
+> not a protocol a multi-symbol venue can speak
+> ([MULTI-SYMBOL.md](MULTI-SYMBOL.md) §4.5). It gains `Symbol`, and a subscription
+> now selects exactly one instrument: every message on that connection belongs to
+> it, so no other market-data payload changed. A subscriber watching two symbols
+> opens two connections, which is also the shape it wants — it can drop one without
+> disturbing the other. Sequences are per symbol and are **not comparable across
+> them**. A subscription for an instrument the venue does not serve is refused with
+> `MDRejectUnknownSymbol` rather than quietly served the wrong book, which a
+> subscriber has no way to detect for itself.
+
 > **v2 → v3.** A trade had no name. `Executed` and `MDTrade` reported price,
 > quantity and aggressor, so no message could ever refer back to one specific
 > print — and when the engine gained trade bust
@@ -461,7 +473,7 @@ order entry is authenticated and per-account, market data is anonymous and ident
 for everyone. Sharing one port would put an unauthenticated subscriber on the same
 code path as order entry, which is the wrong default however carefully it is written.
 
-**Subscribe** — MsgType `b` (1) + Version (1) + Incarnation (10) + Seq (8).
+**Subscribe** — MsgType `b` (1) + Version (1) + Incarnation (10) + Seq (8) + Symbol (16).
 
 - `Seq` 0 means "I have nothing": you get a snapshot, then the live stream.
 - A non-zero `Seq` is a resume: you get everything after it and **no snapshot**.
@@ -487,6 +499,9 @@ reconciled against each other.
 Neither carries a reason. Bust reasons are operator free text on a fixed-width wire,
 so carrying one would mean inventing a code vocabulary nobody has asked for; Nasdaq's
 ITCH "Broken Trade" carries the match number and nothing else, for the same reason.
+
+A subscription naming an instrument the venue does not serve is refused with
+`MDRejectUnknownSymbol` (`S`).
 
 `MDIndicative` is published during pre-open and the closing auction, on the venue's own
 cadence rather than per order: during an auction the indicative price moves on nearly

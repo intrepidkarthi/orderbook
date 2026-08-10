@@ -91,6 +91,15 @@ func (s *Server) handleSubscriber(conn net.Conn) {
 		return
 	}
 
+	// A subscription names its instrument since wire v4. This gateway serves one,
+	// so anything else is refused rather than quietly served the wrong book — the
+	// failure a subscriber has no way to detect for itself, since every message
+	// after the subscribe is symbol-free by design (docs/MULTI-SYMBOL.md §4.5).
+	if sub.Symbol != s.cfg.Symbol {
+		s.mdRejectAndClose(conn, wire.MDRejectUnknownSymbol)
+		return
+	}
+
 	cursor, ok := s.mdStart(conn, sub)
 	if !ok {
 		return

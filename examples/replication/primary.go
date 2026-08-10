@@ -59,13 +59,21 @@ type Primary struct {
 // NewPrimary opens the log, wires the fan-out BEFORE the Runner exists — so no
 // command can be journalled unobserved — and starts accepting followers.
 func NewPrimary(symbol, walPath, addr string) (*Primary, error) {
+	return NewPrimaryFor(matching.DefaultConfig(symbol), walPath, addr)
+}
+
+// NewPrimaryFor is NewPrimary with the engine config supplied, which is what a
+// multi-symbol venue needs: each symbol's shard carries its own ShardIndex from
+// the venue manifest, so the ids this primary mints — and therefore the ids its
+// follower replays — are unique across the venue. See docs/MULTI-SYMBOL.md.
+func NewPrimaryFor(cfg matching.Config, walPath, addr string) (*Primary, error) {
 	w, err := wal.Open(walPath)
 	if err != nil {
 		return nil, err
 	}
 	p := &Primary{wal: w, walPath: walPath, subs: map[chan []byte]string{}}
 	w.SetOnAppend(p.fanout)
-	p.Runner = matching.NewRunner(matching.RunnerConfig{Engine: matching.DefaultConfig(symbol), Log: w})
+	p.Runner = matching.NewRunner(matching.RunnerConfig{Engine: cfg, Log: w})
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
