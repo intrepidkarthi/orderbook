@@ -5,6 +5,44 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
+## [Unreleased]
+
+### Fixed
+
+- **A constant-time-auth test that flaked, and would have taught people to ignore
+  it.** `TestAnUnknownAccountDoesTheSameWorkAsAWrongSecret` summed wall clock across
+  rounds, so it measured the work *plus* however long the scheduler kept the
+  goroutine off a core — and the second term is unbounded. Running the package
+  alongside the rest of the repo pushed the ratio to 4.19 against a threshold of 4,
+  twice, on code with no short-circuit in it. It now takes the **floor** of five
+  rounds: noise only ever adds time, so the minimum estimates the real cost while a
+  sum estimates the real cost plus the worst interference either arm happened to
+  meet. Against a genuine short-circuit the ratio is now ~8000 rather than barely
+  over 4. [SOAK.md](docs/SOAK.md) reached the same conclusion about heap growth for
+  the same reason: watch the floor, not the trend.
+
+- **`cmd/obdash` could not connect to a wire-v4 gateway.** It sent no `Symbol` on
+  its market-data subscribe, so the venue would have refused it outright — and its
+  own test double never validated the field, which is why every test passed. The
+  double is now as strict as the real venue: **a test double more permissive than
+  the thing it stands in for certifies the wrong system.**
+
+### Changed
+
+- **Price gauges are a labelled family, one series per book.**
+  `observability.Collector.GaugeFamily` registers a gauge that has one reading per
+  label set, with HELP and TYPE written once; `orderbook_best_bid`,
+  `_best_ask`, `_spread`, `_last_trade_price` and `_phase` now carry `symbol="…"`.
+  Countable gauges (queue depth, resting orders) stay bare and sum across books,
+  because a venue's queue depth is its queue depth — but a last trade price across
+  two instruments is not a number.
+
+  **They carry the label at a one-instrument venue too**, which is a breaking change
+  for anything scraping the bare names. A metric whose label set depends on how the
+  venue happens to be configured is one no dashboard can be written against, since
+  series would appear and disappear as instruments were added. `cmd/obdash` selects
+  the series for its `-symbol`.
+
 ## [0.23.0] - 2026-08-10
 
 The reference gateway catches up with the core. `cmd/obgw` was the last thing
