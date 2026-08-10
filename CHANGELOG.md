@@ -5,7 +5,14 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
-## [Unreleased]
+## [0.20.0] - 2026-08-10
+
+The first release whose corrections came from outside. A reader on
+r/highfreqtrading read the WAL's durability comment closely enough to see it was
+ordered against the wrong thing, and proposed the recovery test that would have
+caught it; both are below, credited, because the alternative is pretending the
+audit was internal. Shipping alongside them: the interactive tutorial, which
+teaches the order book by making you every player in it, on the real engine.
 
 ### Fixed
 
@@ -1509,7 +1516,8 @@ trailing), GTC/IOC/FOK, self-trade prevention, a price-band circuit breaker, FIF
 and pro-rata allocation, L1/L2/L3 market data, a surveillance starter kit, and a
 market-microstructure research harness with a WebAssembly demo.
 
-[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.16.0...v0.17.0
