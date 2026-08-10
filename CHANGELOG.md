@@ -5,6 +5,69 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
+## [Unreleased]
+
+### Added
+
+- **Trade bust** (`Engine.Bust`, [TRADE-BUST.md](docs/TRADE-BUST.md)) — annulling a
+  print that has already been published. It is an appended `EventBusted` referring
+  backwards by trade id, never a rewrite, because the tape a follower replays has to
+  stay identical to the tape the primary produced. The surprising part is what it
+  deliberately does *not* do, and each of the four has a test: the busted orders are
+  not re-rested, the stops the print fired stay fired, `LastTradePrice` is not
+  rewound, and the trade event is not amended. A bust arrives after the market has
+  moved, and each of those undos would be a second wrong rather than a correction of
+  the first.
+
+  The registry lives in the snapshot and therefore in the digest — two engines that
+  applied the same commands are equal only if they also agree on what settled. Drill
+  D7 is why that matters: a follower that drops the bust has a byte-identical *book*
+  and a different digest, which is the only reason the divergence is detectable at
+  all. `marketdata.Feed` is the consumer, publishing `UpdateBust` alongside the trade
+  id that `UpdateTrade` never carried.
+
+  Validation is identity-only: the engine refuses ids it never issued and says
+  nothing about price, size or counterparty, because it does not retain the trades it
+  printed. Duplicate busts are refused rather than swallowed.
+
+### Fixed
+
+- **Control commands were applied but never written down.** `Runner.logCommand`
+  ended with `default: return // control commands carry no book state; the snapshot
+  covers them`. The snapshot covers them *as of the snapshot* — so a halt, resume,
+  cancel-only or mark-price change issued after the last checkpoint was in no log,
+  recovery did not replay it, and a venue an operator had deliberately halted came
+  back **Open**, ready to trade, with nobody told. Shipped in every release since
+  control commands existed.
+
+  It is the same reasoning error as the durability comment corrected in v0.20.0: a
+  guarantee stated against the wrong reference point. It surfaced because trade bust
+  needed a durable seam for control commands and the seam turned out not to exist —
+  `CommandLog` now carries `AppendHalt`/`Resume`/`CancelOnly`/`SetMark`/`Bust`, and
+  `TestControlCommandsSurviveRecovery` fails against the old code. **Breaking** for
+  anyone implementing `matching.CommandLog` outside this repository.
+
+- **The threat model claimed a trade-bust path that did not exist, and named the
+  wrong mechanism for it.** [THREAT-MODEL.md](docs/THREAT-MODEL.md) credited the WAL
+  spine with "clean trade-bust / replay" while
+  [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) said there was no way to
+  amend a published trade. Writing the spec settled it: nobody had built one, and
+  replaying a log without the busted trade — the mechanism the row described —
+  rewrites history and hands every downstream consumer a tape that never happened.
+
+- **The published test count was 100 short.** `PRODUCTION-READINESS.md` said 480 test
+  functions for several releases after the suite passed it; it is 584, and the line
+  now carries the command that produces the number so the next reader can check it
+  instead of believing it. The event-conformance suite is 23 scenarios, not 22.
+
+### Known gaps
+
+- **No external client can be told about a bust.** Neither `wire.Executed` nor
+  `wire.MDTrade` carries a trade id, so the frozen protocol cannot name the print
+  being annulled. In-process consumers are served; the wire needs a `Version` bump on
+  both payloads and a bust message on each edge. Stated in the spec as §4.5 rather
+  than discovered later.
+
 ## [0.20.0] - 2026-08-10
 
 The first release whose corrections came from outside. A reader on
