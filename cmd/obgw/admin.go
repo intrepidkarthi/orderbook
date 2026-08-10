@@ -166,7 +166,24 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 // not advance its sequence either and calling that a stall would take a healthy node
 // out of rotation every quiet minute.
 func (s *Server) readiness() (bool, string) {
-	return s.readinessWith(s.runner.QueueLen(), s.runner.QueueCap())
+	// The worst book decides. A venue with one wedged matcher is not ready however
+	// healthy the others are, and averaging would hide exactly the case this exists
+	// to catch.
+	depth, capacity := 0, 0
+	worst := -1.0
+	for _, b := range s.books.all() {
+		d, c := b.runner.QueueLen(), b.runner.QueueCap()
+		if c <= 0 {
+			continue
+		}
+		if ratio := float64(d) / float64(c); ratio > worst {
+			worst, depth, capacity = ratio, d, c
+		}
+	}
+	if capacity == 0 {
+		return s.readinessWith(s.runner.QueueLen(), s.runner.QueueCap())
+	}
+	return s.readinessWith(depth, capacity)
 }
 
 // readinessWith takes the queue reading as arguments so a test can present the two
@@ -200,15 +217,33 @@ func (s *Server) readinessWith(depth, capacity int) (bool, string) {
 func (s *Server) registerGauges() {
 	c, r := s.metrics, s.runner
 
-	c.Gauge("orderbook_queue_depth", "Commands buffered for the matching goroutine.",
-		func() float64 { return float64(r.QueueLen()) })
-	c.Gauge("orderbook_queue_capacity", "Command queue capacity; depth approaching this means clients are about to be refused.",
-		func() float64 { return float64(r.QueueCap()) })
-	c.Gauge("orderbook_resting_orders", "Orders resting in the book.",
-		func() float64 { return float64(r.OrderCount()) })
-	c.Gauge("orderbook_pending_stops", "Conditional orders waiting for their trigger.",
-		func() float64 { return float64(r.PendingStopCount()) })
-	c.Gauge("orderbook_last_trade_price", "Most recent execution price, in ticks.",
+	// Countable values sum across books; a venue's queue depth is its queue depth.
+	//
+	// The price gauges below do NOT sum, and cannot: a last trade price averaged
+	// over two instruments is not a number. At a one-book venue they read that
+	// book, exactly as they always have. At a multi-book venue they read the FIRST
+	// book and are wrong for the rest — the right answer is one series per symbol,
+	// which needs label support this reference collector does not have. Stated here
+	// rather than left for an operator to discover from a graph.
+	sum := func(f func(*matching.Runner) int) func() float64 {
+		return func() float64 {
+			var n int
+			for _, b := range s.books.all() {
+				n += f(b.runner)
+			}
+			return float64(n)
+		}
+	}
+
+	c.Gauge("orderbook_queue_depth", "Commands buffered for the matching goroutines, summed across books.",
+		sum((*matching.Runner).QueueLen))
+	c.Gauge("orderbook_queue_capacity", "Command queue capacity, summed across books; depth approaching this means clients are about to be refused.",
+		sum((*matching.Runner).QueueCap))
+	c.Gauge("orderbook_resting_orders", "Orders resting across every book.",
+		sum((*matching.Runner).OrderCount))
+	c.Gauge("orderbook_pending_stops", "Conditional orders waiting for their trigger, across every book.",
+		sum((*matching.Runner).PendingStopCount))
+	c.Gauge("orderbook_last_trade_price", "Most recent execution price, in ticks. First book only at a multi-symbol venue.",
 		func() float64 { return float64(r.LastTradePrice()) })
 	// NaN rather than zero for an empty side. Zero is a price, and a monitoring
 	// system cannot tell a missing bid from a bid at zero; Prometheus understands NaN

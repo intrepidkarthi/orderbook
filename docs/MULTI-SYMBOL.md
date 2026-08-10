@@ -310,21 +310,54 @@ thing §2 spends the whole document refusing. **That tension is unresolved**, an
 is the honest status rather than a to-do: for now the cross-symbol case is caught at
 admission and the per-symbol case is caught properly.
 
-**The market-data edge landed as wire v4 and a new reference, not as a gateway
-rewrite.** `MDSubscribe` gains `Symbol`; a subscription selects one instrument and
+**`cmd/obgw` now serves many books, and converting it found one real bug.**
+`buildOrder` validated the incoming symbol and then stamped the *configured* one
+onto the order — so at a two-book venue every order silently landed on the first
+book. It was caught by the first test written against the converted gateway, which
+is the argument for writing that test rather than trusting a refactor that
+compiled.
+
+The structure is one `symbolBook` per instrument (matching goroutine, command log,
+market-data feed, rate gate) and a venue-wide account layer above them: one
+`Registry`, one publisher, one stream per account. A client holds one session and
+sees one ordered conversation whatever mix it trades, which is what makes a client
+id enough to name an order without also naming a symbol.
+
+**Routing a cancel needed the session to remember, not the registry to be asked.**
+`wire.Cancel` names an order by `ClOrdID` alone (§4.5), so the gateway has to pick
+a book without being told. Resolving the engine order id up front to read its shard
+field is the obvious move and it is wrong: the naming index is written by the
+*matching* goroutine, so a cancel arriving while its own Enter is still queued
+resolves to nothing and is refused for an order that is about to exist — the
+orphaned-order defect [SOAK.md](SOAK.md) measured at 12,843 orders in thirty
+seconds. The session already knows the answer, because it read the Enter and the
+Enter carried the symbol. So `session.entered` records it on the read loop before
+the command is enqueued, with the registry as the fallback for orders from earlier
+connections. `TestCancelRoutesWhileItsOwnEnterIsStillQueued` is the test, and
+deleting the session record is the sabotage that makes only that test fail.
+
+**Two things the gateway cannot do venue-wide, stated rather than discovered.** A
+mass cancel and a `Query` fan across every book and aggregate, because an account's
+orders are its orders. The price gauges do not aggregate and cannot — a last trade
+price averaged over two instruments is not a number — so at a multi-book venue they
+report the first book. The right answer is one series per symbol, which needs label
+support `pkg/observability` does not have. Readiness does take the worst book,
+since a venue with one wedged matcher is not ready however healthy the others are.
+
+**The market-data edge landed as wire v4 and a new reference before the gateway
+caught up.** `MDSubscribe` gains `Symbol`; a subscription selects one instrument and
 every message after it belongs to that instrument, so no other market-data payload
 changed and the golden vectors show it. `cmd/obgw` validates the field and refuses
 anything but the one symbol it serves — a real improvement even at one instrument,
 since a subscriber cannot detect being served the wrong book for itself.
 
-The consumer is `examples/multisymbol`: a two-book venue with per-shard feeds and
-logs, serving both books over sockets. That choice was deliberate. Converting
-`cmd/obgw` is a large change to the most-tested component here — one runner, one
-feed, one gate, one recovery path, sixteen call sites and fifteen test files — and
-doing it in the same pass as the protocol would have meant debugging both at once.
-The same argument [TRADE-BUST.md](TRADE-BUST.md) §4.5 made for deferring the wire,
-applied one level up. **`cmd/obgw` still serves one instrument, and that is now the
-only thing standing between this design and a multi-symbol venue anyone can run.**
+The first consumer was `examples/multisymbol`: a two-book venue with per-shard
+feeds and logs, serving both over sockets. Keeping it separate from the gateway for
+one release was deliberate — converting `cmd/obgw` in the same pass as the protocol
+would have meant debugging both at once, the argument
+[TRADE-BUST.md](TRADE-BUST.md) §4.5 made for deferring the wire, applied one level
+up. The gateway followed immediately after, and the example remains the smaller
+thing to read first.
 
 **Drill D8 was cheap, and §2 is why.** With no order across symbols there is nothing
 to synchronise, so the multi-symbol drill is two independent primary/follower pairs

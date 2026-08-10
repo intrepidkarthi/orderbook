@@ -91,31 +91,33 @@ func (s *Server) handleSubscriber(conn net.Conn) {
 		return
 	}
 
-	// A subscription names its instrument since wire v4. This gateway serves one,
-	// so anything else is refused rather than quietly served the wrong book — the
-	// failure a subscriber has no way to detect for itself, since every message
-	// after the subscribe is symbol-free by design (docs/MULTI-SYMBOL.md §4.5).
-	if sub.Symbol != s.cfg.Symbol {
+	// A subscription names its instrument since wire v4, and that name selects the
+	// feed. Anything the venue does not serve is refused rather than quietly given
+	// the wrong book — a failure a subscriber has no way to detect for itself,
+	// because every message after the subscribe is symbol-free by design
+	// (docs/MULTI-SYMBOL.md §4.5).
+	bk := s.books.bySymbol(sub.Symbol)
+	if bk == nil {
 		s.mdRejectAndClose(conn, wire.MDRejectUnknownSymbol)
 		return
 	}
 
-	cursor, ok := s.mdStart(conn, sub)
+	cursor, ok := s.mdStart(conn, bk.feed, sub)
 	if !ok {
 		return
 	}
-	s.mdStream(conn, cursor)
+	s.mdStream(conn, bk.feed, cursor)
 }
 
 // mdStart resolves where this subscriber begins: a snapshot for a new one, or the
 // resume point for one that already holds a cursor. It returns the sequence the
 // subscriber is now consistent with.
-func (s *Server) mdStart(conn net.Conn, sub wire.MDSubscribe) (uint64, bool) {
+func (s *Server) mdStart(conn net.Conn, feed *marketdata.Feed, sub wire.MDSubscribe) (uint64, bool) {
 	if sub.Seq > 0 {
 		// A resume. The incarnation is checked first, because a cursor from another
 		// run of the venue is meaningless here and serving it would hand the
 		// subscriber different content under numbers it believes it already has.
-		updates, err := s.feed.Resume(sub.Incarnation, sub.Seq)
+		updates, err := feed.Resume(sub.Incarnation, sub.Seq)
 		switch {
 		case errors.Is(err, marketdata.ErrWrongIncarnation):
 			s.mdRejectAndClose(conn, wire.MDRejectWrongIncarnation)
@@ -141,7 +143,7 @@ func (s *Server) mdStart(conn net.Conn, sub wire.MDSubscribe) (uint64, bool) {
 
 	// A new subscriber. The snapshot carries the sequence it is consistent with, and
 	// Feed.Snapshot takes both under one lock so that sequence is exact.
-	snap := s.feed.Snapshot()
+	snap := feed.Snapshot()
 	for _, side := range [2][]marketdata.L2Delta{snap.Bids, snap.Asks} {
 		for _, lvl := range side {
 			b, err := wire.EncodeMDLevel(nil, wire.MDLevel{
@@ -174,7 +176,7 @@ func (s *Server) mdStart(conn net.Conn, sub wire.MDSubscribe) (uint64, bool) {
 // trade the order-entry side makes; the interval bounds latency and a real deployment
 // would swap it for a condition variable. Called out here rather than left to be
 // discovered.
-func (s *Server) mdStream(conn net.Conn, cursor uint64) {
+func (s *Server) mdStream(conn net.Conn, feed *marketdata.Feed, cursor uint64) {
 	tick := time.NewTicker(mdPollInterval)
 	defer tick.Stop()
 	for {
@@ -182,7 +184,7 @@ func (s *Server) mdStream(conn net.Conn, cursor uint64) {
 		case <-s.quit:
 			return
 		case <-tick.C:
-			updates, err := s.feed.Since(cursor)
+			updates, err := feed.Since(cursor)
 			if err != nil {
 				// The subscriber fell behind the retention ring while connected. It
 				// is told, rather than silently resynchronised, so it knows its own

@@ -23,8 +23,19 @@ import (
 
 // Config configures the reference server.
 type Config struct {
-	Addr        string
-	Symbol      string
+	Addr string
+	// Symbol is the instrument a one-book venue serves. Prefer Symbols for more
+	// than one; setting either is enough, and applyDefaults keeps them in step.
+	Symbol string
+	// Symbols is the venue's instrument list. Each becomes an independent book:
+	// its own matching goroutine, command log, market-data feed and rate gate,
+	// with ids partitioned so they stay unique across all of them. More than one
+	// requires DataDir. See docs/MULTI-SYMBOL.md.
+	Symbols []string
+	// DataDir holds the venue manifest and, for a multi-symbol venue, one log and
+	// snapshot per instrument. A one-book venue keeps using WALPath and
+	// SnapshotPath unchanged.
+	DataDir     string
 	Incarnation string
 	// Accounts maps username to password. Authentication defaults to DENY: an
 	// empty map rejects every login rather than admitting everyone, because the
@@ -89,8 +100,18 @@ type Config struct {
 }
 
 func (c *Config) applyDefaults() {
-	if c.Symbol == "" {
+	if c.Symbol == "" && len(c.Symbols) == 0 {
 		c.Symbol = "X"
+	}
+	// Symbols is the venue's instrument list; Symbol is the one-instrument spelling
+	// of the same thing and stays supported, because every existing deployment and
+	// every test uses it. Keeping them in step here rather than at each use site
+	// means nothing downstream has to know which one the caller set.
+	if len(c.Symbols) == 0 {
+		c.Symbols = []string{c.Symbol}
+	}
+	if c.Symbol == "" {
+		c.Symbol = c.Symbols[0]
 	}
 	if c.OutboundDepth <= 0 {
 		c.OutboundDepth = 1024
@@ -115,15 +136,30 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// Server is a single-symbol order-entry gateway.
+// Server is an order-entry gateway over one or more instruments.
 //
-// Single-symbol is a real constraint, not a shortcut: engine order ids and event
-// sequences are per-Engine, so there is no venue-wide identifier space to hand a
-// client across symbols. Running several symbols means several engines, several
-// registries and a routing layer above this — which is the embedder's design
-// decision, not one this reference should make for them.
+// Each symbol is an independent book — its own matching goroutine, command log,
+// market-data feed and rate gate — and the only thing shared across them is the id
+// space, partitioned so that sharing costs no coordination. There is deliberately
+// no order of events ACROSS symbols: a venue-wide sequence needs a serialisation
+// point every command passes through, which is the bottleneck sharding exists to
+// remove. See docs/MULTI-SYMBOL.md.
+//
+// The account layer is venue-wide and singular on purpose: one Registry, one
+// publisher, one stream per account. A client holds one order-entry session and
+// sees one ordered conversation, whatever mix of instruments it trades — which is
+// what makes a client id enough to name an order without also naming a symbol.
 type Server struct {
-	cfg    Config
+	cfg   Config
+	books *bookSet
+	// manifest binds each symbol to its id-space partition. Nil for a one-book
+	// venue, which uses shard 0 and therefore the small dense ids it always had.
+	manifest *matching.Manifest
+
+	// runner, gate, feed and wal resolve to the FIRST book. They predate
+	// multi-symbol and are kept because a one-book venue is still the common case
+	// and every caller of them means "the book" — but anything that must work
+	// across instruments goes through s.books instead.
 	runner *matching.Runner
 	gate   *gateway.Gateway
 	reg    *orderentry.Registry
@@ -158,10 +194,6 @@ func NewServer(cfg Config) (*Server, error) {
 
 	reg := orderentry.NewRegistry(cfg.Incarnation, cfg.StreamRing)
 	pub := orderentry.NewPublisher(reg, 1<<15)
-	// The market-data feed shares the incarnation: both edges are describing the same
-	// run of the venue, and a subscriber that reconnects after a restart must be
-	// refused for the same reason an order-entry client is.
-	feed := marketdata.NewFeed(cfg.Incarnation, cfg.MDRetain)
 	// The collector is a sink like the other two, so it counts what the book saw
 	// rather than what the gateway believed it sent. Attaching it here rather than
 	// wrapping the handlers is the difference between metrics that can disagree with
@@ -177,66 +209,117 @@ func NewServer(cfg Config) (*Server, error) {
 	// MultiSink rather than replacing the publisher: Config.EventSink is a single
 	// slot, so attaching the feed on its own would silently stop every execution
 	// report the order-entry side depends on.
-	sink := matching.MultiSink{orderentry.NewNameIndex(reg), pub, feed, col}
-
-	eng := matching.DefaultConfig(cfg.Symbol)
-	eng.DedupClientOrderIDs = 4096
-	eng.SessionClose = cfg.SessionClose
-
-	var (
-		w         *wal.Writer
-		recovered *matching.Engine
-	)
-	if cfg.WALPath != "" {
-		// Recover with NO event sink attached. Replaying the log re-emits every
-		// historical event, and a publisher attached during recovery would fan a
-		// lifetime of executions at whoever connected next.
+	// One book per symbol. Recovery, adoption and the log are per instrument,
+	// because each is independently consistent: no invariant spans two books, so
+	// there is no venue-wide recovery step and nothing a skewed set of restarts
+	// could violate (docs/MULTI-SYMBOL.md §4.4).
+	set := newBookSet()
+	var manifest *matching.Manifest
+	if len(cfg.Symbols) > 1 {
+		if cfg.DataDir == "" {
+			return nil, fmt.Errorf("obgw: %d symbols need DataDir", len(cfg.Symbols))
+		}
 		var err error
-		if recovered, err = wal.Recover(eng, cfg.SnapshotPath, cfg.WALPath); err != nil {
-			return nil, fmt.Errorf("obgw: recover: %w", err)
-		}
-		if n := recovered.OrderCount(); n > 0 {
-			log.Printf("obgw: recovered %d resting orders from %s", n, cfg.WALPath)
-		}
-		// Rebuild the session layer's index over the recovered book. Recovery used
-		// to restore the book and nothing else, which left every recovered order
-		// unnameable: a client could see them in a Query reply and could not cancel
-		// or reduce them, and a fill against one produced no execution report at all
-		// because the publisher had no record of the order.
-		reg.Adopt(recovered.RestingOrders())
-		// Seed the market-data feed too, so a subscriber's first snapshot shows the
-		// venue as it actually is. A feed starting empty against a recovered book
-		// would show only what has changed since the restart, which is almost
-		// nothing — the same shape of bug the session index had before v0.12.0.
-		feed.Adopt(recovered.RestingOrders(), recovered.LastTradePrice())
-		// Only now do the sinks go on, so live events are published and replayed
-		// history is not.
-		recovered.SetEventSink(sink)
-		if w, err = wal.Open(cfg.WALPath); err != nil {
-			return nil, fmt.Errorf("obgw: open wal: %w", err)
+		if manifest, err = matching.LoadManifest(cfg.manifestPath()); err != nil {
+			return nil, fmt.Errorf("obgw: manifest: %w", err)
 		}
 	}
 
-	eng.EventSink = sink
-
-	// Only populate Log when there really is one. Assigning a nil *wal.Writer to
-	// the CommandLog interface field yields a NON-nil interface holding a nil
-	// pointer, so the Runner's `log != nil` check passes and the first command
-	// dereferences nil. This is the standard Go typed-nil trap and it cost a
-	// segfault on the first run with durability disabled.
-	rc := matching.RunnerConfig{Engine: eng, QueueSize: 8192}
-	if w != nil {
-		if cfg.SyncEveryCommand {
-			rc.Log = &syncingLog{w: w}
-		} else {
-			rc.Log = w
+	for _, symbol := range cfg.Symbols {
+		shardIndex := 0
+		if manifest != nil {
+			var err error
+			if shardIndex, err = manifest.IndexFor(symbol); err != nil {
+				return nil, fmt.Errorf("obgw: shard index for %s: %w", symbol, err)
+			}
 		}
+		// A feed per book: market data is per instrument and a subscription names
+		// exactly one (wire v4), so one shared feed would interleave two books into
+		// a single sequence space that no subscriber could untangle. The feed shares
+		// the venue's incarnation — both edges describe the same run, and a
+		// subscriber reconnecting after a restart is refused for the same reason an
+		// order-entry client is.
+		feed := marketdata.NewFeed(cfg.Incarnation, cfg.MDRetain)
+		// The naming index goes FIRST, and the order is load-bearing. It runs on the
+		// matching goroutine and makes an order addressable by its client's own id
+		// the moment the engine accepts it; everything after it may lag. Behind the
+		// publisher — which is where this lived until a soak found it — a cancel
+		// arriving while the pump was behind was refused for an order that was live
+		// in the book, and the client, correctly, never asked again.
+		//
+		// The index, the publisher and the collector are venue-wide and shared by
+		// every book; only the feed is per instrument.
+		sink := matching.MultiSink{orderentry.NewNameIndex(reg), pub, feed, col}
+
+		eng := matching.DefaultConfig(symbol)
+		eng.DedupClientOrderIDs = 4096
+		eng.SessionClose = cfg.SessionClose
+		eng.ShardIndex = shardIndex
+
+		walPath, _ := cfg.paths(symbol)
+		var (
+			w         *wal.Writer
+			recovered *matching.Engine
+		)
+		if walPath != "" {
+			// Recover with NO event sink attached. Replaying the log re-emits every
+			// historical event, and a publisher attached during recovery would fan a
+			// lifetime of executions at whoever connected next.
+			_, snapPath := cfg.paths(symbol)
+			var err error
+			if recovered, err = wal.Recover(eng, snapPath, walPath); err != nil {
+				return nil, fmt.Errorf("obgw: recover %s: %w", symbol, err)
+			}
+			if n := recovered.OrderCount(); n > 0 {
+				log.Printf("obgw: %s recovered %d resting orders from %s", symbol, n, walPath)
+			}
+			// Rebuild the session layer's index over the recovered book. Recovery used
+			// to restore the book and nothing else, which left every recovered order
+			// unnameable: a client could see them in a Query reply and could not cancel
+			// or reduce them, and a fill against one produced no execution report at all
+			// because the publisher had no record of the order.
+			reg.Adopt(recovered.RestingOrders())
+			// Seed the market-data feed too, so a subscriber's first snapshot shows the
+			// venue as it actually is. A feed starting empty against a recovered book
+			// would show only what has changed since the restart, which is almost
+			// nothing — the same shape of bug the session index had before v0.12.0.
+			feed.Adopt(recovered.RestingOrders(), recovered.LastTradePrice())
+			// Only now do the sinks go on, so live events are published and replayed
+			// history is not.
+			recovered.SetEventSink(sink)
+			if w, err = wal.Open(walPath); err != nil {
+				return nil, fmt.Errorf("obgw: open wal %s: %w", symbol, err)
+			}
+		}
+
+		eng.EventSink = sink
+
+		// Only populate Log when there really is one. Assigning a nil *wal.Writer to
+		// the CommandLog interface field yields a NON-nil interface holding a nil
+		// pointer, so the Runner's `log != nil` check passes and the first command
+		// dereferences nil. This is the standard Go typed-nil trap and it cost a
+		// segfault on the first run with durability disabled.
+		rc := matching.RunnerConfig{Engine: eng, QueueSize: 8192}
+		if w != nil {
+			if cfg.SyncEveryCommand {
+				rc.Log = &syncingLog{w: w}
+			} else {
+				rc.Log = w
+			}
+		}
+		// recovered is nil without a WAL, in which case NewRunnerFor builds a fresh
+		// engine from the config. With one, the recovered book is what we serve —
+		// building from the bare config here is how the first attempt silently threw
+		// away everything it had just read back from disk.
+		runner := matching.NewRunnerFor(recovered, rc)
+
+		set.add(&symbolBook{
+			symbol: symbol, shardIndex: shardIndex,
+			runner: runner, feed: feed, wal: w,
+			gate: gateway.New(runner, gateway.Config{Rate: cfg.RatePerSec, Burst: cfg.Burst}),
+		})
 	}
-	// recovered is nil without a WAL, in which case NewRunnerFor builds a fresh
-	// engine from the config. With one, the recovered book is what we serve —
-	// building from the bare config here is how the first attempt silently threw
-	// away everything it had just read back from disk.
-	runner := matching.NewRunnerFor(recovered, rc)
+	primary := set.first()
 
 	auth := cfg.Auth
 	if auth == nil {
@@ -244,16 +327,18 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	srv := &Server{
-		wal:       w,
 		cfg:       cfg,
+		books:     set,
+		manifest:  manifest,
 		auth:      auth,
-		runner:    runner,
+		wal:       primary.wal,
+		runner:    primary.runner,
+		gate:      primary.gate,
+		feed:      primary.feed,
 		metrics:   col,
 		applyHist: col.Histogram(applyLatencyMetric),
-		gate:      gateway.New(runner, gateway.Config{Rate: cfg.RatePerSec, Burst: cfg.Burst}),
 		reg:       reg,
 		pub:       pub,
-		feed:      feed,
 		quit:      make(chan struct{}),
 		conns:     map[net.Conn]struct{}{},
 	}
@@ -329,14 +414,14 @@ func (s *Server) Serve() error {
 			}
 		}()
 	}
-	if s.wal != nil {
+	if s.durable() {
 		// The group-commit loop is what creates the durability window. In
 		// per-command mode every record is already on disk before it was
 		// applied, so the ticker would only re-sync a synced file.
 		if !s.cfg.SyncEveryCommand {
 			go s.syncLoop()
 		}
-		if s.cfg.CheckpointEvery > 0 && s.cfg.SnapshotPath != "" {
+		if s.cfg.CheckpointEvery > 0 {
 			go s.checkpointLoop()
 		}
 	}
@@ -382,16 +467,30 @@ func (s *Server) Close() {
 		s.closeAdmin()
 
 		s.wg.Wait()
-		s.runner.Close()
+		for _, b := range s.books.all() {
+			b.runner.Close()
+		}
 		s.pub.Close()
-		// The log is closed last, after the matcher has stopped producing, and
+		// The logs are closed last, after every matcher has stopped producing, and
 		// Close syncs — so a clean shutdown loses nothing.
-		if s.wal != nil {
-			if err := s.wal.Close(); err != nil {
-				log.Printf("obgw: wal close: %v", err)
+		for _, b := range s.books.all() {
+			if b.wal != nil {
+				if err := b.wal.Close(); err != nil {
+					log.Printf("obgw: %s wal close: %v", b.symbol, err)
+				}
 			}
 		}
 	})
+}
+
+// durable reports whether any book is journalled.
+func (s *Server) durable() bool {
+	for _, b := range s.books.all() {
+		if b.wal != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // expireLoop drives time-in-force expiry on a ticker, so a DAY or GTD order leaves
@@ -406,7 +505,9 @@ func (s *Server) expireLoop() {
 		case <-s.quit:
 			return
 		case <-t.C:
-			s.runner.ExpireDue()
+			for _, b := range s.books.all() {
+				b.runner.ExpireDue()
+			}
 		}
 	}
 }
@@ -422,8 +523,13 @@ func (s *Server) syncLoop() {
 		case <-s.quit:
 			return
 		case <-t.C:
-			if err := s.wal.Sync(); err != nil {
-				log.Printf("obgw: wal sync: %v", err)
+			for _, b := range s.books.all() {
+				if b.wal == nil {
+					continue
+				}
+				if err := b.wal.Sync(); err != nil {
+					log.Printf("obgw: %s wal sync: %v", b.symbol, err)
+				}
 			}
 		}
 	}
@@ -440,12 +546,21 @@ func (s *Server) checkpointLoop() {
 		case <-s.quit:
 			return
 		case <-t.C:
-			snap, err := s.runner.Checkpoint()
-			if err != nil {
-				return // shutting down
-			}
-			if err := wal.WriteSnapshot(s.cfg.SnapshotPath, snap); err != nil {
-				log.Printf("obgw: checkpoint: %v", err)
+			// Per book, and they land at different instants. That is correct rather
+			// than tolerated: no invariant spans two books, so there is no venue-wide
+			// point in the command order for them to share (docs/MULTI-SYMBOL.md §4.4).
+			for _, b := range s.books.all() {
+				_, snapPath := s.cfg.paths(b.symbol)
+				if snapPath == "" {
+					continue
+				}
+				snap, err := b.runner.Checkpoint()
+				if err != nil {
+					return // shutting down
+				}
+				if err := wal.WriteSnapshot(snapPath, snap); err != nil {
+					log.Printf("obgw: %s checkpoint: %v", b.symbol, err)
+				}
 			}
 		}
 	}
@@ -488,6 +603,90 @@ type session struct {
 	// connection. Anything that claims "everything up to Seq has reached you" has to
 	// wait on this, not merely on the publisher — see waitForStream.
 	emitted atomic.Uint64
+
+	// entered remembers which instrument each client id was sent for, so a cancel,
+	// reduce or replace naming only a ClOrdID can be routed to the right book.
+	//
+	// This exists because of the one thing that cannot be done instead: resolving
+	// the engine order id up front to read its shard field. The naming index is
+	// written by the MATCHING goroutine when the engine accepts an order, so a
+	// cancel that arrives while its own Enter is still queued would resolve to
+	// nothing and be refused for an order that is about to exist — precisely the
+	// orphaned-order defect a soak found and pkg/orderentry/nameindex.go exists to
+	// prevent. The session already knows the answer: it read the Enter, and the
+	// Enter carried the symbol.
+	//
+	// Written and read only on the read loop, so no lock. Bounded, because a
+	// long-lived session must not turn its own client ids into a leak; eviction is
+	// harmless since the registry can still route anything older.
+	enteredMu sync.Mutex
+	entered   map[string]string
+	enterQ    []string
+}
+
+// maxRememberedEnters bounds session.entered. It only has to cover the window
+// between an Enter being read and the engine accepting it, which is microseconds;
+// this is four orders of magnitude of headroom.
+const maxRememberedEnters = 8192
+
+// rememberEnter records the instrument a client id was sent for.
+func (sess *session) rememberEnter(clOrdID, symbol string) {
+	if clOrdID == "" {
+		return
+	}
+	sess.enteredMu.Lock()
+	defer sess.enteredMu.Unlock()
+	if sess.entered == nil {
+		sess.entered = map[string]string{}
+	}
+	if _, dup := sess.entered[clOrdID]; !dup {
+		sess.enterQ = append(sess.enterQ, clOrdID)
+		if len(sess.enterQ) > maxRememberedEnters {
+			delete(sess.entered, sess.enterQ[0])
+			sess.enterQ = sess.enterQ[1:]
+		}
+	}
+	sess.entered[clOrdID] = symbol
+}
+
+// bookFor routes an order to its instrument's book. The order carries its symbol,
+// so this cannot miss — buildOrder already refused anything the venue does not
+// serve, and every conditional order is built through it.
+func (sess *session) bookFor(o *types.Order) *symbolBook {
+	if o != nil {
+		if b := sess.srv.books.bySymbol(o.Symbol); b != nil {
+			return b
+		}
+	}
+	return sess.srv.books.first()
+}
+
+// bookForClOrdID routes a command that names an order by the client's own id.
+//
+// The session's own record comes first because it is the only source that knows
+// about an order the engine has not accepted yet. The registry is the fallback,
+// and it covers what the session cannot: an order entered on an earlier connection
+// and still resting, whose engine id carries its shard.
+func (sess *session) bookForClOrdID(clOrdID string) *symbolBook {
+	sess.enteredMu.Lock()
+	symbol, ok := sess.entered[clOrdID]
+	sess.enteredMu.Unlock()
+	if ok {
+		if b := sess.srv.books.bySymbol(symbol); b != nil {
+			return b
+		}
+	}
+	if id, ok := sess.srv.reg.OrderIDFor(sess.account, clOrdID); ok {
+		if b := sess.srv.books.byOrderID(id); b != nil {
+			return b
+		}
+	}
+	// A one-book venue always has an answer, and giving it one here keeps every
+	// single-symbol path exactly as it was.
+	if len(sess.srv.books.symbols()) == 1 {
+		return sess.srv.books.first()
+	}
+	return nil
 }
 
 func (s *Server) handle(conn net.Conn) {
@@ -679,7 +878,7 @@ func (sess *session) enter(payload []byte) {
 		return
 	}
 
-	if !sess.srv.gate.Allow(o, time.Now()) {
+	if !sess.bookFor(o).gate.Allow(o, time.Now()) {
 		sess.reject(m.ClOrdID, orderentry.ReasonThrottled)
 		return
 	}
@@ -687,7 +886,7 @@ func (sess *session) enter(payload []byte) {
 	// Fire and forget: the outcome arrives on the event stream. The synchronous
 	// API would hand back the engine-owned order, which this goroutine must not
 	// read while the matcher is mutating it.
-	if err := sess.srv.runner.TryEnqueue(o); err != nil {
+	if err := sess.bookFor(o).runner.TryEnqueue(o); err != nil {
 		reason := orderentry.ReasonOverloaded
 		if errors.Is(err, matching.ErrShuttingDown) {
 			reason = orderentry.ReasonShuttingDown
@@ -704,7 +903,7 @@ func (sess *session) enter(payload []byte) {
 // reason is non-zero when the order cannot be built, so each caller rejects with the
 // client's own id rather than a bare code.
 func (sess *session) buildOrder(b wire.BaseOrder) (*types.Order, uint16) {
-	if b.Symbol != sess.srv.cfg.Symbol {
+	if sess.srv.books.bySymbol(b.Symbol) == nil {
 		return nil, orderentry.ReasonMalformed
 	}
 	// Venue-wide ClOrdID uniqueness, enforced rather than assumed. The naming index
@@ -716,6 +915,10 @@ func (sess *session) buildOrder(b wire.BaseOrder) (*types.Order, uint16) {
 	if sess.srv.reg.IsLiveClOrdID(sess.account, b.ClOrdID) {
 		return nil, orderentry.ReasonDuplicateClOrd
 	}
+	// Recorded here, on the read loop, before the command is enqueued: a cancel
+	// read a moment later must be routable even though the engine has not accepted
+	// this order yet. See session.entered.
+	sess.rememberEnter(b.ClOrdID, b.Symbol)
 	side := types.SideBuy
 	if b.Side == wire.SideSell {
 		side = types.SideSell
@@ -738,7 +941,10 @@ func (sess *session) buildOrder(b wire.BaseOrder) (*types.Order, uint16) {
 		// which would leave an order the client believes is dated resting forever.
 		return nil, orderentry.ReasonMalformed
 	}
-	o, err := types.NewOrder(sess.account, sess.srv.cfg.Symbol, side, otype, b.Price, b.Quantity, tif)
+	// b.Symbol, not the configured one: buildOrder validated it against the venue's
+	// book set above, and stamping the gateway's default here instead is how every
+	// order at a two-book venue silently ended up on the first book.
+	o, err := types.NewOrder(sess.account, b.Symbol, side, otype, b.Price, b.Quantity, tif)
 	if err != nil {
 		return nil, orderentry.ReasonMalformed
 	}
@@ -751,7 +957,7 @@ func (sess *session) buildOrder(b wire.BaseOrder) (*types.Order, uint16) {
 // entry is rate-limited and backpressured exactly like a plain Enter. A path that
 // skipped the gate would be a way around the venue's own throttle.
 func (sess *session) submitConditional(clOrdID string, o *types.Order, enqueue func() error) {
-	if !sess.srv.gate.Allow(o, time.Now()) {
+	if !sess.bookFor(o).gate.Allow(o, time.Now()) {
 		sess.reject(clOrdID, orderentry.ReasonThrottled)
 		return
 	}
@@ -786,11 +992,11 @@ func (sess *session) enterDated(payload []byte) {
 	o.TimeInForce = types.TIFGoodTillDate
 	o.ExpiresAt = time.Unix(0, m.ExpiresAt).UTC()
 
-	if !sess.srv.gate.Allow(o, time.Now()) {
+	if !sess.bookFor(o).gate.Allow(o, time.Now()) {
 		sess.reject(m.Order.ClOrdID, orderentry.ReasonThrottled)
 		return
 	}
-	if err := sess.srv.runner.TryEnqueue(o); err != nil {
+	if err := sess.bookFor(o).runner.TryEnqueue(o); err != nil {
 		reason := orderentry.ReasonOverloaded
 		if errors.Is(err, matching.ErrShuttingDown) {
 			reason = orderentry.ReasonShuttingDown
@@ -819,7 +1025,7 @@ func (sess *session) enterStop(payload []byte) {
 		return
 	}
 	sess.submitConditional(m.Order.ClOrdID, o, func() error {
-		return sess.srv.runner.TryEnqueueStop(stop)
+		return sess.bookFor(stop.Order).runner.TryEnqueueStop(stop)
 	})
 }
 
@@ -862,7 +1068,7 @@ func (sess *session) enterOCO(payload []byte) {
 		return
 	}
 	sess.submitConditional(m.Primary.ClOrdID, primary, func() error {
-		return sess.srv.runner.TryEnqueueOCO(oco)
+		return sess.bookFor(oco.Primary).runner.TryEnqueueOCO(oco)
 	})
 }
 
@@ -885,7 +1091,7 @@ func (sess *session) enterIceberg(payload []byte) {
 		return
 	}
 	sess.submitConditional(m.Order.ClOrdID, o, func() error {
-		return sess.srv.runner.TryEnqueueIceberg(ib)
+		return sess.bookFor(ib.Order).runner.TryEnqueueIceberg(ib)
 	})
 }
 
@@ -931,7 +1137,7 @@ func (sess *session) enterPegged(payload []byte) {
 		return
 	}
 	sess.submitConditional(m.Order.ClOrdID, o, func() error {
-		return sess.srv.runner.TryEnqueuePegged(pegged)
+		return sess.bookFor(pegged.Order).runner.TryEnqueuePegged(pegged)
 	})
 }
 
@@ -953,7 +1159,7 @@ func (sess *session) enterTrailing(payload []byte) {
 		return
 	}
 	sess.submitConditional(m.Order.ClOrdID, o, func() error {
-		return sess.srv.runner.TryEnqueueTrailing(ts)
+		return sess.bookFor(ts.Order).runner.TryEnqueueTrailing(ts)
 	})
 }
 
@@ -973,7 +1179,16 @@ func (sess *session) cancel(payload []byte) {
 	// non-blocking send onto this connection's bounded queue and nothing else.
 	//
 	// The account is the session's, so a client can only ever cancel its own.
-	err = sess.srv.runner.TryEnqueueCancelBy(sess.account, func() (int64, bool) {
+	// The book comes from the session's own record of where this client id was
+	// sent, so it is known even while the Enter is still queued. Resolution of the
+	// engine id still happens inside the closure, on the matching goroutine, for
+	// the reason above.
+	target := sess.bookForClOrdID(m.ClOrdID)
+	if target == nil {
+		sess.reject(m.ClOrdID, orderentry.ReasonUnknownOrder)
+		return
+	}
+	err = target.runner.TryEnqueueCancelBy(sess.account, func() (int64, bool) {
 		id, ok := sess.srv.reg.OrderIDFor(sess.account, m.ClOrdID)
 		if !ok {
 			sess.reject(m.ClOrdID, orderentry.ReasonUnknownOrder)
@@ -1014,7 +1229,12 @@ func (sess *session) reduce(payload []byte) {
 	//
 	// The account is the session's, so the engine's own (orderID, userID) check
 	// makes naming another client's order impossible rather than merely refused.
-	done, err := sess.srv.runner.TryReduceAsyncBy(m.Quantity, sess.account, func() (int64, bool) {
+	target := sess.bookForClOrdID(m.ClOrdID)
+	if target == nil {
+		sess.reject(m.ClOrdID, orderentry.ReasonUnknownOrder)
+		return
+	}
+	done, err := target.runner.TryReduceAsyncBy(m.Quantity, sess.account, func() (int64, bool) {
 		return sess.srv.reg.OrderIDFor(sess.account, m.ClOrdID)
 	})
 	if err != nil {
@@ -1091,12 +1311,12 @@ func (sess *session) replaceOrder(payload []byte) {
 	}
 	// The replacement is new liquidity, so it passes the admission gate exactly as a
 	// plain Enter would. Replace must not be a way around the venue's throttle.
-	if !sess.srv.gate.Allow(replacement, time.Now()) {
+	if !sess.bookFor(replacement).gate.Allow(replacement, time.Now()) {
 		sess.reject(m.Order.ClOrdID, orderentry.ReasonThrottled)
 		return
 	}
 	// Named at apply time, for the same reason a cancel is. See sess.cancel.
-	done, err := sess.srv.runner.TryReplaceAsyncBy(sess.account, replacement, func() (int64, bool) {
+	done, err := sess.bookFor(replacement).runner.TryReplaceAsyncBy(sess.account, replacement, func() (int64, bool) {
 		return sess.srv.reg.OrderIDFor(sess.account, m.OrigClOrdID)
 	})
 	if err != nil {
@@ -1139,23 +1359,35 @@ func (sess *session) massCancel(payload []byte) {
 		sess.reject("", orderentry.ReasonMalformed)
 		return
 	}
-	done, err := sess.srv.runner.TryCancelAllAsync(sess.account)
-	if err != nil {
-		reason := orderentry.ReasonOverloaded
-		if errors.Is(err, matching.ErrShuttingDown) {
-			reason = orderentry.ReasonShuttingDown
+	// A mass cancel means "pull everything I have", and an account can be resting
+	// on every instrument the venue serves, so this fans across all of them. The
+	// ack's count is the total: a client that got one number per book would have to
+	// know how many books there are, which is not something the wire tells it.
+	all := sess.srv.books.all()
+	dones := make([]<-chan int, 0, len(all))
+	for _, b := range all {
+		done, err := b.runner.TryCancelAllAsync(sess.account)
+		if err != nil {
+			reason := orderentry.ReasonOverloaded
+			if errors.Is(err, matching.ErrShuttingDown) {
+				reason = orderentry.ReasonShuttingDown
+			}
+			sess.reject("", reason)
+			return
 		}
-		sess.reject("", reason)
-		return
+		dones = append(dones, done)
 	}
 	go func() {
 		var n int
-		select {
-		case n = <-done:
-		case <-sess.closed:
-			return
-		case <-sess.srv.quit:
-			return
+		for _, done := range dones {
+			select {
+			case got := <-done:
+				n += got
+			case <-sess.closed:
+				return
+			case <-sess.srv.quit:
+				return
+			}
 		}
 		sess.srv.pub.Wait()
 		seq := sess.srv.reg.Stream(sess.account).Seq()
@@ -1213,8 +1445,10 @@ func (sess *session) pullBookIfRequested() {
 		return
 	default:
 	}
-	if _, err := sess.srv.runner.TryCancelAllAsync(sess.account); err != nil {
-		log.Printf("obgw: cancel-on-disconnect for %s: %v", sess.account, err)
+	for _, b := range sess.srv.books.all() {
+		if _, err := b.runner.TryCancelAllAsync(sess.account); err != nil {
+			log.Printf("obgw: cancel-on-disconnect for %s on %s: %v", sess.account, b.symbol, err)
+		}
 	}
 }
 
@@ -1230,10 +1464,17 @@ func (sess *session) pullBookIfRequested() {
 // Reading the book without draining first would let an execution that happened
 // before the read arrive after the report, and the client would apply it twice.
 func (sess *session) reportOpenOrders() {
-	orders, err := sess.srv.runner.OpenOrdersFor(sess.account)
-	if err != nil {
-		sess.reject("", orderentry.ReasonShuttingDown)
-		return
+	// Every book, in the venue's stable order. An account's open orders are its
+	// open orders; splitting the answer per instrument would make a client
+	// reconcile N replies against a count the wire gives it once.
+	var orders []*types.Order
+	for _, b := range sess.srv.books.all() {
+		got, err := b.runner.OpenOrdersFor(sess.account)
+		if err != nil {
+			sess.reject("", orderentry.ReasonShuttingDown)
+			return
+		}
+		orders = append(orders, got...)
 	}
 	sess.srv.pub.Wait()
 

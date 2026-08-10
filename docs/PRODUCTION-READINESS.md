@@ -273,12 +273,28 @@ detects, it does not prevent), automatic failover, synchronous replication, and 
 window and says so — see [EXCHANGE-ARCHITECTURE.md](EXCHANGE-ARCHITECTURE.md) for why
 bundling a consensus would force a wrong answer on everybody.
 
-### Multi-symbol — partial
+### Multi-symbol — ships, with one thing deliberately absent
 
-`matching.Shards` routes by symbol across independent engines. But order ids and event
-sequences are per-engine, so there is no venue-wide identifier space, and a client
-crossing symbols sees independent sequence spaces. The reference gateway serves one
-instrument. A multi-symbol venue is a routing layer you write.
+Order and trade ids are partitioned into a shard index and a per-shard counter, so a
+single `int64` names an order across the whole venue; the mapping lives in a durable,
+CRC-checked manifest, because losing it makes every id ever issued ambiguous. Each
+symbol is an independent book with its own command log, market-data feed and rate
+gate, so recovery and replication are the single-symbol code paths run N times.
+`cmd/obgw` serves a set of instruments, and a market-data subscription names the one
+it wants (wire v4). See [MULTI-SYMBOL.md](MULTI-SYMBOL.md).
+
+This section previously said "a multi-symbol venue is a routing layer you write."
+That was wrong in a way worth recording: `ShardsConfig` had no way to supply a
+`CommandLog`, and durability, recovery and replication all hang off it — so a sharded
+venue could not survive a restart at all. It was most of a venue, not a routing layer.
+
+**Deliberately absent: any order of events across symbols.** No cross-symbol
+atomicity, no spread or basket orders, no venue-wide "as of" instant, and event
+sequences that are per symbol and not comparable between them. A venue-wide sequence
+needs a serialisation point every command passes through, which is the bottleneck
+sharding exists to remove. Also absent: per-symbol metric series, since the reference
+collector has no label support and a price averaged across instruments is not a
+number.
 
 ### The financial stack — absent by design
 
