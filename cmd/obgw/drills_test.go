@@ -198,6 +198,10 @@ func (l *blockingLog) AppendOCO(*types.OCOOrder) (int64, error)          { l.blo
 func (l *blockingLog) AppendIceberg(*types.IcebergOrder) (int64, error)  { l.block(); return 0, nil }
 func (l *blockingLog) AppendPegged(*types.PeggedOrder) (int64, error)    { l.block(); return 0, nil }
 func (l *blockingLog) AppendTrailing(*types.TrailingStop) (int64, error) { l.block(); return 0, nil }
+func (l *blockingLog) AppendHalt() (int64, error)                        { l.block(); return 0, nil }
+func (l *blockingLog) AppendResume() (int64, error)                      { l.block(); return 0, nil }
+func (l *blockingLog) AppendCancelOnly() (int64, error)                  { l.block(); return 0, nil }
+func (l *blockingLog) AppendSetMark(int64) (int64, error)                { l.block(); return 0, nil }
 
 // TestDrillAStalledMatcherIsVisibleAndAQuietOneIsNot induces a real stall and checks
 // the signal the runbook is built on.

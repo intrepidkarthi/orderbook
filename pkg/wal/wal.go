@@ -75,6 +75,15 @@ const (
 	KindPegged                         // a ProcessPegged(pegged)
 	KindTrailing                       // a ProcessTrailingStop(trailing)
 	KindReplace                        // a Replace(id, user, replacement)
+
+	// Control commands. They change no order, which is why they went unlogged for
+	// four releases — and the engine state they DO change is state a venue is
+	// judged on. Appended at the end of the block, never inserted: a reader with
+	// records already on disk must not have them silently renumbered.
+	KindHalt       // a Halt()
+	KindResume     // a Resume()
+	KindCancelOnly // a SetCancelOnly()
+	KindSetMark    // a SetMarkPrice(price)
 )
 
 // Entry is one durable command-log record.
@@ -103,6 +112,12 @@ type Entry struct {
 	PegRef     string       `json:"peg_ref,omitempty"`     // KindPegged
 	PegOffset  int64        `json:"peg_offset,omitempty"`  // KindPegged
 	Trail      int64        `json:"trail,omitempty"`       // KindTrailing
+
+	// MarkPrice is the new mark/index reference of a KindSetMark, in ticks. It gets
+	// its own field rather than borrowing CancelID, which the Runner reuses as an
+	// int64 payload internally: the log is read by tooling and by humans, and a
+	// mark price filed under "cancel_id" is a trap laid for whoever reads it next.
+	MarkPrice int64 `json:"mark_price,omitempty"`
 }
 
 // Header, record framing and the bounds that make a corrupt file safe to read.
@@ -386,6 +401,24 @@ func (w *Writer) AppendTrailing(ts *types.TrailingStop) (int64, error) {
 	return w.append(Entry{Kind: KindTrailing, Order: ts.Order, Trail: ts.Trail})
 }
 
+// AppendHalt logs a Halt. Control commands are logged even when they are no-ops on
+// the live engine — a Halt of an already-halted venue emits no event but is still a
+// command that was issued — because the log records what was ATTEMPTED and replay
+// reaches the same state by attempting the same thing. Filtering here would put a
+// second, subtler copy of the engine's transition rules in the writer.
+func (w *Writer) AppendHalt() (int64, error) { return w.append(Entry{Kind: KindHalt}) }
+
+// AppendResume logs a Resume.
+func (w *Writer) AppendResume() (int64, error) { return w.append(Entry{Kind: KindResume}) }
+
+// AppendCancelOnly logs a SetCancelOnly.
+func (w *Writer) AppendCancelOnly() (int64, error) { return w.append(Entry{Kind: KindCancelOnly}) }
+
+// AppendSetMark logs a SetMarkPrice, in ticks.
+func (w *Writer) AppendSetMark(price int64) (int64, error) {
+	return w.append(Entry{Kind: KindSetMark, MarkPrice: price})
+}
+
 // Sync flushes buffered records and fsyncs the file — the durability point. Call
 // it before acknowledging the commands since the last Sync (group commit).
 func (w *Writer) Sync() error {
@@ -573,6 +606,17 @@ func RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64) {
 			if ts, err := types.NewTrailingStop(e.Order.Fresh(), e.Trail); err == nil {
 				eng.ProcessTrailingStop(ts)
 			}
+		case KindHalt:
+			eng.Halt()
+		case KindResume:
+			eng.Resume()
+		case KindCancelOnly:
+			eng.SetCancelOnly()
+		case KindSetMark:
+			// A refused step (ErrMarkStepTooLarge) is ignored for the same reason a
+			// cancel's refusal is: the guard is deterministic, so replaying the same
+			// call against the same state reaches the same verdict.
+			_ = eng.SetMarkPrice(e.MarkPrice)
 		}
 	}
 }

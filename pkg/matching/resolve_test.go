@@ -158,6 +158,10 @@ func (l *recordingLog) AppendOCO(o *types.OCOOrder) (int64, error)           { r
 func (l *recordingLog) AppendIceberg(ib *types.IcebergOrder) (int64, error)  { return 0, nil }
 func (l *recordingLog) AppendPegged(p *types.PeggedOrder) (int64, error)     { return 0, nil }
 func (l *recordingLog) AppendTrailing(ts *types.TrailingStop) (int64, error) { return 0, nil }
+func (l *recordingLog) AppendHalt() (int64, error)                           { return 0, nil }
+func (l *recordingLog) AppendResume() (int64, error)                         { return 0, nil }
+func (l *recordingLog) AppendCancelOnly() (int64, error)                     { return 0, nil }
+func (l *recordingLog) AppendSetMark(price int64) (int64, error)             { return 0, nil }
 func (l *recordingLog) lastCancelID() int64 {
 	if len(l.cancels) == 0 {
 		return -1

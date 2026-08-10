@@ -80,10 +80,13 @@ type Runner struct {
 // buffered writer and batch the fsync (group commit) rather than syncing per
 // command.
 //
-// Every method here corresponds to a command that mutates the book. A mutating
-// command missing from this interface is not "not yet logged", it is a book the
-// log cannot reproduce — which is how Reduce came to be applied but not recorded,
-// so a restart brought the order back at its original size.
+// Every method here corresponds to a command that mutates ENGINE STATE, which is
+// not the same as mutating the book and the difference cost four releases. A
+// mutating command missing from this interface is not "not yet logged", it is
+// state the log cannot reproduce — which is how Reduce came to be applied but not
+// recorded, so a restart brought the order back at its original size, and how an
+// operator's halt came to be applied but not recorded, so a restart brought the
+// venue back open. See docs/TRADE-BUST.md §3.5 for the second one.
 type CommandLog interface {
 	AppendSubmit(o *types.Order) (int64, error)
 	AppendCancel(orderID int64, userID string) (int64, error)
@@ -95,6 +98,15 @@ type CommandLog interface {
 	AppendIceberg(ib *types.IcebergOrder) (int64, error)
 	AppendPegged(p *types.PeggedOrder) (int64, error)
 	AppendTrailing(ts *types.TrailingStop) (int64, error)
+
+	// Control commands. They touch no order, and that is exactly why they were
+	// left out: "carries no book state" was read as "needs no record", when the
+	// trading state and the mark price are two of the few things a venue is
+	// actually judged on being right about after a restart.
+	AppendHalt() (int64, error)
+	AppendResume() (int64, error)
+	AppendCancelOnly() (int64, error)
+	AppendSetMark(price int64) (int64, error)
 }
 
 // RunnerConfig configures a Runner.
@@ -306,8 +318,19 @@ func (r *Runner) logCommand(cmd command) {
 		seq, err = r.log.AppendPegged(cmd.pegged)
 	case cmdTrailing:
 		seq, err = r.log.AppendTrailing(cmd.trailing)
+	case cmdHalt:
+		seq, err = r.log.AppendHalt()
+	case cmdResume:
+		seq, err = r.log.AppendResume()
+	case cmdCancelOnly:
+		seq, err = r.log.AppendCancelOnly()
+	case cmdSetMark:
+		seq, err = r.log.AppendSetMark(cmd.cancelID)
 	default:
-		return // control commands carry no book state; the snapshot covers them
+		// Genuinely read-only commands: queries, the checkpoint, and ExpireDue,
+		// whose effects are cancels the engine derives from a clock replay cannot
+		// rewind. Nothing here changes state a recovery must reproduce.
+		return
 	}
 	if err != nil {
 		r.engine.Halt()

@@ -394,6 +394,7 @@ type countingLog struct {
 	submits, cancels, reduces, cancelAlls     int
 	stops, ocos, icebergs, peggeds, trailings int
 	replaces                                  int
+	controls                                  int // halt / resume / cancel-only / mark
 	seq                                       int64
 }
 
@@ -427,6 +428,11 @@ func (l *countingLog) AppendTrailing(*types.TrailingStop) (int64, error) {
 	l.trailings++
 	return l.next()
 }
+
+func (l *countingLog) AppendHalt() (int64, error)         { l.controls++; return l.next() }
+func (l *countingLog) AppendResume() (int64, error)       { l.controls++; return l.next() }
+func (l *countingLog) AppendCancelOnly() (int64, error)   { l.controls++; return l.next() }
+func (l *countingLog) AppendSetMark(int64) (int64, error) { l.controls++; return l.next() }
 
 // TestReplaceHonoursMinRestingTime — a replace cancels displayed size, so the
 // anti-spoofing floor must apply to it too. A verb that escaped it would leave the

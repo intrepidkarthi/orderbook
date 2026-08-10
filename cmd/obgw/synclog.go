@@ -83,3 +83,18 @@ func (s *syncingLog) AppendPegged(p *types.PeggedOrder) (int64, error) {
 func (s *syncingLog) AppendTrailing(ts *types.TrailingStop) (int64, error) {
 	return s.sync(s.w.AppendTrailing(ts))
 }
+
+// The control commands sync too. They are rare enough that the cost is
+// irrelevant, and they are the commands whose loss is least recoverable by
+// inspection: a missing order shows up in a client's open-order query, a missing
+// halt shows up as a venue trading when the operator believed it stopped.
+
+func (s *syncingLog) AppendHalt() (int64, error) { return s.sync(s.w.AppendHalt()) }
+
+func (s *syncingLog) AppendResume() (int64, error) { return s.sync(s.w.AppendResume()) }
+
+func (s *syncingLog) AppendCancelOnly() (int64, error) { return s.sync(s.w.AppendCancelOnly()) }
+
+func (s *syncingLog) AppendSetMark(price int64) (int64, error) {
+	return s.sync(s.w.AppendSetMark(price))
+}
