@@ -5,6 +5,26 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
+## [Unreleased]
+
+### Fixed
+
+- **Replication drill D6 blamed the wrong follower, about one run in twelve.** The
+  drill drove traffic until `Shed() != 0` and assumed the follower cut was the
+  wedged one. A follower that actually *applies* commands is slower than a wedged
+  socket — which merely fills a kernel buffer and costs the primary nothing until it
+  is full — so driven flat out, the healthy follower's own ship buffer overflowed
+  first and it was the one shed. The drill then reported "shedding the wedge broke
+  the healthy follower", the opposite of what had happened.
+
+  `Primary.ShedPeers` now attributes each cut to a peer address, which is the part
+  worth having beyond the test: a bare drop counter cannot tell an operator whether
+  a client stopped reading or a follower is merely running behind, and those need
+  opposite responses. D6 waits for the wedge specifically, asserts no other follower
+  was cut, and paces the tape against the healthy follower so there is one candidate
+  rather than two. 0 failures in 40 runs, against roughly 8% before; still fails
+  against a fanout that blocks instead of shedding.
+
 ## [0.21.0] - 2026-08-10
 
 The trade-bust release, and a reminder of why this project writes specs first: the
