@@ -292,9 +292,10 @@ venue could not survive a restart at all. It was most of a venue, not a routing 
 atomicity, no spread or basket orders, no venue-wide "as of" instant, and event
 sequences that are per symbol and not comparable between them. A venue-wide sequence
 needs a serialisation point every command passes through, which is the bottleneck
-sharding exists to remove. Also absent: per-symbol metric series, since the reference
-collector has no label support and a price averaged across instruments is not a
-number.
+sharding exists to remove. Per-symbol metric series ship: the price gauges carry a `symbol` label, one
+series per book, and they do so even at a one-instrument venue — a metric whose
+label set depends on how the venue happens to be configured is one no dashboard
+can be written against.
 
 ### The financial stack — absent by design
 

@@ -87,9 +87,29 @@ func TestAnUnknownAccountDoesTheSameWorkAsAWrongSecret(t *testing.T) {
 	}
 	measure("alice") // warm up
 	measure("nobody")
-	// Interleaved, so drift lands on both arms rather than whichever ran second.
-	known := measure("alice") + measure("alice")
-	unknown := measure("nobody") + measure("nobody")
+
+	// The FLOOR of several rounds, not their sum, and the difference is what makes
+	// this test survive a loaded machine. Wall clock measures the work plus however
+	// long the scheduler kept this goroutine off a core, and the second term is
+	// unbounded — running this package alongside the rest of the repo pushed the
+	// ratio to 4.19 against a threshold of 4, twice, on code with no short-circuit
+	// in it. Noise only ever ADDS time, so the minimum across rounds estimates the
+	// real cost while the sum estimates the real cost plus the worst interference
+	// either arm happened to meet.
+	//
+	// docs/SOAK.md reached the same conclusion about heap growth for the same
+	// reason: watch the floor, not the trend.
+	//
+	// A genuine short-circuit still fails this, and by more than before: it changes
+	// the FLOOR of the unknown-account arm by the cost of a 64 KiB comparison, which
+	// is exactly the quantity a minimum measures well.
+	const rounds = 5
+	known, unknown := time.Duration(math.MaxInt64), time.Duration(math.MaxInt64)
+	for i := 0; i < rounds; i++ {
+		// Interleaved, so drift lands on both arms rather than whichever ran second.
+		known = min(known, measure("alice"))
+		unknown = min(unknown, measure("nobody"))
+	}
 
 	ratio := float64(known) / float64(unknown)
 	if math.IsNaN(ratio) || ratio > 4 || ratio < 0.25 {

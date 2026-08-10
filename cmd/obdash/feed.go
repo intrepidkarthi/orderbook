@@ -22,6 +22,11 @@ import (
 // more than a reconnect.
 type feed struct {
 	addr string
+	// symbol is what this dashboard watches. A market-data subscription names its
+	// instrument since wire v4, and a venue that serves several books has no way to
+	// guess which one an anonymous subscriber meant — so it refuses rather than
+	// pick, and a dashboard that sent no symbol would simply never connect.
+	symbol string
 
 	mu        sync.Mutex
 	connected bool
@@ -50,11 +55,12 @@ type feedIndicative struct {
 
 const tradeRing = 30
 
-func newFeed(addr string) *feed {
+func newFeed(addr, symbol string) *feed {
 	return &feed{
-		addr: addr,
-		bids: map[int64]int64{},
-		asks: map[int64]int64{},
+		symbol: symbol,
+		addr:   addr,
+		bids:   map[int64]int64{},
+		asks:   map[int64]int64{},
 	}
 }
 
@@ -82,7 +88,7 @@ func (f *feed) session() error {
 	}
 	defer conn.Close()
 
-	sub, err := wire.EncodeMDSubscribe(nil, wire.MDSubscribe{Version: wire.Version})
+	sub, err := wire.EncodeMDSubscribe(nil, wire.MDSubscribe{Version: wire.Version, Symbol: f.symbol})
 	if err != nil {
 		return err
 	}

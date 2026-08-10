@@ -30,6 +30,7 @@ import (
 	"io"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,8 +67,9 @@ type Collector struct {
 	reasonMu sync.RWMutex
 	reasons  map[string]*atomic.Int64
 
-	gaugeMu sync.RWMutex
-	gauges  map[string]gauge
+	gaugeMu  sync.RWMutex
+	gauges   map[string]gauge
+	families map[string]gaugeFamily
 
 	histMu sync.Mutex
 	hists  map[string]*Histogram
@@ -76,9 +78,10 @@ type Collector struct {
 // NewCollector builds an empty collector.
 func NewCollector() *Collector {
 	return &Collector{
-		reasons: map[string]*atomic.Int64{},
-		gauges:  map[string]gauge{},
-		hists:   map[string]*Histogram{},
+		reasons:  map[string]*atomic.Int64{},
+		gauges:   map[string]gauge{},
+		families: map[string]gaugeFamily{},
+		hists:    map[string]*Histogram{},
 	}
 }
 
@@ -207,6 +210,64 @@ func (c *Collector) Gauge(name, help string, fn func() float64) {
 	c.gauges[name] = gauge{help: help, read: fn}
 }
 
+// Label is one dimension of a metric series.
+type Label struct{ Name, Value string }
+
+// Series is one labelled reading inside a gauge family.
+type Series struct {
+	Labels []Label
+	Value  float64
+}
+
+type gaugeFamily struct {
+	help string
+	read func() []Series
+}
+
+// GaugeFamily registers a gauge that has one reading PER LABEL SET rather than
+// one reading full stop — a venue's best bid once per instrument, say.
+//
+// It exists because the alternative is worse in a specific way. A gauge that
+// aggregates across dimensions is fine for anything countable (queue depth is
+// queue depth) and meaningless for anything that is a price: an average of two
+// instruments' last trade is not a number anybody can act on, and reporting just
+// one of them under a bare name is a graph that is quietly about the wrong book.
+//
+// HELP and TYPE are written once for the family and one line per series, which is
+// what the exposition format requires and what registering the same name twice
+// would get wrong.
+//
+// fn is called during a scrape: it must not block, and it should return series in
+// a stable order — though Render sorts them anyway, so a scrape is byte-stable
+// even if a caller's map iteration is not.
+func (c *Collector) GaugeFamily(name, help string, fn func() []Series) {
+	c.gaugeMu.Lock()
+	defer c.gaugeMu.Unlock()
+	c.families[name] = gaugeFamily{help: help, read: fn}
+}
+
+// renderLabels turns a label set into the {a="1",b="2"} the format wants.
+func renderLabels(labels []Label) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	sorted := make([]Label, len(labels))
+	copy(sorted, labels)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, l := range sorted {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(l.Name)
+		b.WriteByte('=')
+		b.WriteString(quote(l.Value))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
 // Histogram returns (creating if needed) a latency histogram under name.
 func (c *Collector) Histogram(name string) *Histogram {
 	c.histMu.Lock()
@@ -329,6 +390,41 @@ func (c *Collector) WritePrometheus(w io.Writer) error {
 	for i, name := range gnames {
 		if err := writeMetric(w, name, gauges[i].help, "gauge", "", gauges[i].read()); err != nil {
 			return err
+		}
+	}
+
+	c.gaugeMu.RLock()
+	fnames := make([]string, 0, len(c.families))
+	for name := range c.families {
+		fnames = append(fnames, name)
+	}
+	sort.Strings(fnames)
+	fams := make([]gaugeFamily, len(fnames))
+	for i, name := range fnames {
+		fams[i] = c.families[name]
+	}
+	c.gaugeMu.RUnlock()
+	for i, name := range fnames {
+		series := fams[i].read()
+		if len(series) == 0 {
+			continue
+		}
+		rendered := make([]string, len(series))
+		for j, sr := range series {
+			rendered[j] = renderLabels(sr.Labels)
+		}
+		sort.SliceStable(series, func(a, b int) bool { return rendered[a] < rendered[b] })
+		sort.Strings(rendered)
+		// HELP and TYPE once, then one line per series — registering the same name
+		// through Gauge twice would emit them per line and produce a document most
+		// parsers accept and none should have to.
+		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n", name, fams[i].help, name); err != nil {
+			return err
+		}
+		for j, sr := range series {
+			if _, err := fmt.Fprintf(w, "%s%s %s\n", name, rendered[j], formatFloat(sr.Value)); err != nil {
+				return err
+			}
 		}
 	}
 

@@ -50,14 +50,29 @@ func adminGet(t *testing.T, srv *Server, path string) (int, string) {
 	return resp.StatusCode, string(body)
 }
 
-// metricValue pulls a single sample out of an exposition body.
+// metricValue reads a metric by name, with or without labels. The price gauges
+// carry a symbol label (one series per book) and the countable ones do not, so a
+// helper that only understood bare names would quietly stop finding half of them.
 func metricValue(t *testing.T, body, name string) float64 {
 	t.Helper()
 	for _, line := range strings.Split(body, "\n") {
-		if !strings.HasPrefix(line, name+" ") {
+		rest, ok := strings.CutPrefix(line, name)
+		if !ok || rest == "" {
 			continue
 		}
-		v, err := strconv.ParseFloat(strings.TrimPrefix(line, name+" "), 64)
+		switch rest[0] {
+		case ' ':
+			// bare series
+		case '{':
+			end := strings.IndexByte(rest, '}')
+			if end < 0 {
+				continue
+			}
+			rest = rest[end+1:]
+		default:
+			continue // a longer metric name that merely starts with this one
+		}
+		v, err := strconv.ParseFloat(strings.TrimSpace(rest), 64)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
@@ -118,7 +133,10 @@ func TestEmptySideIsNaNNotZero(t *testing.T) {
 	srv := adminServer(t)
 	_, body := adminGet(t, srv, "/metrics")
 	for _, name := range []string{"orderbook_best_bid", "orderbook_best_ask", "orderbook_spread"} {
-		if !strings.Contains(body, name+" NaN") {
+		// The price gauges are labelled by instrument, so the series is
+		// name{symbol="X"} rather than a bare name — matching on the bare prefix
+		// would have quietly stopped checking anything.
+		if !strings.Contains(body, name+`{symbol="X"} NaN`) {
 			t.Errorf("%s is not NaN on an empty book:\n%s", name, body)
 		}
 	}

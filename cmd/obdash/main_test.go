@@ -25,7 +25,7 @@ func enc(t *testing.T, f func() ([]byte, error)) []byte {
 // zero-qty delta removes, a trade prints and moves last, a status changes the
 // venue state, and the sequence tracks the stream.
 func TestFeedBuildsTheBookFromTheWire(t *testing.T) {
-	f := newFeed("")
+	f := newFeed("", "BTC-USD")
 	v := wire.Version
 
 	f.apply(enc(t, func() ([]byte, error) {
@@ -97,6 +97,16 @@ func TestFeedSubscribesAndAppliesOverASocket(t *testing.T) {
 		if err != nil || sub.Seq != 0 {
 			return // a dashboard always subscribes fresh
 		}
+		// As strict as the real venue. obgw refuses a subscription that does not
+		// name an instrument it serves, and this double did not — which is why the
+		// dashboard could stop sending a symbol at wire v4 and still pass every
+		// test here while being unable to connect to an actual gateway. A test
+		// double more permissive than the thing it stands in for is a test that
+		// certifies the wrong system.
+		if sub.Symbol != "BTC-USD" {
+			t.Errorf("subscribe named symbol %q, want BTC-USD — the real venue would refuse this", sub.Symbol)
+			return
+		}
 		send := func(b []byte) { _ = wire.WritePacket(conn, wire.PacketSequencedData, b) }
 		b, _ := wire.EncodeMDLevel(nil, wire.MDLevel{Version: v, Side: wire.SideBuy, Price: 9999, Qty: 700})
 		send(b)
@@ -107,7 +117,7 @@ func TestFeedSubscribesAndAppliesOverASocket(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 	}()
 
-	f := newFeed(ln.Addr().String())
+	f := newFeed(ln.Addr().String(), "BTC-USD")
 	go func() { _ = f.session() }()
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -138,7 +148,7 @@ orderbook_best_bid NaN
 not a metric line
 orderbook_spread 3
 `
-	vals, err := parseMetrics(strings.NewReader(text))
+	vals, err := parseMetrics(strings.NewReader(text), "BTC-USD")
 	if err != nil {
 		t.Fatalf("parseMetrics: %v", err)
 	}
@@ -222,5 +232,37 @@ func TestSSEDeliversAndShedsSlowClients(t *testing.T) {
 	h.mu.Unlock()
 	if still {
 		t.Error("a client that never drains was kept — broadcast would eventually block on it")
+	}
+}
+
+// TestMetricsParserSelectsItsOwnInstrument — the venue exposes one price series
+// per book, so a dashboard has to pick. Keying on the whole `name{labels}` string
+// (which the parser did before v4) loses every labelled gauge, and on a page that
+// looks exactly like a venue with no bids.
+func TestMetricsParserSelectsItsOwnInstrument(t *testing.T) {
+	text := `# HELP orderbook_best_bid Best bid per instrument.
+# TYPE orderbook_best_bid gauge
+orderbook_best_bid{symbol="BTC-USD"} 30000
+orderbook_best_bid{symbol="ETH-USD"} 2000
+# HELP orderbook_queue_depth Commands buffered.
+# TYPE orderbook_queue_depth gauge
+orderbook_queue_depth 7
+`
+	vals, err := parseMetrics(strings.NewReader(text), "ETH-USD")
+	if err != nil {
+		t.Fatalf("parseMetrics: %v", err)
+	}
+	if got := vals["orderbook_best_bid"]; got != 2000 {
+		t.Errorf("best bid = %v, want the ETH series (2000) under the bare name", got)
+	}
+	// A venue-wide series has no labels and belongs to every dashboard.
+	if got := vals["orderbook_queue_depth"]; got != 7 {
+		t.Errorf("queue depth = %v, want 7 — an unlabelled series was dropped", got)
+	}
+	// And an instrument this dashboard does not watch contributes nothing.
+	if vals2, err := parseMetrics(strings.NewReader(text), "DOGE-USD"); err != nil {
+		t.Fatal(err)
+	} else if _, present := vals2["orderbook_best_bid"]; present {
+		t.Error("a series for another instrument was shown as this one's")
 	}
 }

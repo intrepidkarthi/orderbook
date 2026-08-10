@@ -18,14 +18,16 @@ import (
 type scraper struct {
 	url string
 
+	symbol string // which instrument's labelled series this dashboard shows
+
 	mu     sync.Mutex
 	values map[string]float64
 	ok     bool
 	err    string
 }
 
-func newScraper(url string) *scraper {
-	return &scraper{url: url, values: map[string]float64{}}
+func newScraper(url, symbol string) *scraper {
+	return &scraper{url: url, symbol: symbol, values: map[string]float64{}}
 }
 
 func (s *scraper) run(every time.Duration) {
@@ -43,7 +45,7 @@ func (s *scraper) scrape() {
 		return
 	}
 	defer resp.Body.Close()
-	vals, err := parseMetrics(resp.Body)
+	vals, err := parseMetrics(resp.Body, s.symbol)
 	if err != nil {
 		s.fail(err.Error())
 		return
@@ -82,10 +84,20 @@ func (s *scraper) state() metricsState {
 	return out
 }
 
-// parseMetrics reads Prometheus text exposition: "name value" per line, with
-// optional labels we don't need (the venue exposes none on its gauges) and
-// comment lines starting with '#'.
-func parseMetrics(r io.Reader) (map[string]float64, error) {
+// parseMetrics reads Prometheus text exposition: "name value" or
+// `name{labels} value` per line, with comment lines starting with '#'.
+//
+// Labels are not decoration here. The venue's price gauges carry symbol="…", one
+// series per instrument, because a last trade price averaged across two books is
+// not a number — so this keeps the series for `symbol` and discards the rest,
+// leaving the page's bare metric names meaning "the instrument this dashboard
+// watches". A series with no labels (queue depth, connection counts) is venue-wide
+// and always kept.
+//
+// An earlier version keyed on the whole `name{labels}` string and quietly lost
+// every labelled gauge, which on a dashboard looks identical to a venue with no
+// bids.
+func parseMetrics(r io.Reader, symbol string) (map[string]float64, error) {
 	out := map[string]float64{}
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
@@ -101,7 +113,13 @@ func parseMetrics(r io.Reader) (map[string]float64, error) {
 		if err != nil {
 			continue
 		}
-		out[fields[0]] = v
+		name, labels, labelled := strings.Cut(fields[0], "{")
+		if labelled {
+			if !strings.Contains(labels, `symbol="`+symbol+`"`) {
+				continue // another instrument's series
+			}
+		}
+		out[name] = v
 	}
 	return out, sc.Err()
 }

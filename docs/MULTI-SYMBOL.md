@@ -336,13 +336,20 @@ the command is enqueued, with the registry as the fallback for orders from earli
 connections. `TestCancelRoutesWhileItsOwnEnterIsStillQueued` is the test, and
 deleting the session record is the sabotage that makes only that test fail.
 
-**Two things the gateway cannot do venue-wide, stated rather than discovered.** A
-mass cancel and a `Query` fan across every book and aggregate, because an account's
-orders are its orders. The price gauges do not aggregate and cannot — a last trade
-price averaged over two instruments is not a number — so at a multi-book venue they
-report the first book. The right answer is one series per symbol, which needs label
-support `pkg/observability` does not have. Readiness does take the worst book,
-since a venue with one wedged matcher is not ready however healthy the others are.
+**Aggregation, and the one thing that cannot aggregate.** A mass cancel and a
+`Query` fan across every book and sum, because an account's orders are its orders,
+and readiness takes the WORST book, since a venue with one wedged matcher is not
+ready however healthy the others are. Prices cannot be summed or averaged — a last
+trade price across two instruments is not a number — so they became a labelled
+family instead: `observability.Collector.GaugeFamily`, one series per book carrying
+`symbol="…"`, HELP and TYPE written once.
+
+They carry the label at a one-instrument venue too. A metric whose label set
+depends on how the venue happens to be configured is one no dashboard can be
+written against, since series would appear and disappear as instruments were added.
+That consistency is worth the break it caused: `cmd/obdash` keyed its parser on the
+whole `name{labels}` string and therefore lost every labelled gauge — which on an
+operator's page looks exactly like a venue with no bids.
 
 **The market-data edge landed as wire v4 and a new reference before the gateway
 caught up.** `MDSubscribe` gains `Symbol`; a subscription selects one instrument and

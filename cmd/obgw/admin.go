@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
+	"github.com/intrepidkarthi/orderbook/pkg/observability"
 )
 
 // The admin edge: a third listener, serving metrics and health to the operator
@@ -215,7 +216,7 @@ func (s *Server) readinessWith(depth, capacity int) (bool, string) {
 // Every one of these reads a structure that carries its own lock or an atomic. None
 // of them enqueues a command — see the note at the top of this file.
 func (s *Server) registerGauges() {
-	c, r := s.metrics, s.runner
+	c := s.metrics
 
 	// Countable values sum across books; a venue's queue depth is its queue depth.
 	//
@@ -243,31 +244,53 @@ func (s *Server) registerGauges() {
 		sum((*matching.Runner).OrderCount))
 	c.Gauge("orderbook_pending_stops", "Conditional orders waiting for their trigger, across every book.",
 		sum((*matching.Runner).PendingStopCount))
-	c.Gauge("orderbook_last_trade_price", "Most recent execution price, in ticks. First book only at a multi-symbol venue.",
-		func() float64 { return float64(r.LastTradePrice()) })
+	// Prices carry a symbol label, one series per book, and they do so even at a
+	// one-book venue. A metric whose label set depends on how the venue happens to
+	// be configured is one no dashboard can be written against — the series would
+	// appear and disappear as instruments are added, which is worse than either
+	// answer taken consistently.
+	perBook := func(f func(*matching.Runner) float64) func() []observability.Series {
+		return func() []observability.Series {
+			all := s.books.all()
+			out := make([]observability.Series, 0, len(all))
+			for _, b := range all {
+				out = append(out, observability.Series{
+					Labels: []observability.Label{{Name: "symbol", Value: b.symbol}},
+					Value:  f(b.runner),
+				})
+			}
+			return out
+		}
+	}
+
+	c.GaugeFamily("orderbook_last_trade_price", "Most recent execution price, in ticks, per instrument.",
+		perBook(func(r *matching.Runner) float64 { return float64(r.LastTradePrice()) }))
 	// NaN rather than zero for an empty side. Zero is a price, and a monitoring
 	// system cannot tell a missing bid from a bid at zero; Prometheus understands NaN
 	// and will not average it into anything.
-	c.Gauge("orderbook_best_bid", "Best bid in ticks; NaN when there is no bid.", func() float64 {
-		if p, _, ok := r.BestBid(); ok {
-			return float64(p)
-		}
-		return math.NaN()
-	})
-	c.Gauge("orderbook_best_ask", "Best ask in ticks; NaN when there is no offer.", func() float64 {
-		if p, _, ok := r.BestAsk(); ok {
-			return float64(p)
-		}
-		return math.NaN()
-	})
-	c.Gauge("orderbook_spread", "Best ask minus best bid in ticks; NaN when either side is empty.", func() float64 {
-		if sp, ok := r.Spread(); ok {
-			return float64(sp)
-		}
-		return math.NaN()
-	})
-	c.Gauge("orderbook_phase", "Trading phase: 0 pre-open, 1 open, 2 cancel-only, 3 halted, 4 closed, 5 closing auction.",
-		func() float64 { return float64(phaseCode(r.Phase())) })
+	c.GaugeFamily("orderbook_best_bid", "Best bid in ticks, per instrument; NaN when there is no bid.",
+		perBook(func(r *matching.Runner) float64 {
+			if p, _, ok := r.BestBid(); ok {
+				return float64(p)
+			}
+			return math.NaN()
+		}))
+	c.GaugeFamily("orderbook_best_ask", "Best ask in ticks, per instrument; NaN when there is no offer.",
+		perBook(func(r *matching.Runner) float64 {
+			if p, _, ok := r.BestAsk(); ok {
+				return float64(p)
+			}
+			return math.NaN()
+		}))
+	c.GaugeFamily("orderbook_spread", "Best ask minus best bid in ticks, per instrument; NaN when either side is empty.",
+		perBook(func(r *matching.Runner) float64 {
+			if sp, ok := r.Spread(); ok {
+				return float64(sp)
+			}
+			return math.NaN()
+		}))
+	c.GaugeFamily("orderbook_phase", "Trading phase per instrument: 0 pre-open, 1 open, 2 cancel-only, 3 halted, 4 closed, 5 closing auction.",
+		perBook(func(r *matching.Runner) float64 { return float64(phaseCode(r.Phase())) }))
 
 	c.Gauge("obgw_connections", "Established client sockets across both edges.",
 		func() float64 { return float64(s.connCount()) })
