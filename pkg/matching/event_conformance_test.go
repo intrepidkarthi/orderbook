@@ -234,6 +234,7 @@ func TestEventStreamReconstructsBook(t *testing.T) {
 	}
 	cases = append(cases, stpCases(t)...)
 	cases = append(cases, extraCases(t)...)
+	cases = append(cases, bustConformanceCase(t)) // see bust_test.go
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { runConformance(t, c) })

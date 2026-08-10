@@ -284,3 +284,69 @@ func TestDrillD3Refuses_APromotedBookWithAKnownDefect(t *testing.T) {
 		t.Error("a book with a known defect was promoted")
 	}
 }
+
+// bustVenue is a venue that can also annul a print. Both *matching.Runner and
+// *matching.Engine satisfy it, which is what lets the drill below drive the
+// replicated venue and the uninterrupted control through one function.
+type bustVenue interface {
+	venue
+	Bust(int64, string) error
+}
+
+// TestDrillD7_ABustReplicates — the drill docs/TRADE-BUST.md deliverable #3 asks
+// for: a primary annuls a print mid-stream and the follower ends up agreeing.
+//
+// It is a real test of the digest rather than of the wire. A bust changes no
+// order, so a follower that dropped the record entirely would still have a
+// byte-identical BOOK — and would disagree with the primary about which trades
+// settled, forever, silently. The only thing that catches it is the bust registry
+// being inside the digest, which is why it is.
+func TestDrillD7_ABustReplicates(t *testing.T) {
+	const before, after = 40, 40
+	const bustTradeID = 3 // the tape has printed well past this by step 40
+
+	drive := func(t *testing.T, v bustVenue) {
+		t.Helper()
+		runTape(t, v, 1, before)
+		if err := v.Bust(bustTradeID, "erroneous order entry"); err != nil {
+			t.Fatalf("Bust: %v", err)
+		}
+		runTape(t, v, before+1, before+after)
+	}
+
+	p := newPrimary(t)
+	defer p.Close()
+	f, err := StartFollower("BTC-USD", p.Addr())
+	if err != nil {
+		t.Fatalf("StartFollower: %v", err)
+	}
+
+	drive(t, p.Runner)
+
+	// before + the bust + after: the bust is a journalled command like any other,
+	// so it occupies a log sequence of its own.
+	const total = before + 1 + after
+	if err := f.WaitApplied(total, 10*time.Second); err != nil {
+		t.Fatalf("follower never caught up: %v", err)
+	}
+
+	control := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
+	drive(t, control)
+	want := control.TakeSnapshot().Digest()
+
+	got, err := f.Digest()
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
+	if got != want {
+		t.Errorf("follower diverged from the control across a bust:\n  follower %s\n  control  %s", got, want)
+	}
+	if snap, err := p.Runner.Checkpoint(); err != nil || snap.Digest() != want {
+		t.Errorf("primary and control disagree (err=%v) — the bust is not deterministic", err)
+	}
+
+	// And the annulment is not merely counted: the right trade is the busted one.
+	if !control.IsBusted(bustTradeID) {
+		t.Fatal("the control never busted anything — the drill proves nothing")
+	}
+}

@@ -93,6 +93,11 @@ const (
 	// can react before the price is fixed — an auction that revealed nothing until it
 	// printed would be a sealed-bid auction, a different market design.
 	UpdateIndicative
+	// UpdateBust annuls an earlier print, naming it by TradeID. It carries no book
+	// change and none is implied: the book moved on long before the bust arrived,
+	// and a subscriber that rewinds its own depth on one of these will diverge from
+	// the venue. Adjust the tape, not the book. See docs/TRADE-BUST.md §2.
+	UpdateBust
 )
 
 // Update is one sequenced market-data message.
@@ -114,6 +119,15 @@ type Update struct {
 	TradePrice int64
 	TradeQty   int64
 	Aggressor  types.Side
+	// TradeID names the print — set on UpdateTrade and on the UpdateBust that
+	// annuls it, and it is the only thing tying the two together. A feed that
+	// published prints anonymously could report a bust and leave every subscriber
+	// guessing which of its fills was meant; that was the state of this struct
+	// until trade bust needed it.
+	TradeID int64
+
+	// UpdateBust
+	BustReason string
 
 	// UpdateStatus
 	State VenueState
@@ -240,6 +254,15 @@ func (f *Feed) OnEvents(evs []matching.Event) {
 			f.publishLocked(Update{
 				Kind: UpdateTrade, TradePrice: e.Trade.Price,
 				TradeQty: e.Trade.Quantity, Aggressor: e.Trade.TakerSide,
+				TradeID: e.Trade.ID,
+			})
+		case matching.EventBusted:
+			// No book change, and lastTradePrice is deliberately left alone: the
+			// engine does not rewind its own reference price on a bust, and a feed
+			// that rewound its copy would be reporting a market the venue is not
+			// running. See docs/TRADE-BUST.md §2.3.
+			f.publishLocked(Update{
+				Kind: UpdateBust, TradeID: e.TradeID, BustReason: e.BustReason,
 			})
 		case matching.EventHalted:
 			f.publishLocked(Update{Kind: UpdateStatus, State: StateHalted})

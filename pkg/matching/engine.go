@@ -295,6 +295,11 @@ type Engine struct {
 	windowTrades   int
 	windowNotional int64
 
+	// busted holds the annulled prints, by trade id. Nil until the first bust,
+	// because the overwhelmingly common case is a venue that never busts anything
+	// and should not carry a map for it.
+	busted map[int64]BustRecord
+
 	// ordered event stream
 	sink     EventSink
 	eventSeq int64
@@ -1386,6 +1391,8 @@ func (e *Engine) Resume() {
 
 // State reports the current trading state.
 func (e *Engine) State() EngineState { return e.state }
+
+// Bust annuls a published trade. See bust.go.
 
 // SetMarkPrice sets the external mark/index reference (in ticks) the price band is
 // evaluated against. The risk layer computes it (e.g. index + clamped basis) and

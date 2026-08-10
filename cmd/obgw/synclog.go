@@ -98,3 +98,7 @@ func (s *syncingLog) AppendCancelOnly() (int64, error) { return s.sync(s.w.Appen
 func (s *syncingLog) AppendSetMark(price int64) (int64, error) {
 	return s.sync(s.w.AppendSetMark(price))
 }
+
+func (s *syncingLog) AppendBust(tradeID int64, reason string) (int64, error) {
+	return s.sync(s.w.AppendBust(tradeID, reason))
+}

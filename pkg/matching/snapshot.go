@@ -57,6 +57,17 @@ type EngineSnapshot struct {
 	OCOs           []OCOEntry         // leg pairings, by id
 	Trailing       []TrailingEntry    // pending trailing stops, carried whole
 	Guard          GuardWindow        // self-output guardrail window accounting
+	// Busted is the annulled-print registry, in trade-id order. It is in the
+	// snapshot, and therefore in the Digest, because two engines that applied the
+	// same commands are only equal if they also agree on what settled — a bust
+	// registry outside the digest would let a primary and its follower disagree
+	// about which trades stand and still compare identical.
+	//
+	// It grows without bound by construction. That is tolerable because busting is
+	// rare and each record is small, and it is stated here rather than discovered:
+	// a venue that busts routinely needs a retention rule, and this is where it
+	// would go. See docs/TRADE-BUST.md §6.
+	Busted []BustRecord
 }
 
 // GuardWindow is the in-flight state of the self-output guardrail's rolling
@@ -116,6 +127,7 @@ func (e *Engine) TakeSnapshot() *EngineSnapshot {
 		State:          e.state,
 		PausedUntil:    e.pausedUntil,
 		Guard:          GuardWindow{Start: e.windowStart, Trades: e.windowTrades, Notional: e.windowNotional},
+		Busted:         e.bustRecords(),
 	}
 	for _, o := range e.book.Orders() {
 		snap.Orders = append(snap.Orders, copyOrder(o))
@@ -244,6 +256,7 @@ func (e *Engine) LoadSnapshot(snap *EngineSnapshot) error {
 	e.windowNotional = snap.Guard.Notional
 	e.state = snap.State
 	e.pausedUntil = snap.PausedUntil
+	e.restoreBusts(snap.Busted)
 	return nil
 }
 
@@ -270,12 +283,16 @@ func RestoreEngine(config Config, snap *EngineSnapshot) (*Engine, error) {
 // from a test helper to a contract (see docs/REPLICATION.md).
 //
 // Wall-clock fields are normalised away: order timestamps, the band-breach
-// pause deadline, and the guardrail window start. A replayed order is stamped
-// with the clock at replay time, not the clock at original submission, so an
-// engine rebuilt from the log is legitimately not byte-identical in its
-// timestamps — a property of replaying a command log, not a divergence. WALSeq
-// is excluded too: it is a log position, not book state, and a follower's
-// checkpoint cadence is its own business.
+// pause deadline, the guardrail window start, and the instant a bust was
+// recorded. A replayed order is stamped with the clock at replay time, not the
+// clock at original submission, so an engine rebuilt from the log is legitimately
+// not byte-identical in its timestamps — a property of replaying a command log,
+// not a divergence. A bust replayed from the log tail is stamped the same way,
+// and a bust restored from a snapshot keeps its original instant, so the two
+// paths disagree on At by construction; WHICH trades are busted is the part that
+// must match, and that is what the digest compares. WALSeq is excluded too: it is
+// a log position, not book state, and a follower's checkpoint cadence is its own
+// business.
 //
 // The digest is a COMPARISON fingerprint, not a commitment: it hashes the
 // snapshot's JSON encoding, so it is stable between processes running the same
@@ -304,6 +321,13 @@ func (s *EngineSnapshot) Digest() string {
 	for i, te := range s.Trailing {
 		te.Order = normalisedOrder(te.Order)
 		n.Trailing[i] = te
+	}
+	if len(s.Busted) > 0 {
+		n.Busted = make([]BustRecord, len(s.Busted))
+		for i, b := range s.Busted {
+			b.At = time.Time{}
+			n.Busted[i] = b
+		}
 	}
 	b, err := json.Marshal(&n)
 	if err != nil {

@@ -107,6 +107,7 @@ type CommandLog interface {
 	AppendResume() (int64, error)
 	AppendCancelOnly() (int64, error)
 	AppendSetMark(price int64) (int64, error)
+	AppendBust(tradeID int64, reason string) (int64, error)
 }
 
 // RunnerConfig configures a Runner.
@@ -229,6 +230,8 @@ func (r *Runner) dispatch(cmd command) {
 		// cancelID reused as the int64 payload; a rejected step (ErrMarkStepTooLarge)
 		// simply leaves the mark unchanged on this async path.
 		_ = r.engine.SetMarkPrice(cmd.cancelID)
+	case cmdBust:
+		rep.err = r.engine.Bust(cmd.cancelID, cmd.bustReason)
 	case cmdReduce:
 		rep.order, rep.err = r.engine.Reduce(cmd.cancelID, cmd.reduceQty, cmd.userID)
 	case cmdReplace:
@@ -326,6 +329,8 @@ func (r *Runner) logCommand(cmd command) {
 		seq, err = r.log.AppendCancelOnly()
 	case cmdSetMark:
 		seq, err = r.log.AppendSetMark(cmd.cancelID)
+	case cmdBust:
+		seq, err = r.log.AppendBust(cmd.cancelID, cmd.bustReason)
 	default:
 		// Genuinely read-only commands: queries, the checkpoint, and ExpireDue,
 		// whose effects are cancels the engine derives from a clock replay cannot
@@ -453,6 +458,20 @@ func (r *Runner) Resume() { r.send(command{kind: cmdResume}) }
 
 // SetMarkPrice sets the external mark/index reference (ticks) the price band uses.
 func (r *Runner) SetMarkPrice(price int64) { r.send(command{kind: cmdSetMark, cancelID: price}) }
+
+// Bust annuls a published trade and journals the annulment. It reports the
+// engine's verdict — ErrUnknownTrade, ErrAlreadyBusted, or nil — because an
+// operator busting a trade needs to know it landed, which is the whole difference
+// between this and the fire-and-forget control commands above.
+//
+// It does not rewind the book. See Engine.Bust and docs/TRADE-BUST.md.
+func (r *Runner) Bust(tradeID int64, reason string) error {
+	rep, ok := r.send(command{kind: cmdBust, cancelID: tradeID, bustReason: reason})
+	if !ok {
+		return ErrShuttingDown
+	}
+	return rep.err
+}
 
 // --- asynchronous submit ---
 

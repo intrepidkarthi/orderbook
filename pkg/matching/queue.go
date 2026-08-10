@@ -18,6 +18,7 @@ const (
 	cmdResume
 	cmdCancelOnly
 	cmdSetMark
+	cmdBust
 	cmdCancelAll
 	cmdReduce
 	cmdReplace
@@ -63,8 +64,11 @@ type command struct {
 	resolve   func() (int64, bool)
 	reduceQty int64
 	userID    string
-	snapOut   chan *EngineSnapshot
-	reply     chan cmdReply
+	// bustReason is the operator's free-text reason for a cmdBust. The trade id
+	// travels in cancelID, which every id-bearing command already uses.
+	bustReason string
+	snapOut    chan *EngineSnapshot
+	reply      chan cmdReply
 }
 
 // cmdReply is the result of applying a command. match is set for order-submitting

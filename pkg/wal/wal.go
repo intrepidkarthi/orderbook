@@ -84,6 +84,7 @@ const (
 	KindResume     // a Resume()
 	KindCancelOnly // a SetCancelOnly()
 	KindSetMark    // a SetMarkPrice(price)
+	KindBust       // a Bust(tradeID, reason)
 )
 
 // Entry is one durable command-log record.
@@ -118,6 +119,13 @@ type Entry struct {
 	// int64 payload internally: the log is read by tooling and by humans, and a
 	// mark price filed under "cancel_id" is a trap laid for whoever reads it next.
 	MarkPrice int64 `json:"mark_price,omitempty"`
+
+	// KindBust: the annulled print and the operator's reason. TradeID is a trade
+	// id, not an order id, which is why it does not share CancelID — the two
+	// sequence spaces are independent and a record that confused them would be
+	// unrecoverable rather than merely wrong.
+	TradeID    int64  `json:"trade_id,omitempty"`
+	BustReason string `json:"bust_reason,omitempty"`
 }
 
 // Header, record framing and the bounds that make a corrupt file safe to read.
@@ -419,6 +427,14 @@ func (w *Writer) AppendSetMark(price int64) (int64, error) {
 	return w.append(Entry{Kind: KindSetMark, MarkPrice: price})
 }
 
+// AppendBust logs a trade bust. Like every other record here it is written before
+// the engine applies it, so a bust an operator was told succeeded cannot be a bust
+// the venue forgets — which is the entire reason a bust is a logged command rather
+// than a note in an operator's runbook.
+func (w *Writer) AppendBust(tradeID int64, reason string) (int64, error) {
+	return w.append(Entry{Kind: KindBust, TradeID: tradeID, BustReason: reason})
+}
+
 // Sync flushes buffered records and fsyncs the file — the durability point. Call
 // it before acknowledging the commands since the last Sync (group commit).
 func (w *Writer) Sync() error {
@@ -617,6 +633,12 @@ func RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64) {
 			// cancel's refusal is: the guard is deterministic, so replaying the same
 			// call against the same state reaches the same verdict.
 			_ = eng.SetMarkPrice(e.MarkPrice)
+		case KindBust:
+			// Refusals replay as refusals here too, and this one has teeth: a bust
+			// recorded against a trade id the replayed engine has not reached yet
+			// would be refused, which is why the log is replayed in order and the
+			// trade counter is restored from the snapshot before the tail runs.
+			_ = eng.Bust(e.TradeID, e.BustReason)
 		}
 	}
 }

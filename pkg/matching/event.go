@@ -28,6 +28,7 @@ const (
 	EventHalted                      // engine entered Halted (operator, guardrail trip, or band-breach pause)
 	EventResumed                     // engine returned to Open (manual resume, or a band-breach pause elapsed)
 	EventCancelOnly                  // engine entered cancel-only: cancels accepted, new liquidity refused
+	EventBusted                      // a previously published trade is annulled; the book is NOT rewound
 )
 
 func (k EventKind) String() string {
@@ -46,6 +47,8 @@ func (k EventKind) String() string {
 		return "REPLACED"
 	case EventCancelOnly:
 		return "CANCEL_ONLY"
+	case EventBusted:
+		return "BUSTED"
 	case EventBookDelta:
 		return "BOOK_DELTA"
 	case EventHalted:
@@ -72,6 +75,18 @@ type Event struct {
 	Order   *types.Order // set for Accepted/Rejected/Canceled
 	Trade   *types.Trade // set for Trade
 	Reason  error        // set for Rejected
+	// TradeID names the annulled print of an EventBusted, and is zero on every
+	// other kind — including EventTrade, where the id is on the Trade itself.
+	//
+	// The asymmetry is the point rather than an oversight. A trade event carries
+	// the trade, so the id is reachable; a bust arrives long after, and the engine
+	// does not retain the trades it printed, so an id is the only thing it can
+	// honestly say. Copying it onto EventTrade as well would give consumers two
+	// fields to keep in agreement for no new information.
+	TradeID int64
+	// BustReason is the operator's free-text reason for an EventBusted (empty
+	// elsewhere). It is for humans and audit trails; do not switch on it.
+	BustReason string
 }
 
 // EventBookDelta is retained only so the numbering of the kinds after it does not
