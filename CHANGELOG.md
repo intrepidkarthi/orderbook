@@ -5,7 +5,20 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
-## [Unreleased]
+## [0.21.0] - 2026-08-10
+
+The trade-bust release, and a reminder of why this project writes specs first: the
+spec found a defect that had been shipping for four releases before a line of the
+feature existed. An operator halt issued after the last checkpoint was never written
+to the log, so a venue somebody had deliberately stopped came back open. Trade bust
+needed a durable seam for control commands, went looking for one, and there wasn't
+one.
+
+The feature itself is mostly a list of things it refuses to do. A bust annuls a
+print; it does not put the orders back, does not un-fire the stops the print
+triggered, does not rewind the reference price, and does not amend the event that
+reported the trade. Each of those is a test, because each looks like a bug until you
+notice the book at bust time is not the book at trade time.
 
 ### Added
 
@@ -1597,7 +1610,8 @@ trailing), GTC/IOC/FOK, self-trade prevention, a price-band circuit breaker, FIF
 and pro-rata allocation, L1/L2/L3 market data, a surveillance starter kit, and a
 market-microstructure research harness with a WebAssembly demo.
 
-[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.17.0...v0.18.0
