@@ -44,9 +44,9 @@ deployment and cannot ship in a module.
 
 The third one earned its place. Within the first hour of running under sustained load,
 the venue was found to be refusing cancels for orders that were live in its own book,
-filling to `MaxOrders` and then trading nothing — a defect that 480 tests, two fuzzers,
-the race detector and every benchmark had missed, and that the venue reported itself
-healthy throughout. See [SOAK.md](SOAK.md).
+filling to `MaxOrders` and then trading nothing — a defect that the whole test suite as
+it then stood (480 functions), two fuzzers, the race detector and every benchmark had
+missed, and that the venue reported itself healthy throughout. See [SOAK.md](SOAK.md).
 
 ---
 
@@ -57,7 +57,7 @@ Each row names the evidence, because a checklist that only asserts is worth noth
 | Claim | How it is checked |
 |---|---|
 | Matching is deterministic | Same command stream produces a byte-identical engine; gated in CI against a 2,000-command tape, checkpointing at five different points |
-| The event stream reconstructs the book | Replayed into an L3 book identical to the engine's, across 22 scenarios covering every order class |
+| The event stream reconstructs the book | Replayed into an L3 book identical to the engine's, across 23 scenarios covering every order class |
 | Recovery is exact | Snapshot + log tail rebuilds a byte-identical engine, including all three sequence counters, the duplicate guard and conditional-order state |
 | The log cannot silently corrupt | CRC-32C per record; a complete record failing its checksum refuses to start the venue rather than truncating |
 | Neither can the snapshot | CRC-32C over the whole file, refused the same way. It is the base the log is replayed on top of, so a wrong one is worse than a wrong record — and it had no check at all until writing the runbook for it showed the procedure would have been "you cannot detect this" |
@@ -69,11 +69,14 @@ Each row names the evidence, because a checklist that only asserts is worth noth
 | No data races | `go test -race -count=3` across all 16 packages |
 | No panics on hostile input | 5.6M fuzz executions across two targets |
 
-Test count: **480 test functions**, two fuzz targets, race and replay-recovery in CI.
+Test count: **584 test functions**, two fuzz targets, race and replay-recovery in CI.
+Counted with `grep -rh '^func Test' --include='*_test.go' . | wc -l`, so it can be
+rechecked rather than believed — this line said 480 for several releases after it
+stopped being true.
 
 ## 1a. What sustained load found that nothing else did
 
-The engine has 480 test functions, two fuzz targets at 5.6M executions, replay-recovery
+The engine has 584 test functions, two fuzz targets at 5.6M executions, replay-recovery
 and race detection in CI, and a benchmark suite that has twice been corrected against
 itself. None of them found this:
 
@@ -204,9 +207,10 @@ What that buys is narrower than it sounds, and the distinction matters: **a dril
 the runbook is not stale, not that anyone can follow it.** It catches a renamed reason
 string or a fallback that stopped falling back. It says nothing about a human executing
 the procedure under pressure on a venue that is losing money, and nobody has done that.
-This stays **weak** until somebody has. There is also no failover procedure, no trade-bust path, no credential
-revocation and no clock-disagreement procedure — all named at the end of RUNBOOKS.md
-rather than left to be discovered.
+This stays **weak** until somebody has. There is also no credential revocation and no
+clock-disagreement procedure — both named at the end of RUNBOOKS.md rather than left to
+be discovered. The failover procedure closed in v0.18.0 and the trade-bust path in
+v0.21.0; neither has a rehearsal by a human under pressure, which is the sentence above.
 
 ### Security at the edge — partial
 
@@ -280,9 +284,21 @@ instrument. A multi-symbol venue is a routing layer you write.
 
 No fees or rebates. No clearing or settlement. No positions or margin — liquidation
 *hooks* exist (privileged orders, force-trade) but the risk system they would serve does
-not. No trade bust or correction: once a trade is published there is no way to amend it,
-and that interacts badly with an append-only event stream, so design it early if you
-need it.
+not.
+
+**Trade bust ships; trade correction does not.** `Engine.Bust` annuls a published
+print as an appended event, journalled, replicated and covered by the digest
+([TRADE-BUST.md](TRADE-BUST.md)) — this section used to say there was no way to
+amend a published trade, and that it should be designed early. It was, and the
+design is that a bust does not rewind anything: not the book, not the stops the
+print fired, not the reference price. Adjusting a trade to a different price
+rather than voiding it is still absent, and needs the settlement layer above.
+
+One gap remains and it is load-bearing: **no external client can be told about a
+bust.** Neither `wire.Executed` nor `wire.MDTrade` carries a trade id, so the
+frozen protocol cannot name the print being annulled. In-process consumers
+(`marketdata.Feed`) are served; the wire needs a `Version` bump on both payloads
+and a bust message on each edge.
 
 ### Regulatory — partial
 

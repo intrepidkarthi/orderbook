@@ -119,7 +119,7 @@ conduct, or who ordered the ingress stream — those are correctly layers above.
 | **Flash-loan governance** | On-chain / MEV | Borrow a quorum, pass a malicious proposal | Beanstalk $182M (2022) | Sudden supermajority; no timelock | Governance timelock; flash-resistant snapshot | **Layer** (core has no surface) |
 | **Proposer / sequencer MEV** | On-chain / MEV | Block builder inserts ahead of a large taker | dYdX v4 (design risk) | Shadow-match divergence | Deterministic single-writer core | **Core ✓** intra-engine; ingress ordering = layer |
 | **Cornering** | Manipulation | Control deliverable supply, force shorts | Hunt silver (1979-80), $134M liability | Position vs OI / float; basis dislocation | Position limits + `CancelOnly`/`Halted` + mark band | Limits = layer; **states / band = core ✓** |
-| **Short squeeze** | Manipulation | Shorts forced to cover at your price | LME nickel — ~$3.9B trades busted (2022); GME (2021) | Short interest vs float; spot-future gap | **Halt states + trade-bust via WAL replay** | Policy = layer; **halt / replay = core ✓** |
+| **Short squeeze** | Manipulation | Shorts forced to cover at your price | LME nickel — ~$3.9B trades busted (2022); GME (2021) | Short interest vs float; spot-future gap | **Halt states + `Engine.Bust`** ([TRADE-BUST.md](TRADE-BUST.md)) | Policy = layer; **halt / bust = core ✓** |
 | **Pump-and-dump / bear raid** | Manipulation | Off-venue promote, dump into the volume | SEC influencers ~$100M (2022) | Cross-market + social signals | Price band / halt limit intraday damage | **Layer / regulator** (off-venue conduct) |
 | **Cross-product / cross-venue** | Manipulation | Spoof one product / venue, profit in a correlated one | Oystacher / 3Red $2.5M; JPMorgan (futures/cash) | Cross-book OTR / imbalance correlation | Fan multiple books into one `surveillance.Monitor` (SMARTS-style) | **Layer** (each `Engine` is one book) |
 
@@ -263,7 +263,8 @@ defeating this at the source.
 | **Degraded states** — `EngineState` Open / CancelOnly / Halted, `SetCancelOnly` / `Halt` / `Resume` | Kill switch (Rule 15c3-5), venue-halt / liquidation-only | LME nickel halt (2022); Coinbase wind-down path; Hyperliquid delist |
 | **DisabledClasses feature flags** — cold-path `rejectDisabled` | Buggy exotic order type without downing the venue | **ASX TMC (2020); Binance trailing-stop (2023)** |
 | **Deterministic single-writer + int64 (no float)** | Races / TOCTOU (immune); precision / rounding leak (impossible); sub-penny queue-jump (impossible) | CVE-2026-34368; Bitcoin CVE-2010-5139 (rounding class); Reg NMS 612 |
-| **Monotonic sequence + WAL + snapshot** (`pkg/wal`, `TakeSnapshot`) | Replayable audit spine; clean trade-bust / replay | CAT (Rule 613) event spine; LME / GME trade-bust |
+| **Monotonic sequence + WAL + snapshot** (`pkg/wal`, `TakeSnapshot`) | Replayable audit spine | CAT (Rule 613) event spine |
+| **`Engine.Bust`** (`pkg/matching/bust.go`) | Annul a published print, as an appended event rather than a rewrite | LME nickel ~$3.9B busted (2022) |
 | **Bounded backpressure** — `TrySubmit` sheds new, `Cancel` blocks through | Quote-stuffing / flood DoS (structural resilience) | Citadel $800K (2014); Trillium $1M (2010) |
 | **SpoofDetector + RateLimiter** (`pkg/surveillance`) | Spoofing / layering detection; message-burst flagging | JPMorgan $920M signature; Trillium layering |
 | **ForceTrade + Privileged exemption** | Liquidation / ADL print injection at a bankruptcy price | Hyperliquid force-settle (2025); BitMEX Oct-11 lineage |
@@ -333,8 +334,12 @@ core value.
   $134M), short squeezes (LME nickel $3.9B), under-collateralization — all
   position-level and invisible to a single-book matcher. Belongs to the
   **credit / clearing layer**. The core contributes only *primitives*:
-  `CancelOnly`/`Halted`, the mark-price band, `ForceTrade`, WAL-replay
-  trade-bust.
+  `CancelOnly`/`Halted`, the mark-price band, `ForceTrade`, and `Engine.Bust` —
+  which annuls a print and deliberately does not rewind the book that followed
+  it ([TRADE-BUST.md](TRADE-BUST.md)). This row used to say "WAL-replay
+  trade-bust", describing a mechanism nobody had built and one that would have
+  been the wrong one: replaying a log without the busted trade rewrites history
+  and gives every downstream consumer a tape that never happened.
 - **Oracle sourcing.** The core can refuse to act on an *unclamped* mark
   (roadmap #4), but TWAP / EMA / multi-venue-median / staleness logic is an
   **oracle service** above. A matcher that sourced its own prices would couple

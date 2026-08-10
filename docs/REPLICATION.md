@@ -1,6 +1,6 @@
 # Replication — Proving the HA Seams
 
-Status: **implemented** — `examples/replication` + drills D1–D6 in CI; written as a
+Status: **implemented** — `examples/replication` + drills D1–D7 in CI; written as a
 spec before any code existed, and §8 records what building it actually found ·
 Author: Karthikeyan NG · Last updated: 2026-08-03
 
@@ -159,6 +159,12 @@ deliberately broken code before it counts:
 - **D6 — Lag is visible.** Stall the follower; the exported sequence gap moves and
   an operator can alert on it. A loss window nobody can see is a loss window that
   does not exist until it happens.
+- **D7 — A bust replicates.** The primary annuls a print mid-stream and the
+  follower ends up agreeing. Added with trade bust ([TRADE-BUST.md](TRADE-BUST.md))
+  and it tests the digest rather than the wire: a bust changes no order, so a
+  follower that dropped the record would have a byte-identical *book* and would
+  disagree about what settled, forever and silently. What catches it is the bust
+  registry being inside the digest.
 
 ## 7. Deliverables
 
@@ -169,7 +175,7 @@ deliberately broken code before it counts:
    in one sitting.
 3. ✅ The **failover runbook entry** in [RUNBOOKS.md](RUNBOOKS.md) — the §5
    procedure, replacing the "no failover procedure" gap line.
-4. ✅ **Drills D1–D6** in CI (`examples/replication/main_test.go`), each
+4. ✅ **Drills D1–D7** in CI (`examples/replication/main_test.go`), each
    verified to fail against deliberately broken code.
 5. ✅ The PRODUCTION-READINESS edit: "High availability" is *seams proven —
    topology still yours*, and not one word further.

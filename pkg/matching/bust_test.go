@@ -276,7 +276,7 @@ func TestBustDigestIgnoresWallClock(t *testing.T) {
 	}
 }
 
-// bustConformanceCase joins the 22 scenarios in TestEventStreamReconstructsBook.
+// bustConformanceCase is the 23rd scenario in TestEventStreamReconstructsBook.
 // EventBusted carries no book change, so an L3 consumer must be able to ignore it
 // and still rebuild the book exactly — and, because the mirror checks sequence
 // continuity, the bust must not tear a hole in the stream either.

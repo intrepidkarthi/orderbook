@@ -95,7 +95,7 @@ no library work can close, because they are properties of your deployment.
   duplicate guard and the conditional-order state match the uninterrupted run.
 - **An event stream that reconstructs the book.** `Accepted`/`Trade`/`Canceled`/
   `Replaced` replay into an L3 book identical to the engine's, asserted on every
-  commit across 22 scenarios covering every order class — including iceberg
+  commit across 23 scenarios covering every order class — including iceberg
   refill, all five self-trade-prevention modes, FOK reversal and cascade-fired
   stops.
 - **Full order surface.** Limit, market, stop / stop-limit, iceberg (hidden),
@@ -336,7 +336,8 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [SOAK.md](docs/SOAK.md) | Sustained load: what `cmd/obsoak` measures, the methodology that took three wrong versions to get right, and the correctness defect the first hour of it found. |
 | [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) | What a venue actually needs, with an honest status for each item — what ships, what is deliberately absent, and what you would have to build. Production readiness is a property of a deployment, not of a library, and this says so. |
 | [PROTOCOL.md](docs/PROTOCOL.md) | The binary order-entry protocol `cmd/obgw` speaks: framing, session and resume, every message, the reason-code vocabulary, and what is deliberately absent from the wire. |
-| [REPLICATION.md](docs/REPLICATION.md) | The primary-backup reference: what "committed" means, the incarnation fence, drills D1–D6 — and §8, what building it actually found versus what the spec predicted. |
+| [REPLICATION.md](docs/REPLICATION.md) | The primary-backup reference: what "committed" means, the incarnation fence, drills D1–D7 — and §8, what building it actually found versus what the spec predicted. |
+| [TRADE-BUST.md](docs/TRADE-BUST.md) | Annulling a published print on an append-only stream: the four things a bust deliberately does *not* rewind, and §7 on the durability gap writing the spec uncovered. |
 | [CONSOLE-SPEC.md](docs/CONSOLE-SPEC.md) | The live console and the operator dashboard: why a browser WASM market instead of a feed-connected desktop app, and every panel mapped to the call that produces it. |
 | [CHANGELOG.md](CHANGELOG.md) | Release history with breaking-change notes. |
 

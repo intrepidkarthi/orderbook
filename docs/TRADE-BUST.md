@@ -1,6 +1,8 @@
 # Trade Bust — Annulling a Print Without Rewriting History
 
-Status: **specified** — no code yet · Author: Karthikeyan NG · Last updated: 2026-08-10
+Status: **implemented, with one edge open** — `pkg/matching/bust.go`, drill D7 in CI;
+written as a spec before any code existed, and §7 records what building it found ·
+Author: Karthikeyan NG · Last updated: 2026-08-10
 
 Companion documents:
 - [`PRODUCTION-READINESS.md`](PRODUCTION-READINESS.md) — says there is no trade-bust
@@ -202,12 +204,19 @@ cleanly or show us which of §2's four rules is wrong.
 
 ## 5. Deliverables
 
-| # | Deliverable | Done when |
-|---|---|---|
-| 1 | Control commands become durable | A halt, resume, cancel-only and mark-price change issued after the last checkpoint survive `wal.Recover`; the regression test fails against today's code |
-| 2 | `Engine.Bust` + `EventBusted` + registry in snapshot and digest | Bust refused for unknown/duplicate ids; digest differs between a busted and an unbusted engine; `TestEventStreamReconstructsBook` still passes with busts in the tape |
-| 3 | Bust survives crash and replication | Recovered engine agrees on the bust registry; the replication drills' follower digest-matches a primary that busted mid-stream |
-| 4 | A consumer that would notice | `marketdata.Feed` publishes `UpdateBust` with a trade id, and a subscriber resuming from a sequence before the bust still learns about it |
+| # | Deliverable | Done when | Status |
+|---|---|---|---|
+| 1 | Control commands become durable | A halt, resume, cancel-only and mark-price change issued after the last checkpoint survive `wal.Recover`; the regression test fails against today's code | **done** — `TestControlCommandsSurviveRecovery`, `TestControlCommandsReplayInOrder` |
+| 2 | `Engine.Bust` + `EventBusted` + registry in snapshot and digest | Bust refused for unknown/duplicate ids; digest differs between a busted and an unbusted engine; `TestEventStreamReconstructsBook` still passes with busts in the tape | **done** — `pkg/matching/bust_test.go`, and a 23rd conformance scenario |
+| 3 | Bust survives crash and replication | Recovered engine agrees on the bust registry; the replication drills' follower digest-matches a primary that busted mid-stream | **done** — `pkg/wal/bust_recovery_test.go`, drill D7 |
+| 4 | A consumer that would notice | `marketdata.Feed` publishes `UpdateBust` with a trade id, and a subscriber resuming from a sequence before the bust still learns about it | **done** — `pkg/marketdata/bust_test.go` |
+| 5 | The wire can name a trade | `Executed` and `MDTrade` carry a trade id and each edge has a bust message | **open** — see §4.5 and §7 |
+
+Every test above was run against deliberately broken code before it counted: the
+registry removed from the snapshot, the wall-clock normalisation removed from the
+digest, replayed busts dropped in `RestoreAfter`, and the trade id stripped from
+the feed's bust update. The digest test passed against one of those sabotages on
+its first draft; §7 has that story.
 
 ## 6. How this can fail, stated in advance
 
@@ -224,4 +233,58 @@ So that the write-up in §7 is not graded on a curve:
 
 ## 7. What building it found
 
-To be written after, not before — and it goes here whether or not it is flattering.
+Written after. Deliverables 1–4 are done; §5's table is the checklist they were
+graded against.
+
+**The threat model's claim was wrong twice over, not once.** It said the WAL spine
+gave "clean trade-bust / replay". The obvious failure is that nobody had built it.
+The instructive one is that the mechanism it named — replay the log without the
+busted trade — is the wrong mechanism, and building it would have produced a venue
+whose recovered tape did not match the tape its subscribers received. The row now
+names `Engine.Bust` and says what the old one described.
+
+**The halt gap was already live, and had been for four releases.** §3.5 predicted
+it from reading `logCommand`; it reproduced on the first try. An operator halt
+issued after the last checkpoint was in no log, so a restart brought the venue back
+Open. That is not a trade-bust bug — it was shipped, in the dark, in every release
+since control commands existed, and the only reason it surfaced here is that a bust
+needed the same seam and the seam turned out not to exist. Fixed in the same arc
+(`TestControlCommandsSurviveRecovery`), because shipping a durable bust next to a
+non-durable halt would leave two classes of control command that look identical and
+behave differently under crash.
+
+**The first version of the digest test passed against sabotage.** It busted on one
+engine, not on another, and compared digests — which differ anyway, because
+emitting `EventBusted` moves `EventSeq`. So it would have reported success with the
+registry left out of the snapshot entirely. Caught by running it against that exact
+sabotage rather than by reading it. The test now compares two snapshots that differ
+in nothing but the registry. Worth recording because the sabotage pass is the only
+reason this section is not claiming a property the suite never checked.
+
+**§2's four rules survived contact.** No consumer wanted the orders back, and the
+one that could have — `marketdata.Feed`, whose entire contract is that a
+subscriber's book equals the engine's — needed the book left alone to keep that
+contract. §6's first stated failure mode did not happen.
+
+**§6's second one is real and open.** The registry does grow without bound. It is
+in the snapshot, so a venue that busts routinely grows its snapshot and slows its
+digest forever. Nothing here needs it yet and no retention rule is invented on
+speculation, but "unbounded" is the honest status and it is now stated in the
+`EngineSnapshot.Busted` doc comment as well as here.
+
+**§6's third did not materialise.** Mixed-build replication was the worry: new
+`EntryKind`s mean an older follower sees records it cannot classify. It does not
+crash — `RestoreAfter`'s type switch ignores unknown kinds — but that is the
+failure it should have: an old follower silently ignoring busts diverges from its
+primary and, because the registry is in the digest, the divergence is *detectable*
+rather than silent. Drill D7 is exactly that scenario with the roles reversed, and
+it fails as it should when the bust is dropped. A version negotiation between
+primary and follower is still not there and is still yours.
+
+**What did not get built, and is the reason this is not finished.** The wire cannot
+name a trade, so no external client can be told a fill was busted. The core is
+honest and the in-process consumer is real, but a venue's clients are on the other
+side of `internal/wire`, and until `Executed` and `MDTrade` carry a trade id — a
+`Version` bump on both, against golden hex — trade bust is a feature embedders have
+and customers do not. That is §4.5 as designed, not a surprise; it is restated here
+because a deliverables table with four ticks should not read as "done".

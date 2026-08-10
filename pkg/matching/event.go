@@ -94,7 +94,7 @@ type Event struct {
 //
 // It was reserved for an aggregated L2 level change, and the engine is the wrong
 // place to produce one. L2 is a pure function of L3, and this stream is tested to
-// reconstruct the L3 book exactly (TestEventStreamReconstructsBook, 22 scenarios) —
+// reconstruct the L3 book exactly (TestEventStreamReconstructsBook, 23 scenarios) —
 // so a consumer that wants level deltas can derive them, and marketdata.NewL2Feed
 // does. Emitting them from the matching goroutine would add work to the hot path to
 // compute something a consumer can compute for itself, off it.
