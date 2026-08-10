@@ -7,6 +7,43 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- **Multi-symbol identity** ([MULTI-SYMBOL.md](docs/MULTI-SYMBOL.md), deliverables
+  1–4 of 6). Order and trade ids partition into a 15-bit shard index and a 48-bit
+  per-shard counter, so an `int64` names an order at a venue with many books. A
+  shared counter would have been simpler and wrong: it makes a shard's ids depend on
+  how its traffic interleaved with every other shard's, so replaying one log alone
+  would no longer reproduce its own ids — trading the property this project is most
+  confident about for one it merely wants. Shard 0 composes to the sequence itself,
+  so every single-symbol deployment keeps the ids, snapshots, logs and golden vectors
+  it already had.
+
+  `matching.Manifest` is the price: a durable, CRC-checked `symbol -> index` mapping,
+  refused rather than repaired. Losing it is worse than losing a snapshot, which
+  costs only a replay.
+
+- **`ShardsConfig.NewLog`** — the finding that turned a one-line gap into a spec.
+  `ShardsConfig` had no way to supply a `CommandLog`, and durability, recovery and
+  replication all hang off it, so **a sharded venue could not survive a restart at
+  all.** `PRODUCTION-READINESS.md` called multi-symbol "a routing layer you write";
+  it was most of a venue. One log per shard, so recovery and the replication drills
+  are the existing single-symbol code paths run N times.
+
+- **Venue-wide `ClOrdID` admission** (`Registry.IsLiveClOrdID`). The naming index is
+  keyed by account and client id with no symbol, so at two instruments a repeat
+  overwrites the first and the account's next cancel retargets.
+
+### Changed
+
+- **BREAKING: `Shards` refuses a second symbol without a `Manifest`.** It previously
+  gave every shard index 0 and served colliding ids silently — a failure whose only
+  symptom is two orders nobody can tell apart, discovered much later. Anyone running
+  `Shards` multi-symbol today was doing this unknowingly.
+
+- **`Engine.Bust` validates the shard field**, so busting another symbol's trade is
+  `ErrUnknownTrade` instead of annulling whichever local print shared the low bits.
+
 ### Fixed
 
 - **Replication drill D6 blamed the wrong follower, about one run in twelve.** The
