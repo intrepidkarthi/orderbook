@@ -5,6 +5,50 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
+## [0.23.0] - 2026-08-10
+
+The reference gateway catches up with the core. `cmd/obgw` was the last thing
+standing between the multi-symbol design and a venue anyone can run, and converting
+it found the bug that refactor was most likely to hide: `buildOrder` validated the
+incoming symbol and then stamped the *configured* one onto the order, so at a
+two-book venue every order silently landed on the first book. A refactor that
+compiles is not a refactor that works.
+
+### Added
+
+- **`cmd/obgw` serves a set of instruments.** `Config.Symbols` and `Config.DataDir`;
+  one book per symbol — matching goroutine, command log, market-data feed, rate gate
+  — under a venue-wide account layer: one `Registry`, one publisher, one stream per
+  account. A client holds one session and sees one ordered conversation whatever mix
+  it trades, which is what makes a client id enough to name an order without also
+  naming a symbol.
+
+  **A one-book venue is unchanged**: same config fields, same `WALPath` and
+  `SnapshotPath`, same small dense ids, and the entire existing test suite passes
+  untouched.
+
+- Mass cancel and `Query` fan across every book and aggregate — an account's orders
+  are its orders. Readiness takes the **worst** book, since a venue with one wedged
+  matcher is not ready however healthy the others are.
+
+### Fixed
+
+- **Routing a cancel needed the session to remember, not the registry to be asked.**
+  `wire.Cancel` names an order by `ClOrdID` alone, so the gateway must pick a book
+  without being told which. Resolving the engine order id up front to read its shard
+  field is the obvious move and it is wrong: the naming index is written by the
+  *matching* goroutine, so a cancel arriving while its own Enter is still queued
+  resolves to nothing and is refused for an order that is about to exist — the
+  orphaned-order defect [SOAK.md](docs/SOAK.md) measured at 12,843 orders in thirty
+  seconds. The session already knows: it read the Enter, and the Enter carried the
+  symbol.
+
+### Known limits
+
+- **Price gauges do not aggregate across books** and report the first one. A last
+  trade price averaged over two instruments is not a number; the right answer is one
+  series per symbol, which needs label support `pkg/observability` does not have.
+
 ## [0.22.0] - 2026-08-10
 
 The multi-symbol release, and the third in a row where writing the spec first found
@@ -1709,7 +1753,8 @@ trailing), GTC/IOC/FOK, self-trade prevention, a price-band circuit breaker, FIF
 and pro-rata allocation, L1/L2/L3 market data, a surveillance starter kit, and a
 market-microstructure research harness with a WebAssembly demo.
 
-[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.19.0...v0.20.0
