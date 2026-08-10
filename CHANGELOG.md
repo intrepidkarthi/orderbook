@@ -10,7 +10,7 @@ versions may include breaking changes).
 ### Added
 
 - **Multi-symbol identity** ([MULTI-SYMBOL.md](docs/MULTI-SYMBOL.md), deliverables
-  1–4 of 6). Order and trade ids partition into a 15-bit shard index and a 48-bit
+  all six). Order and trade ids partition into a 15-bit shard index and a 48-bit
   per-shard counter, so an `int64` names an order at a venue with many books. A
   shared counter would have been simpler and wrong: it makes a shard's ids depend on
   how its traffic interleaved with every other shard's, so replaying one log alone
@@ -34,7 +34,29 @@ versions may include breaking changes).
   keyed by account and client id with no symbol, so at two instruments a repeat
   overwrites the first and the account's next cancel retargets.
 
+- **`examples/multisymbol`** — a two-book reference venue with a feed and a log per
+  shard, serving both books over sockets. It exists for the reason
+  `examples/replication` does: the multi-symbol seams are each plausible on the page,
+  and this repository's record with seams claimed but never consumed is documented
+  and bad. Replication drill **D8** covers a two-symbol venue, with a negative
+  control — a follower on the wrong shard index rebuilds the same orders under
+  different numbers, and the digest catches it.
+
+  `cmd/obgw` is deliberately **not** converted: it still serves one instrument, and
+  it is now the only thing between this design and a multi-symbol venue anyone can
+  run. Converting it is one runner, one feed, one gate, one recovery path, sixteen
+  call sites and fifteen test files — its own arc, not a rider on a protocol change.
+
 ### Changed
+
+- **BREAKING: wire protocol v3 → v4.** `MDSubscribe` gains `Symbol`. It named an
+  incarnation and a sequence but no instrument, so a market-data connection could
+  only ever mean "the one book this venue serves". A subscription now selects
+  exactly one symbol and every message on that connection belongs to it, so **no
+  other market-data payload changed** — the regenerated golden vectors differ only
+  in their version byte. A subscription for an unserved instrument is refused with
+  `MDRejectUnknownSymbol` rather than quietly given the wrong book, which a
+  subscriber cannot detect for itself.
 
 - **BREAKING: `Shards` refuses a second symbol without a `Manifest`.** It previously
   gave every shard index 0 and served colliding ids silently — a failure whose only
