@@ -50,7 +50,12 @@ type BustRecord struct {
 //
 // Call from the single writer, or via Runner.Bust so it is journalled.
 func (e *Engine) Bust(tradeID int64, reason string) error {
-	if tradeID <= 0 || tradeID > e.tradeSeq {
+	// Validation splits the id rather than comparing it whole, which is what makes
+	// this correct at a multi-symbol venue: a trade id carries the shard that
+	// issued it, so a bust aimed at another symbol's print is refused here instead
+	// of annulling whichever local trade happened to share the low bits.
+	shard, seq := SplitID(tradeID)
+	if tradeID <= 0 || shard != e.config.ShardIndex || seq <= 0 || seq > e.tradeSeq {
 		return ErrUnknownTrade
 	}
 	if _, dup := e.busted[tradeID]; dup {

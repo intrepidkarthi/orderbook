@@ -129,6 +129,16 @@ type Config struct {
 	Symbol              string
 	SelfTradePrevention SelfTradePrevention
 	MaxOrders           int
+	// ShardIndex partitions this engine's id space so order and trade ids are
+	// unique across a multi-symbol venue. Zero — the default, and every
+	// single-symbol deployment — leaves ids exactly as they were.
+	//
+	// It is CONFIG, not state, and that is what makes recovery work: replaying one
+	// shard's log reproduces its ids because the index comes back from the venue
+	// manifest rather than from the interleaving of other shards. Change it for a
+	// symbol that has already traded and every id it issued becomes ambiguous. See
+	// docs/MULTI-SYMBOL.md §4.1.
+	ShardIndex int
 	// PriceBand is a circuit-breaker collar: a limit order priced more than this
 	// fraction away from the last trade price is rejected (e.g. 0.10 = ±10%).
 	// Zero disables the band. It has no effect until the first trade sets a
@@ -552,7 +562,7 @@ func (e *Engine) dedupKeysChronological() []string {
 func (e *Engine) nextID(order *types.Order) int64 {
 	if order.ID == 0 {
 		e.orderSeq++
-		order.ID = e.orderSeq
+		order.ID = ComposeID(e.config.ShardIndex, e.orderSeq)
 	}
 	// The engine is the single writer that owns time: it stamps the authoritative
 	// timestamps on intake from its injected clock, so replay is reproducible.
@@ -1634,7 +1644,11 @@ func (e *Engine) executeTrade(taker, maker *types.Order, price, qty int64, dst [
 		buy, sell = maker, taker
 	}
 	tr := types.NewTradeValue(e.config.Symbol, price, qty, buy, sell, taker.Side)
-	tr.ID = e.tradeSeq
+	// Trade ids are partitioned like order ids, and for a sharper reason: a bust
+	// names a trade by id alone on both wire edges, so at a multi-symbol venue an
+	// unpartitioned trade id would annul an ambiguous print. SequenceNum stays the
+	// raw per-shard counter — it is a position in this engine's tape, not a name.
+	tr.ID = ComposeID(e.config.ShardIndex, e.tradeSeq)
 	tr.SequenceNum = e.tradeSeq
 	tr.CreatedAt = now
 	dst = append(dst, tr)

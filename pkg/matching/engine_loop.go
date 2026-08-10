@@ -456,6 +456,9 @@ func (r *Runner) SetCancelOnly() { r.send(command{kind: cmdCancelOnly}) }
 // Resume returns the engine to normal trading.
 func (r *Runner) Resume() { r.send(command{kind: cmdResume}) }
 
+// ShardIndex reports the id-space partition this runner's engine was built with.
+func (r *Runner) ShardIndex() int { return r.engine.config.ShardIndex }
+
 // SetMarkPrice sets the external mark/index reference (ticks) the price band uses.
 func (r *Runner) SetMarkPrice(price int64) { r.send(command{kind: cmdSetMark, cancelID: price}) }
 

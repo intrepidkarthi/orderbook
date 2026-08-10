@@ -1,6 +1,7 @@
 package matching
 
 import (
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -10,7 +11,9 @@ import (
 // TestShards_RoutesAndIsolates checks orders route to their symbol's shard and
 // distinct symbols keep independent books.
 func TestShards_RoutesAndIsolates(t *testing.T) {
-	sh := NewShards(ShardsConfig{})
+	// A manifest is now required to open a second symbol: without one every shard
+	// would use index 0 and mint ids that collide with every other shard's.
+	sh := NewShards(ShardsConfig{Manifest: NewManifest(filepath.Join(t.TempDir(), "venue.json"))})
 	defer sh.Close()
 
 	mk := func(sym, user string, side types.Side, price, qty int64) *types.Order {
@@ -47,7 +50,10 @@ func TestShards_RoutesAndIsolates(t *testing.T) {
 // TestShards_ConcurrentProducers hammers many symbols from many goroutines; the
 // per-symbol single writers must keep each book consistent under -race.
 func TestShards_ConcurrentProducers(t *testing.T) {
-	sh := NewShards(ShardsConfig{QueueSize: 64})
+	sh := NewShards(ShardsConfig{
+		QueueSize: 64,
+		Manifest:  NewManifest(filepath.Join(t.TempDir(), "venue.json")),
+	})
 	symbols := []string{"S0", "S1", "S2", "S3"}
 
 	var wg sync.WaitGroup
