@@ -17,6 +17,9 @@ mem.pprof
 go.work
 go.work.sum
 
+# Knowledge-graph passes over the repository (regenerated, ~10 MB)
+graphify-out/
+
 # Web (arrives with the demo milestone)
 web/node_modules/
 web/dist/
