@@ -41,8 +41,16 @@ type Primary struct {
 	walPath string
 	ln      net.Listener
 
-	mu   sync.Mutex
-	subs map[chan []byte]struct{}
+	mu sync.Mutex
+	// subs maps each follower's buffer to its peer address. The address is
+	// carried purely so a shed can be ATTRIBUTED: a bare drop counter tells an
+	// operator that something was cut and not which thing, and the two candidates
+	// — a wedged client and a follower merely running behind — call for opposite
+	// responses.
+	subs map[chan []byte]string
+	// shedPeers is the most recent shed addresses, newest last, bounded. Guarded
+	// by mu, appended from fanout, which already holds it.
+	shedPeers []string
 
 	shed atomic.Int64
 	wg   sync.WaitGroup
@@ -55,7 +63,7 @@ func NewPrimary(symbol, walPath, addr string) (*Primary, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Primary{wal: w, walPath: walPath, subs: map[chan []byte]struct{}{}}
+	p := &Primary{wal: w, walPath: walPath, subs: map[chan []byte]string{}}
 	w.SetOnAppend(p.fanout)
 	p.Runner = matching.NewRunner(matching.RunnerConfig{Engine: matching.DefaultConfig(symbol), Log: w})
 
@@ -83,6 +91,26 @@ func (p *Primary) LogSeq() int64 { return p.wal.Seq() }
 // follower is a follower that cannot keep up, not a network blip.
 func (p *Primary) Shed() int64 { return p.shed.Load() }
 
+// maxShedPeers bounds the attribution list. A venue shedding more than this
+// between reads has a systemic problem the individual addresses will not explain.
+const maxShedPeers = 64
+
+// ShedPeers returns the addresses of recently shed followers, oldest first.
+//
+// It exists because Shed() alone cannot answer the first question an operator
+// asks. A follower cut for falling behind and a client that stopped reading
+// produce the same increment and need opposite responses — and a test that waits
+// for "something was shed" will happily accept the wrong one, which is exactly
+// how drill D6 came to fail about once in twelve runs while reporting the
+// opposite of what had happened.
+func (p *Primary) ShedPeers() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.shedPeers))
+	copy(out, p.shedPeers)
+	return out
+}
+
 // fanout runs on the matching goroutine, under the Writer's lock, for every
 // journalled command — so it must never wait. Each follower gets a non-blocking
 // send into its buffer; a follower whose buffer is full is cut on the spot.
@@ -92,13 +120,17 @@ func (p *Primary) Shed() int64 { return p.shed.Load() }
 // knows it was cut and reconnects with its position.
 func (p *Primary) fanout(_ int64, record []byte) {
 	p.mu.Lock()
-	for ch := range p.subs {
+	for ch, peer := range p.subs {
 		select {
 		case ch <- record:
 		default:
 			delete(p.subs, ch)
 			close(ch)
 			p.shed.Add(1)
+			p.shedPeers = append(p.shedPeers, peer)
+			if len(p.shedPeers) > maxShedPeers {
+				p.shedPeers = p.shedPeers[1:]
+			}
 		}
 	}
 	p.mu.Unlock()
@@ -144,7 +176,7 @@ func (p *Primary) serve(conn net.Conn) {
 
 	ch := make(chan []byte, shipBuffer)
 	p.mu.Lock()
-	p.subs[ch] = struct{}{}
+	p.subs[ch] = conn.RemoteAddr().String()
 	p.mu.Unlock()
 	defer p.unsubscribe(ch)
 

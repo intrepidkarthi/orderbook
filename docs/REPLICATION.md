@@ -159,6 +159,20 @@ deliberately broken code before it counts:
 - **D6 — Lag is visible.** Stall the follower; the exported sequence gap moves and
   an operator can alert on it. A loss window nobody can see is a loss window that
   does not exist until it happens.
+
+  This drill was flaky at roughly one run in twelve for three releases, and the
+  cause is worth more than the fix. A follower that actually applies commands is
+  **slower than a wedged socket**, which merely fills a kernel buffer and costs the
+  primary nothing until it is full — so driven flat out, the healthy follower's own
+  ship buffer overflowed first and *it* was the one shed. `Shed()` is a bare
+  counter, so the drill saw a non-zero value, assumed it meant the wedge, and
+  reported "shedding the wedge broke the healthy follower": the opposite of what had
+  happened. `Primary.ShedPeers` now attributes each cut to an address, the drill
+  waits for the wedge specifically and asserts nobody else was cut, and the tape is
+  paced against the healthy follower so there is one candidate rather than two.
+  A drop counter that cannot name the dropped is the same gap for an operator —
+  a client that stopped reading and a follower merely running behind produce the
+  same increment and need opposite responses.
 - **D7 — A bust replicates.** The primary annuls a print mid-stream and the
   follower ends up agreeing. Added with trade bust ([TRADE-BUST.md](TRADE-BUST.md))
   and it tests the digest rather than the wire: a bust changes no order, so a

@@ -242,20 +242,46 @@ func TestDrillD6_ASlowFollowerIsShedNotWaitedOn(t *testing.T) {
 		t.Fatalf("hello: %v", err)
 	}
 
+	wedgeAddr := wedged.LocalAddr().String()
+
 	// Enough traffic to exhaust the socket buffers plus the ship buffer. Every
 	// Process call returning is itself the "matching never blocked" assertion.
+	//
+	// The tape is paced against the healthy follower, and that is not politeness
+	// to the test — it is the difference between this drill asserting what it
+	// claims and asserting something else about one run in twelve. A follower
+	// that actually applies commands is SLOWER than a wedged socket, which merely
+	// fills a kernel buffer and costs the primary nothing until it is full. Driven
+	// flat out, the healthy follower's own ship buffer overflows first and IT is
+	// the one shed; the drill then saw a non-zero Shed(), assumed it was the
+	// wedge, and reported "shedding the wedge broke the healthy follower" — the
+	// opposite of what had happened. Keeping the healthy follower within its
+	// buffer leaves exactly one candidate for the shed, which is the point.
 	n := 0
 	deadline := time.Now().Add(20 * time.Second)
-	for p.Shed() == 0 {
+	for !shedIncludes(p, wedgeAddr) {
 		if time.Now().After(deadline) {
-			t.Fatal("the wedged follower was never shed — fanout is waiting on it")
+			t.Fatalf("the wedged follower was never shed — fanout is waiting on it (shed=%d, peers=%v)",
+				p.Shed(), p.ShedPeers())
 		}
 		n++
 		tapeStep(t, p.Runner, n)
+		if n%256 == 0 {
+			if err := healthy.WaitApplied(int64(n), 10*time.Second); err != nil {
+				t.Fatalf("the healthy follower fell behind before the wedge was shed: %v", err)
+			}
+		}
 	}
 
 	if err := healthy.WaitApplied(int64(n), 10*time.Second); err != nil {
-		t.Fatalf("shedding the wedge broke the healthy follower: %v", err)
+		t.Fatalf("shedding the wedge broke the healthy follower: %v (shed peers %v)", err, p.ShedPeers())
+	}
+	// And the healthy follower is not among the casualties, which is the half of
+	// "shed, not waited on" that a bare counter cannot express.
+	for _, peer := range p.ShedPeers() {
+		if peer != wedgeAddr {
+			t.Errorf("a follower other than the wedge was shed: %s (wedge is %s)", peer, wedgeAddr)
+		}
 	}
 	got, err := healthy.Digest()
 	if err != nil {
@@ -269,6 +295,16 @@ func TestDrillD6_ASlowFollowerIsShedNotWaitedOn(t *testing.T) {
 	if p.LogSeq() != int64(n) || healthy.Applied() != int64(n) {
 		t.Errorf("lag gauge broken: LogSeq=%d Applied=%d want both %d", p.LogSeq(), healthy.Applied(), n)
 	}
+}
+
+// shedIncludes reports whether addr is among the followers the primary has cut.
+func shedIncludes(p *Primary, addr string) bool {
+	for _, peer := range p.ShedPeers() {
+		if peer == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // TestDrillD3Refuses_APromotedBookWithAKnownDefect — belt for D3's braces: a
