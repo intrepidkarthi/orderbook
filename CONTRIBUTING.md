@@ -45,9 +45,14 @@ we can say yes:
   claims. A "FIX adapter" parses and serialises real FIX wire (`tag=value`,
   SOH-delimited) — not a `map[int]string`; a detector detects the real pattern.
   Plausible-looking placeholders that merely compile will be closed.
-- **Tests must prove the behaviour.** "It builds and `go test` passes" is not
-  enough on its own — tests need to exercise the feature (positive *and* negative
-  cases) and preserve determinism.
+- **Tests must prove the behaviour, and you must have watched them fail.** "It
+  builds and `go test` passes" is not enough on its own — tests need to exercise
+  the feature (positive *and* negative cases) and preserve determinism. Before a
+  test counts, run it against code deliberately broken in the way it claims to
+  detect, and watch it fail. A test that cannot fail is decoration, and this
+  repository has shipped six of them in tests that read perfectly well: see
+  [docs/TESTING.md](docs/TESTING.md) for what they looked like and why each one
+  was green.
 - **Follow the ground rules above** (int64, downward layering, no clock/RNG in
   the match path); keep it `gofmt`-clean, focused, and documented if it changes
   public API.
