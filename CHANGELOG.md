@@ -5,9 +5,22 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
-## [Unreleased]
+## [0.25.0] - 2026-08-11
+
+A documentation release, and every item in it is this project checking its own
+claims rather than adding new ones. Two published allocation ratios were stale, one
+of them flattering by 2×; a test count corrected yesterday was stale again today;
+and the rule that catches all of this finally got written down instead of being
+folklore in a test-file header.
 
 ### Fixed
+
+- **The published test count goes stale by construction, so it is now a floor.** It
+  read 480 for several releases after it stopped being true, was corrected to an
+  exact 584 — and was stale again within a day. It now reads "over 600" with the
+  command to count them, for the same reason v0.19.0 deleted the hardcoded "latest
+  version" from the docs page rather than updating it. A floor can only ever become
+  an understatement.
 
 - **Two stale allocation ratios in [BENCHMARKS.md](docs/BENCHMARKS.md).** `Add` into
   a growing book was published as 1.05 allocs/op against a measured **2.01** — the
@@ -1834,7 +1847,8 @@ trailing), GTC/IOC/FOK, self-trade prevention, a price-band circuit breaker, FIF
 and pro-rata allocation, L1/L2/L3 market data, a surveillance starter kit, and a
 market-microstructure research harness with a WebAssembly demo.
 
-[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.21.0...v0.22.0

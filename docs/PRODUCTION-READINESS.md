@@ -69,14 +69,18 @@ Each row names the evidence, because a checklist that only asserts is worth noth
 | No data races | `go test -race -count=3` across all 16 packages |
 | No panics on hostile input | 5.6M fuzz executions across two targets |
 
-Test count: **584 test functions**, two fuzz targets, race and replay-recovery in CI.
-Counted with `grep -rh '^func Test' --include='*_test.go' . | wc -l`, so it can be
-rechecked rather than believed — this line said 480 for several releases after it
-stopped being true.
+Test count: **over 600 test functions**, two fuzz targets, race and replay-recovery
+in CI. Count them with `grep -rh '^func Test' --include='*_test.go' . | wc -l`.
+
+A floor rather than a figure, and that is the second lesson this line has taught. It
+read 480 for several releases after it stopped being true; corrected to an exact 584,
+it was stale again within a day. A hand-maintained count goes stale by construction —
+the same reason v0.19.0 deleted the hardcoded "latest version" from the docs page
+rather than updating it. A floor can only ever become an understatement.
 
 ## 1a. What sustained load found that nothing else did
 
-The engine has 584 test functions, two fuzz targets at 5.6M executions, replay-recovery
+The engine has over 600 test functions, two fuzz targets at 5.6M executions, replay-recovery
 and race detection in CI, and a benchmark suite that has twice been corrected against
 itself. None of them found this:
 
