@@ -5,6 +5,33 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
+## [Unreleased]
+
+### Added
+
+- **`obgw -symbols` and `-datadir`; `obsoak -symbols`.** The gateway grew multi-symbol
+  config fields in v0.22.0 and neither reached a command-line flag, so the binary
+  could not be told to serve two books. The soak harness now picks an instrument per
+  *order* rather than per connection, so one session holds live orders on every book
+  while every cancel it sends names only a `ClOrdID`.
+
+- **The multi-symbol path has been under sustained load** ([SOAK.md](docs/SOAK.md)
+  §1d): 5m29s at 1,200 msg/s across three books, durable. Goroutines and descriptors
+  did not move by one; heap floor up 3.6 MiB; no errors.
+
+  Measured against a control, because the interesting question was not "does it
+  survive" but "does the cancel routing miss". Multi-symbol added three pieces of
+  per-order state with eviction, which is the shape that passes tests and fails under
+  load. Paired against an identical single-book run the refusal rate is **8.347% vs
+  8.405%**, all of it the harness's own optimistic bookkeeping — and a cancel routed
+  to the wrong book would land in exactly that counter.
+
+### Fixed
+
+- The gateway's startup line logged one instrument while serving three, because it
+  printed the single-symbol config field. Cosmetic, and the sort of thing that makes
+  an operator distrust the rest of the log.
+
 ## [0.25.0] - 2026-08-11
 
 A documentation release, and every item in it is this project checking its own
