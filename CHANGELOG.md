@@ -7,6 +7,22 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two stale allocation ratios in [BENCHMARKS.md](docs/BENCHMARKS.md).** `Add` into
+  a growing book was published as 1.05 allocs/op against a measured **2.01** — the
+  page understated the cost of growing a book by half, which is the third correction
+  this file has taken and the third in the flattering direction. Cancel + replace
+  read 0.009 against a measured **0.0000**, understating the engine instead.
+
+  Neither is a regression: both reproduce identically on pre-session code. Both are
+  deterministic allocation counts rather than timings, and both are printed by
+  `pkg/orderbook/alloc_test.go` on every run — the figures were in the test log the
+  whole time and nobody re-read them.
+
+- `Config.ShardIndex` moved to the end of the struct. Appending cannot shift the
+  offsets of fields the match path reads; inserting can.
+
 ### Added
 
 - **[TESTING.md](docs/TESTING.md)** — the rule the rest of the documentation rests
