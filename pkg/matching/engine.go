@@ -129,16 +129,6 @@ type Config struct {
 	Symbol              string
 	SelfTradePrevention SelfTradePrevention
 	MaxOrders           int
-	// ShardIndex partitions this engine's id space so order and trade ids are
-	// unique across a multi-symbol venue. Zero — the default, and every
-	// single-symbol deployment — leaves ids exactly as they were.
-	//
-	// It is CONFIG, not state, and that is what makes recovery work: replaying one
-	// shard's log reproduces its ids because the index comes back from the venue
-	// manifest rather than from the interleaving of other shards. Change it for a
-	// symbol that has already traded and every id it issued becomes ambiguous. See
-	// docs/MULTI-SYMBOL.md §4.1.
-	ShardIndex int
 	// PriceBand is a circuit-breaker collar: a limit order priced more than this
 	// fraction away from the last trade price is rejected (e.g. 0.10 = ±10%).
 	// Zero disables the band. It has no effect until the first trade sets a
@@ -249,6 +239,25 @@ type Config struct {
 	// pinging). The variation is deterministic in the order id and refill count, so
 	// replay stays exact. Zero shows a fixed display size.
 	IcebergPeakJitter decimal.Decimal
+
+	// ShardIndex partitions this engine's id space so order and trade ids are
+	// unique across a multi-symbol venue. Zero — the default, and every
+	// single-symbol deployment — leaves ids exactly as they were.
+	//
+	// It is CONFIG, not state, and that is what makes recovery work: replaying one
+	// shard's log reproduces its ids because the index comes back from the venue
+	// manifest rather than from the interleaving of other shards. Change it for a
+	// symbol that has already traded and every id it issued becomes ambiguous. See
+	// docs/MULTI-SYMBOL.md §4.1.
+	//
+	// It is LAST in this struct deliberately, and new fields belong here too.
+	// Config is read on the match path, so inserting a field in the middle shifts
+	// the offset of every field after it and can move hot ones across cache lines.
+	// Appending cannot. This is a precaution rather than a measured saving: an
+	// attempt to measure it on a loaded machine produced a 20% difference that a
+	// second interleaved run did not reproduce, which says more about the machine
+	// than the layout — see docs/BENCHMARKS.md on what these numbers need.
+	ShardIndex int
 }
 
 // DefaultConfig returns a sensible configuration for a symbol.

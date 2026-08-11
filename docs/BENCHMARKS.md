@@ -25,6 +25,17 @@ Apple M4, macOS 26.5, `go1.23.5 darwin/arm64`, single-threaded (`-benchmem`).
 a number worth publishing, and the tail percentiles below are the most
 load-sensitive figures here.
 
+> **"Otherwise idle" is load-bearing, and here is what it costs to ignore it.** A
+> re-measurement on 2026-08-11 ran on the same hardware with a load average near 6
+> (a window server, a storage indexer and two browsers competing). Medians came out
+> 10–25% above the figures below, in both directions across neighbouring rows, and
+> an interleaved A/B against older code produced a 24% difference on one run that a
+> second interleaved run put at 2%. **None of that was publishable, and none of it
+> was evidence of anything** — the variance exceeded the effect being looked for.
+> The allocation figures were unaffected, because counting allocations is not a
+> timing. If you cannot quiesce the machine, measure allocations and leave the
+> nanoseconds alone.
+
 int64 ticks/lots, pooled book nodes/levels, single-writer engine:
 
 | Benchmark | ns/op | ~ops/sec | B/op | allocs/op |
@@ -73,12 +84,25 @@ real ratios, measured against `runtime.MemStats` in `pkg/orderbook/alloc_test.go
 | Path | allocs/op (measured directly) |
 |---|---:|
 | Cancel (`Remove`) | **0.0002** — 44 allocations across 200,000 cancels |
-| Cancel + replace (MM steady state) | **0.009** |
-| `Add` into a growing book | **1.05** |
+| Cancel + replace (MM steady state) | **0.0000** |
+| `Add` into a growing book | **2.01** |
+
+Two of those three were wrong on this page until 2026-08-11, and the `Add` row was
+wrong in the flattering direction — it read **1.05** against a measured 2.01, so the
+page understated the cost of growing a book by half. Cancel + replace read 0.009
+against a measured 0.0000, understating the engine instead. Both are deterministic
+allocation counts rather than timings, so neither was a machine artifact; they were
+simply not re-read after the code moved. Checked against the pre-session tree to
+confirm the numbers are stale rather than regressed, and both are asserted by
+`pkg/orderbook/alloc_test.go`, which prints them on every run — the figures were
+sitting in the test log the whole time.
 
 So cancel and market-maker churn are allocation-free in substance, not just after
-rounding. `Add` on its own is not, and that is what "pooled" means rather than
-"allocation-free": the pool only pays back once a release has put something in it.
+rounding — churn measures a flat zero. `Add` on its own is not, and at two
+allocations per order rather than one it is further from free than this page used to
+say. That is what "pooled" means rather than "allocation-free": the pool only pays
+back once a release has put something in it, and a book that only grows never
+releases anything.
 Those three ratios are asserted by tests, so the claim can fail rather than merely
 being printed.
 
