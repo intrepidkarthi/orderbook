@@ -5,7 +5,14 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
-## [Unreleased]
+## [0.24.0] - 2026-08-11
+
+Two things the previous release named as unfinished, and one it did not know about.
+The gauge work was the stated item; making it exposed that `cmd/obdash` had been
+unable to connect to the gateway since the wire went to v4, and that every one of
+its tests passed anyway because its own test double never checked the field the real
+venue refuses on. That is the more useful of the two findings, and it is the one
+that was not on the list.
 
 ### Fixed
 
@@ -1791,7 +1798,8 @@ trailing), GTC/IOC/FOK, self-trade prevention, a price-band circuit breaker, FIF
 and pro-rata allocation, L1/L2/L3 market data, a surveillance starter kit, and a
 market-microstructure research harness with a WebAssembly demo.
 
-[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.20.0...v0.21.0
