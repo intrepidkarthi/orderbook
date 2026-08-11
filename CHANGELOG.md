@@ -5,6 +5,26 @@ All notable changes to this project are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0: minor
 versions may include breaking changes).
 
+## [Unreleased]
+
+### Added
+
+- **[TESTING.md](docs/TESTING.md)** — the rule the rest of the documentation rests
+  on, written down: *a test does not count until it has been run against code
+  deliberately broken in the way it claims to detect.* It was already the standing
+  rule for the replication drills, whose file header names the sabotage each was
+  verified against; this generalises it, because the same mistake has now been made
+  six times across five tests, in code written carefully by people who knew about
+  the rule.
+
+  The case studies are the point, and they are all from this repository: a digest
+  test satisfied by a sequence counter, a checksum test satisfied by a magic number,
+  a timing test that first passed against a short-circuit and then failed against
+  correct code, a drill that blamed the wrong follower, and a test double more
+  permissive than the venue it stood in for. Each read correctly and would have
+  passed review. Linked from CONTRIBUTING's quality bar, where it changes what a
+  contributor is asked to have *done* rather than merely believed.
+
 ## [0.24.0] - 2026-08-11
 
 Two things the previous release named as unfinished, and one it did not know about.
