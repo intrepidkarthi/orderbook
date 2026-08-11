@@ -72,12 +72,30 @@ import (
 	"github.com/intrepidkarthi/orderbook/pkg/orderentry"
 )
 
+// splitSymbols turns the comma-separated -symbols flag into a list. Empty means
+// the venue serves the single -symbol, which is what every existing deployment
+// does and what the config defaults to.
+func splitSymbols(list string) []string {
+	if strings.TrimSpace(list) == "" {
+		return nil
+	}
+	var out []string
+	for _, sym := range strings.Split(list, ",") {
+		if sym = strings.TrimSpace(sym); sym != "" {
+			out = append(out, sym)
+		}
+	}
+	return out
+}
+
 func main() {
 	var (
 		addr         = flag.String("addr", "127.0.0.1:9000", "order-entry listen address")
 		mdAddr       = flag.String("mdaddr", "", "market-data listen address (empty = no market-data feed)")
 		adminAddr    = flag.String("admin", "", "admin HTTP listen address for /metrics, /healthz and /readyz (empty = unobserved)")
-		symbol       = flag.String("symbol", "BTC-USD", "the single instrument this gateway serves")
+		symbol       = flag.String("symbol", "BTC-USD", "the instrument this gateway serves (one book)")
+		symbols      = flag.String("symbols", "", "comma-separated instruments; overrides -symbol and requires -datadir")
+		dataDir      = flag.String("datadir", "", "directory for the venue manifest and one log/snapshot per instrument (multi-symbol only)")
 		accounts     = flag.String("accounts", "", "comma-separated user:password pairs (VISIBLE IN ps OUTPUT — prefer -accounts-file)")
 		accountsFile = flag.String("accounts-file", "", "file of user:password or user:sha256:<64 hex> lines; # comments allowed")
 		hashSecret   = flag.Bool("hash-secret", false, "read a secret on stdin, print its sha256: credential-file form, and exit")
@@ -115,6 +133,8 @@ func main() {
 		MDAddr:           *mdAddr,
 		AdminAddr:        *adminAddr,
 		Symbol:           *symbol,
+		Symbols:          splitSymbols(*symbols),
+		DataDir:          *dataDir,
 		Auth:             auth,
 		TLS:              tlsCfg,
 		RatePerSec:       *rate,
@@ -149,7 +169,7 @@ func main() {
 	if err := srv.Listen(); err != nil {
 		log.Fatalf("obgw: listen: %v", err)
 	}
-	log.Printf("obgw: serving %s on %s (incarnation %s)", cfg.Symbol, srv.Addr(), cfg.Incarnation)
+	log.Printf("obgw: serving %s on %s (incarnation %s)", strings.Join(cfg.Symbols, ", "), srv.Addr(), cfg.Incarnation)
 	if a := srv.AdminAddr(); a != nil {
 		log.Printf("obgw: admin on %s (/metrics, /healthz, /readyz)", a)
 	}

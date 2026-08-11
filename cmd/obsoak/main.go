@@ -93,17 +93,22 @@ type config struct {
 	password  string
 	users     int
 	symbol    string
-	conns     int
-	rate      float64
-	duration  time.Duration
-	warmup    time.Duration
-	sample    time.Duration
-	resting   int
-	takerPct  float64
-	refPrice  int64
-	spread    int64
-	qty       int64
-	seed      int64
+	// symbols is the instrument set. A one-symbol run is the historical behaviour
+	// and still the default; more than one is what exercises the routing that
+	// arrived with multi-symbol — a session naming orders by ClOrdID alone while
+	// those orders live on different books.
+	symbols  []string
+	conns    int
+	rate     float64
+	duration time.Duration
+	warmup   time.Duration
+	sample   time.Duration
+	resting  int
+	takerPct float64
+	refPrice int64
+	spread   int64
+	qty      int64
+	seed     int64
 }
 
 func main() {
@@ -112,7 +117,8 @@ func main() {
 	printAccounts := flag.Bool("print-accounts", false, "print the -accounts string obgw needs for this run, and exit")
 	flag.StringVar(&cfg.addr, "addr", "127.0.0.1:9000", "order-entry address")
 	flag.StringVar(&cfg.adminAddr, "admin", "127.0.0.1:9100", "admin address to sample /metrics from (empty = client side only)")
-	flag.StringVar(&cfg.symbol, "symbol", "BTC-USD", "instrument")
+	flag.StringVar(&cfg.symbol, "symbol", "BTC-USD", "instrument (one book)")
+	symbolList := flag.String("symbols", "", "comma-separated instruments; overrides -symbol and drives every connection across all of them")
 	flag.IntVar(&cfg.conns, "conns", 25, "concurrent connections")
 	flag.IntVar(&cfg.users, "users", 0, "distinct accounts to spread connections over (0 = one per connection)")
 	flag.Float64Var(&cfg.rate, "rate", 10000, "aggregate messages per second across all connections")
@@ -126,6 +132,22 @@ func main() {
 	flag.Int64Var(&cfg.qty, "qty", 10, "order quantity in lots")
 	flag.Int64Var(&cfg.seed, "seed", 1, "random seed, so a run is reproducible")
 	flag.Parse()
+
+	// One list from here down, so nothing downstream has to know which flag was set.
+	cfg.symbols = []string{cfg.symbol}
+	if *symbolList != "" {
+		cfg.symbols = cfg.symbols[:0]
+		for _, sym := range strings.Split(*symbolList, ",") {
+			if sym = strings.TrimSpace(sym); sym != "" {
+				cfg.symbols = append(cfg.symbols, sym)
+			}
+		}
+		if len(cfg.symbols) == 0 {
+			fmt.Fprintln(os.Stderr, "obsoak: -symbols was set but named no instrument")
+			os.Exit(2)
+		}
+		cfg.symbol = cfg.symbols[0]
+	}
 
 	user, pass, ok := strings.Cut(*acct, ":")
 	if !ok {
@@ -448,7 +470,7 @@ func (p *participant) act() error {
 	}
 	p.mu.Unlock()
 	if atCap {
-		return p.send(wire.MsgCancel, oldest, 0, 0, 0)
+		return p.send(wire.MsgCancel, oldest, "", 0, 0, 0)
 	}
 	id := p.nextID()
 	if p.rng.Float64() < p.cfg.takerPct {
@@ -460,7 +482,7 @@ func (p *participant) act() error {
 		if p.rng.Intn(2) == 0 {
 			side, price = wire.SideSell, p.cfg.refPrice-p.cfg.spread
 		}
-		return p.send(wire.MsgEnter, id, side, price, wire.TIFImmediateOrCanc)
+		return p.send(wire.MsgEnter, id, p.pickSymbol(), side, price, wire.TIFImmediateOrCanc)
 	}
 	// A quote, offset from the reference so the book has depth rather than one level.
 	side := wire.SideBuy
@@ -471,7 +493,20 @@ func (p *participant) act() error {
 	p.mu.Lock()
 	p.resting = append(p.resting, id)
 	p.mu.Unlock()
-	return p.send(wire.MsgEnter, id, side, price, wire.TIFGoodTillCancel)
+	return p.send(wire.MsgEnter, id, p.pickSymbol(), side, price, wire.TIFGoodTillCancel)
+}
+
+// pickSymbol chooses this order's instrument.
+//
+// Per ORDER rather than per connection, which is the harder case on purpose: one
+// session ends up holding live orders on every book at once, and every cancel it
+// sends names only a ClOrdID. A harness that pinned each connection to one symbol
+// would exercise the routing without ever making it choose.
+func (p *participant) pickSymbol() string {
+	if len(p.cfg.symbols) == 1 {
+		return p.cfg.symbols[0]
+	}
+	return p.cfg.symbols[p.rng.Intn(len(p.cfg.symbols))]
 }
 
 func (p *participant) nextID() string {
@@ -479,7 +514,7 @@ func (p *participant) nextID() string {
 	return fmt.Sprintf("%d-%d", p.id, p.seq)
 }
 
-func (p *participant) send(msgType uint8, id string, side uint8, price int64, tif uint8) error {
+func (p *participant) send(msgType uint8, id, symbol string, side uint8, price int64, tif uint8) error {
 	var (
 		b   []byte
 		err error
@@ -487,11 +522,14 @@ func (p *participant) send(msgType uint8, id string, side uint8, price int64, ti
 	switch msgType {
 	case wire.MsgEnter:
 		b, err = wire.EncodeEnter(nil, wire.Enter{
-			Version: wire.Version, ClOrdID: id, Symbol: p.cfg.symbol,
+			Version: wire.Version, ClOrdID: id, Symbol: symbol,
 			Side: side, Type: wire.TypeLimit, TIF: tif,
 			Price: price, Quantity: p.cfg.qty,
 		})
 	case wire.MsgCancel:
+		// No symbol, deliberately: the wire names an order by the client's own id
+		// and the venue is responsible for knowing which book it is on. That is the
+		// routing this harness exists to put under load.
 		b, err = wire.EncodeCancel(nil, wire.Cancel{Version: wire.Version, ClOrdID: id})
 	}
 	if err != nil {
@@ -725,7 +763,7 @@ func speedProbe() time.Duration {
 
 func report(cfg config, st *stats, samples []sample, elapsed time.Duration, probeBefore, probeAfter time.Duration) {
 	sent := st.sent.Load()
-	fmt.Printf("\n=== obsoak: %s over %s, %d connections ===\n\n", cfg.symbol, elapsed.Truncate(time.Second), cfg.conns)
+	fmt.Printf("\n=== obsoak: %s over %s, %d connections ===\n\n", strings.Join(cfg.symbols, ","), elapsed.Truncate(time.Second), cfg.conns)
 
 	// First, because it decides whether anything below is comparable to another run.
 	fmt.Printf("machine   fixed-work probe %s before, %s after", probeBefore.Truncate(time.Millisecond), probeAfter.Truncate(time.Millisecond))

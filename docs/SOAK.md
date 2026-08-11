@@ -342,6 +342,80 @@ payload is.
 
 ---
 
+## 1d. The first multi-symbol run
+
+Three books on one venue, 1,200 messages a second, 8 connections over 4 accounts,
+durable, with every connection trading all three instruments and every cancel naming
+its order by client id alone. That last part is the point: the wire does not carry a
+symbol on a cancel, so the venue has to know which book each order is on, and this is
+the first time that routing has run for longer than a test.
+
+```
+machine   fixed-work probe 61ms before, 60ms after  — stable
+
+  sent               432,082   (1,200/s, target 1,200/s)
+  acked              815,142
+  fills              145,265
+  rejected            36,196   (8.377%)
+  errors                   0
+  unanswered               8   (0.002%)
+
+steady state: 23 samples over 5m29s, after a 30s warmup
+  heap            floor   50.4 MiB ->   54.0 MiB   trend +257.0 MiB/hour
+  goroutines      floor         45 ->         45   trend -0/hour
+  descriptors     floor         21 ->         21   trend -0/hour
+  resting orders  floor        659 ->        660   trend -26/hour
+
+VERDICT: no growth in heap, goroutines or descriptors over 5m29s of steady state.
+```
+
+Goroutines and descriptors did not move by one. The heap floor rose 3.6 MiB across
+the window, which the harness accepts as pacing rather than growth; a run long enough
+to argue about that has not been done.
+
+**The number that mattered was measured against a control.** Multi-symbol added three
+things to every order: a venue-wide client-id check, a session-scoped record of which
+book each id went to, and a bounded fill memory for routing busts. All three are new
+per-order state with eviction, which is the shape that survives tests and fails under
+load. So the run was paired with an identical one against a single book:
+
+| | one book | three books |
+|---|---:|---:|
+| sent | 108,080 | 108,076 |
+| rejected | 9,084 (8.405%) | 9,021 (8.347%) |
+| of which "unknown order" | 9,084 | 9,021 |
+| errors | 0 | 0 |
+| goroutines | 41, flat | 45, flat |
+
+The refusal rate is the same to within noise, and all of it is the harness's own
+optimistic bookkeeping — it asks to cancel orders that have already filled. **A cancel
+routed to the wrong book would land in exactly that counter**, and it did not move.
+
+Two things this run is not. It is 1,200 messages a second, not the 2,500 of §1c, and
+not the 20,000 that found the orphaned-order defect. And it is five and a half
+minutes: long enough for the harness to stop saying "inconclusive", far short of a
+trading day.
+
+### What it turned up on the way
+
+Neither of these is a defect in the engine, and both cost time to work out, so they
+are here for whoever runs the harness next.
+
+**obsoak cannot be re-run against a warm venue.** It logs in asking for sequence 0,
+meaning "replay my whole stream". After a previous run has filled an account's
+8,192-message ring, the venue tries to deliver all of it into a 1,024-deep outbound
+queue, cannot, and sheds the connection — which is the documented behaviour for a
+consumer that will not read. The client reports it as `write: broken pipe` and eight
+connections that die on their first order. Start a fresh venue per run, or teach the
+harness to resume.
+
+**The gateway logged one instrument while serving three.** `obgw: serving BTC-USD`
+at a venue running three books, because the startup line printed the single-symbol
+config field. Cosmetic, and exactly the sort of thing that makes an operator distrust
+everything else in the log. Fixed.
+
+---
+
 ## 2. What the harness measures
 
 Two vantage points, because they answer different questions.
