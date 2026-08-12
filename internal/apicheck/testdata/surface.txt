@@ -1,0 +1,1113 @@
+auction.(*AuctionSession).Cancel(orderID int64) error
+auction.(*AuctionSession).Close(now time.Time) (BatchResult, bool)
+auction.(*AuctionSession).CloseAt() time.Time
+auction.(*AuctionSession).Closed() bool
+auction.(*AuctionSession).Indicative() Result
+auction.(*AuctionSession).Submit(o *types.Order) error
+auction.(*AuctionSession).Unfilled() []*types.Order
+auction.(*BatchAuction).Add(o *types.Order)
+auction.(*BatchAuction).Cross() BatchResult
+auction.AuctionSession struct
+auction.BatchAuction struct
+auction.BatchResult struct
+auction.BatchResult.ClearingPrice int64
+auction.BatchResult.HasClearing bool
+auction.BatchResult.Trades []types.Trade
+auction.BatchResult.Volume int64
+auction.ErrAuctionClosed var
+auction.FromSnapshot(s *orderbook.Snapshot) Result
+auction.Level struct
+auction.Level.Price int64
+auction.Level.Qty int64
+auction.NewAuctionSession(symbol string, closeAt time.Time) *AuctionSession
+auction.NewBatchAuction(symbol string) *BatchAuction
+auction.RandomizedClose(base time.Time, window time.Duration, seed uint64) time.Time
+auction.Result struct
+auction.Result.ClearingPrice int64
+auction.Result.HasClearing bool
+auction.Result.Volume int64
+auction.Uncross(bids, asks []Level) Result
+backtest.Config struct
+backtest.Config.InitialPrice int64
+backtest.Config.MMUserID string
+backtest.Config.Noise *sim.NoiseTrader
+backtest.Config.QuoteSize int64
+backtest.Config.Quoter Quoter
+backtest.Config.Seed int64
+backtest.Config.Steps int
+backtest.Config.Symbol string
+backtest.Config.Tick int64
+backtest.Quoter interface
+backtest.Quoter.Quote(mid, inventory, timeRemaining float64) strategy.Quote (interface method)
+backtest.Result struct
+backtest.Result.Fills int
+backtest.Result.FinalCash int64
+backtest.Result.FinalInventory int64
+backtest.Result.FinalPnL float64
+backtest.Result.InventoryPath []float64
+backtest.Result.MaxAbsInventory int64
+backtest.Result.MidPath []float64
+backtest.Result.PnL []float64
+backtest.Result.Sharpe float64
+backtest.Result.Steps int
+backtest.Result.Volume int64
+backtest.Run(cfg Config) *Result
+gateway.(*Gateway).Allow(o *types.Order, now time.Time) bool
+gateway.(*Gateway).Cancel(orderID int64, user string) (*types.Order, error)
+gateway.(*Gateway).IsTaker(o *types.Order) bool
+gateway.(*Gateway).Submit(o *types.Order, now time.Time) (*matching.MatchResult, error)
+gateway.(*RateGate).Allow(user string, now time.Time) bool
+gateway.Config struct
+gateway.Config.Burst float64
+gateway.Config.Rate float64
+gateway.Config.SpeedBump time.Duration
+gateway.ErrThrottled var
+gateway.Gateway struct
+gateway.Gateway.OnBump func(o *types.Order, releaseAt time.Time)
+gateway.New(runner *matching.Runner, cfg Config) *Gateway
+gateway.NewRateGate(ratePerSec, burst float64) *RateGate
+gateway.RateGate struct
+marketdata.(*Feed).Adopt(orders []*types.Order, lastTradePrice int64)
+marketdata.(*Feed).Incarnation() string
+marketdata.(*Feed).OnEvents(evs []matching.Event)
+marketdata.(*Feed).PublishIndicative(price, volume, imbalance int64)
+marketdata.(*Feed).Resume(incarnation string, seq uint64) ([]Update, error)
+marketdata.(*Feed).Retained() (oldest uint64, count int)
+marketdata.(*Feed).Seq() uint64
+marketdata.(*Feed).Since(seq uint64) ([]Update, error)
+marketdata.(*Feed).Snapshot() Snapshot
+marketdata.(*L2Feed).Adopt(orders []*types.Order)
+marketdata.(*L2Feed).Drain() []L2Delta
+marketdata.(*L2Feed).Levels(side types.Side) []L2Delta
+marketdata.(*L2Feed).OnEvents(evs []matching.Event)
+marketdata.(*Recorder).Process(o *types.Order) *matching.MatchResult
+marketdata.(*Recorder).Stream() *Stream
+marketdata.(*Recorder).Trades() []*types.Trade
+marketdata.(*Stream).Append(o *types.Order)
+marketdata.(*Stream).Len() int
+marketdata.(*Stream).Orders() []*types.Order
+marketdata.(VenueState).String() string
+marketdata.Digest(trades []*types.Trade) string
+marketdata.ErrSequenceEvicted var
+marketdata.ErrWrongIncarnation var
+marketdata.Feed struct
+marketdata.L2Delta struct
+marketdata.L2Delta.Price int64
+marketdata.L2Delta.Qty int64
+marketdata.L2Delta.Seq int64
+marketdata.L2Delta.Side types.Side
+marketdata.L2Feed struct
+marketdata.NewFeed(incarnation string, retain int) *Feed
+marketdata.NewL2Feed() *L2Feed
+marketdata.NewRecorder(eng *matching.Engine) *Recorder
+marketdata.NewStream(orders ...*types.Order) *Stream
+marketdata.Recorder struct
+marketdata.Replay(eng *matching.Engine, s *Stream) []*types.Trade
+marketdata.Snapshot struct
+marketdata.Snapshot.Asks []L2Delta
+marketdata.Snapshot.Bids []L2Delta
+marketdata.Snapshot.Incarnation string
+marketdata.Snapshot.LastTradePrice int64
+marketdata.Snapshot.Seq uint64
+marketdata.StateCancelOnly const
+marketdata.StateHalted const
+marketdata.StateOpen const
+marketdata.Stream struct
+marketdata.Update struct
+marketdata.Update.Aggressor types.Side
+marketdata.Update.BustReason string
+marketdata.Update.Imbalance int64
+marketdata.Update.IndicativePrice int64
+marketdata.Update.IndicativeVolume int64
+marketdata.Update.Kind UpdateKind
+marketdata.Update.Price int64
+marketdata.Update.Qty int64
+marketdata.Update.Seq uint64
+marketdata.Update.Side types.Side
+marketdata.Update.State VenueState
+marketdata.Update.TradeID int64
+marketdata.Update.TradePrice int64
+marketdata.Update.TradeQty int64
+marketdata.UpdateBookDelta const
+marketdata.UpdateBust const
+marketdata.UpdateIndicative const
+marketdata.UpdateKind type
+marketdata.UpdateStatus const
+marketdata.UpdateTrade const
+marketdata.ValueDigest(trades []*types.Trade) string
+marketdata.VenueState type
+matching.(*Engine).BestAsk() (price, qty int64, ok bool)
+matching.(*Engine).BestBid() (price, qty int64, ok bool)
+matching.(*Engine).Book() *orderbook.OrderBook
+matching.(*Engine).Bust(tradeID int64, reason string) error
+matching.(*Engine).BustCount() int
+matching.(*Engine).Cancel(orderID int64, userID string) (*types.Order, error)
+matching.(*Engine).CancelAllForUser(userID string) []*types.Order
+matching.(*Engine).ExpireDue()
+matching.(*Engine).ForceTrade(taker, maker *types.Order, price, qty int64) (*types.Trade, error)
+matching.(*Engine).Halt()
+matching.(*Engine).IndicativeAuction() Indicative
+matching.(*Engine).IsBusted(tradeID int64) bool
+matching.(*Engine).IsHalted() bool
+matching.(*Engine).LastTradePrice() int64
+matching.(*Engine).LoadSnapshot(snap *EngineSnapshot) error
+matching.(*Engine).MarkPrice() int64
+matching.(*Engine).Match(order *types.Order, dst []types.Trade) ([]types.Trade, types.OrderStatus, error)
+matching.(*Engine).MidPrice() (int64, bool)
+matching.(*Engine).OpenOrdersFor(userID string) []*types.Order
+matching.(*Engine).OrderCount() int
+matching.(*Engine).PendingExpiries() int
+matching.(*Engine).PendingStopCount() int
+matching.(*Engine).Process(order *types.Order) *MatchResult
+matching.(*Engine).ProcessIceberg(ib *types.IcebergOrder) *MatchResult
+matching.(*Engine).ProcessOCO(oco *types.OCOOrder) *MatchResult
+matching.(*Engine).ProcessPegged(p *types.PeggedOrder) *MatchResult
+matching.(*Engine).ProcessStop(stop *types.StopOrder) *MatchResult
+matching.(*Engine).ProcessTrailingStop(ts *types.TrailingStop) *MatchResult
+matching.(*Engine).Reduce(orderID int64, newQty int64, userID string) (*types.Order, error)
+matching.(*Engine).Replace(orderID int64, userID string, replacement *types.Order) (*MatchResult, error)
+matching.(*Engine).RestingOrders() []*types.Order
+matching.(*Engine).Resume()
+matching.(*Engine).SetCancelOnly()
+matching.(*Engine).SetEventSink(s EventSink)
+matching.(*Engine).SetMarkPrice(price int64) error
+matching.(*Engine).SetPhase(phase EngineState) []types.Trade
+matching.(*Engine).SetReplaying(v bool)
+matching.(*Engine).Snapshot(depth int) *orderbook.Snapshot
+matching.(*Engine).Spread() (int64, bool)
+matching.(*Engine).State() EngineState
+matching.(*Engine).StopBook() *orderbook.StopBook
+matching.(*Engine).TakeSnapshot() *EngineSnapshot
+matching.(*Engine).TrailingStopCount() int
+matching.(*Engine).Uncross(dst []types.Trade) []types.Trade
+matching.(*EngineSnapshot).Digest() string
+matching.(*Manifest).Assert(symbol string, index int) error
+matching.(*Manifest).IndexFor(symbol string) (int, error)
+matching.(*Manifest).Len() int
+matching.(*Manifest).Symbols() []ManifestEntry
+matching.(*Runner).BestAsk() (price, qty int64, ok bool)
+matching.(*Runner).BestBid() (price, qty int64, ok bool)
+matching.(*Runner).Bust(tradeID int64, reason string) error
+matching.(*Runner).Cancel(orderID int64, userID string) (*types.Order, error)
+matching.(*Runner).CancelAllForUser(userID string) ([]*types.Order, error)
+matching.(*Runner).Checkpoint() (*EngineSnapshot, error)
+matching.(*Runner).Close()
+matching.(*Runner).ExpireDue()
+matching.(*Runner).Halt()
+matching.(*Runner).IndicativeAuction() Indicative
+matching.(*Runner).LastTradePrice() int64
+matching.(*Runner).MidPrice() (int64, bool)
+matching.(*Runner).OpenOrdersFor(userID string) ([]*types.Order, error)
+matching.(*Runner).OrderCount() int
+matching.(*Runner).PendingStopCount() int
+matching.(*Runner).Phase() EngineState
+matching.(*Runner).Process(order *types.Order) *MatchResult
+matching.(*Runner).ProcessIceberg(ib *types.IcebergOrder) *MatchResult
+matching.(*Runner).ProcessOCO(o *types.OCOOrder) *MatchResult
+matching.(*Runner).ProcessPegged(p *types.PeggedOrder) *MatchResult
+matching.(*Runner).ProcessStop(s *types.StopOrder) *MatchResult
+matching.(*Runner).ProcessTrailingStop(ts *types.TrailingStop) *MatchResult
+matching.(*Runner).QueueCap() int
+matching.(*Runner).QueueLen() int
+matching.(*Runner).Reduce(orderID, newQty int64, userID string) (*types.Order, error)
+matching.(*Runner).Resume()
+matching.(*Runner).SetCancelOnly()
+matching.(*Runner).SetMarkPrice(price int64)
+matching.(*Runner).SetPhase(phase EngineState) []*types.Trade
+matching.(*Runner).SetReplaying(v bool)
+matching.(*Runner).ShardIndex() int
+matching.(*Runner).Snapshot(depth int) *orderbook.Snapshot
+matching.(*Runner).Spread() (int64, bool)
+matching.(*Runner).SubmitAsync(order *types.Order) <-chan *MatchResult
+matching.(*Runner).TrailingStopCount() int
+matching.(*Runner).TryCancelAllAsync(userID string) (<-chan int, error)
+matching.(*Runner).TryEnqueue(order *types.Order) error
+matching.(*Runner).TryEnqueueCancel(orderID int64, userID string) error
+matching.(*Runner).TryEnqueueCancelBy(userID string, resolve func() (int64, bool)) error
+matching.(*Runner).TryEnqueueIceberg(ib *types.IcebergOrder) error
+matching.(*Runner).TryEnqueueOCO(o *types.OCOOrder) error
+matching.(*Runner).TryEnqueuePegged(p *types.PeggedOrder) error
+matching.(*Runner).TryEnqueueStop(s *types.StopOrder) error
+matching.(*Runner).TryEnqueueTrailing(ts *types.TrailingStop) error
+matching.(*Runner).TryReduceAsync(orderID, newQty int64, userID string) (<-chan error, error)
+matching.(*Runner).TryReduceAsyncBy(newQty int64, userID string, resolve func() (int64, bool)) (<-chan error, error)
+matching.(*Runner).TryReplaceAsync(orderID int64, userID string, replacement *types.Order) (<-chan error, error)
+matching.(*Runner).TryReplaceAsyncBy(userID string, replacement *types.Order, resolve func() (int64, bool)) (<-chan error, error)
+matching.(*Runner).TrySubmit(order *types.Order) (*MatchResult, error)
+matching.(*Runner).TrySubmitAsync(order *types.Order) (<-chan *MatchResult, error)
+matching.(*Shards).Cancel(symbol string, orderID int64, userID string) (*types.Order, error)
+matching.(*Shards).Close()
+matching.(*Shards).Err() error
+matching.(*Shards).Len() int
+matching.(*Shards).Process(order *types.Order) *MatchResult
+matching.(*Shards).Runner(symbol string) *Runner
+matching.(*Shards).RunnerFor(orderID int64) *Runner
+matching.(*Shards).Symbols() []string
+matching.(*Shards).TrySubmit(order *types.Order) (*MatchResult, error)
+matching.(EngineState).String() string
+matching.(EventKind).String() string
+matching.(MultiSink).OnEvents(events []Event)
+matching.BustRecord struct
+matching.BustRecord.At time.Time
+matching.BustRecord.Reason string
+matching.BustRecord.TradeID int64
+matching.ClassIceberg const
+matching.ClassOCO const
+matching.ClassPegged const
+matching.ClassStop const
+matching.ClassTrailing const
+matching.CommandLog interface
+matching.CommandLog.AppendBust(tradeID int64, reason string) (int64, error) (interface method)
+matching.CommandLog.AppendCancel(orderID int64, userID string) (int64, error) (interface method)
+matching.CommandLog.AppendCancelAll(userID string) (int64, error) (interface method)
+matching.CommandLog.AppendCancelOnly() (int64, error) (interface method)
+matching.CommandLog.AppendHalt() (int64, error) (interface method)
+matching.CommandLog.AppendIceberg(ib *types.IcebergOrder) (int64, error) (interface method)
+matching.CommandLog.AppendOCO(o *types.OCOOrder) (int64, error) (interface method)
+matching.CommandLog.AppendPegged(p *types.PeggedOrder) (int64, error) (interface method)
+matching.CommandLog.AppendReduce(orderID, newQty int64, userID string) (int64, error) (interface method)
+matching.CommandLog.AppendReplace(orderID int64, userID string, replacement *types.Order) (int64, error) (interface method)
+matching.CommandLog.AppendResume() (int64, error) (interface method)
+matching.CommandLog.AppendSetMark(price int64) (int64, error) (interface method)
+matching.CommandLog.AppendStop(s *types.StopOrder) (int64, error) (interface method)
+matching.CommandLog.AppendSubmit(o *types.Order) (int64, error) (interface method)
+matching.CommandLog.AppendTrailing(ts *types.TrailingStop) (int64, error) (interface method)
+matching.ComposeID(shardIndex int, seq int64) int64
+matching.Config struct
+matching.Config.BandBreachPause time.Duration
+matching.Config.Clock func() time.Time
+matching.Config.DedupClientOrderIDs int
+matching.Config.DisabledClasses []OrderClass
+matching.Config.EventSink EventSink
+matching.Config.Guardrail Guardrail
+matching.Config.IcebergPeakJitter decimal.Decimal
+matching.Config.MarkDepthBand decimal.Decimal
+matching.Config.MaxForceTradeQty int64
+matching.Config.MaxMarkStep decimal.Decimal
+matching.Config.MaxOrderNotional int64
+matching.Config.MaxOrderQty int64
+matching.Config.MaxOrders int
+matching.Config.MaxOrdersPerAccount int
+matching.Config.MinMarkDepth int64
+matching.Config.MinOrderNotional int64
+matching.Config.MinOrderQty int64
+matching.Config.MinRestingTime time.Duration
+matching.Config.PriceBand decimal.Decimal
+matching.Config.ProRata bool
+matching.Config.SelfTradePrevention SelfTradePrevention
+matching.Config.SessionClose func() time.Time
+matching.Config.ShardIndex int
+matching.Config.Symbol string
+matching.DefaultConfig(symbol string) Config
+matching.Engine struct
+matching.EngineSnapshot struct
+matching.EngineSnapshot.Busted []BustRecord
+matching.EngineSnapshot.DedupKeys []string
+matching.EngineSnapshot.EventSeq int64
+matching.EngineSnapshot.Guard GuardWindow
+matching.EngineSnapshot.Icebergs []IcebergEntry
+matching.EngineSnapshot.LastTradePrice int64
+matching.EngineSnapshot.MarkPrice int64
+matching.EngineSnapshot.OCOs []OCOEntry
+matching.EngineSnapshot.Orders []*types.Order
+matching.EngineSnapshot.PausedUntil time.Time
+matching.EngineSnapshot.Seq int64
+matching.EngineSnapshot.State EngineState
+matching.EngineSnapshot.Stops []*types.StopOrder
+matching.EngineSnapshot.Symbol string
+matching.EngineSnapshot.TradeSeq int64
+matching.EngineSnapshot.Trailing []TrailingEntry
+matching.EngineSnapshot.WALSeq int64
+matching.EngineState type
+matching.ErrAlreadyBusted var
+matching.ErrManifestCorrupt var
+matching.ErrManifestFull var
+matching.ErrNoManifest var
+matching.ErrNoResolver var
+matching.ErrQueueFull var
+matching.ErrResolverPanicked var
+matching.ErrShuttingDown var
+matching.ErrSymbolMoved var
+matching.ErrUnknownTrade var
+matching.Event struct
+matching.Event.BustReason string
+matching.Event.Kind EventKind
+matching.Event.Order *types.Order
+matching.Event.OrderID int64
+matching.Event.Reason error
+matching.Event.Seq int64
+matching.Event.Trade *types.Trade
+matching.Event.TradeID int64
+matching.Event.UserID string
+matching.EventAccepted const
+matching.EventBookDelta const
+matching.EventBusted const
+matching.EventCancelOnly const
+matching.EventCanceled const
+matching.EventHalted const
+matching.EventKind type
+matching.EventRejected const
+matching.EventReplaced const
+matching.EventResumed const
+matching.EventSink interface
+matching.EventSink.OnEvents(events []Event) (interface method)
+matching.EventTrade const
+matching.EventTriggered const
+matching.GuardWindow struct
+matching.GuardWindow.Notional int64
+matching.GuardWindow.Start time.Time
+matching.GuardWindow.Trades int
+matching.Guardrail struct
+matching.Guardrail.MaxNotional int64
+matching.Guardrail.MaxTrades int
+matching.Guardrail.Window time.Duration
+matching.IcebergEntry struct
+matching.IcebergEntry.DisplayQty int64
+matching.IcebergEntry.Hidden int64
+matching.IcebergEntry.JitterBps int64
+matching.IcebergEntry.OrderID int64
+matching.IcebergEntry.Refills int64
+matching.Indicative struct
+matching.Indicative.HasClearing bool
+matching.Indicative.Imbalance int64
+matching.Indicative.Price int64
+matching.Indicative.Volume int64
+matching.LoadManifest(path string) (*Manifest, error)
+matching.Manifest struct
+matching.ManifestEntry struct
+matching.ManifestEntry.ShardIndex int
+matching.ManifestEntry.Symbol string
+matching.MatchResult struct
+matching.MatchResult.Order *types.Order
+matching.MatchResult.RejectionReason error
+matching.MatchResult.Status types.OrderStatus
+matching.MatchResult.Trades []*types.Trade
+matching.MaxShardIndex const
+matching.MaxShardSeq const
+matching.MultiSink type
+matching.NewEngine(config Config) *Engine
+matching.NewManifest(path string) *Manifest
+matching.NewRunner(cfg RunnerConfig) *Runner
+matching.NewRunnerFor(eng *Engine, cfg RunnerConfig) *Runner
+matching.NewShards(cfg ShardsConfig) *Shards
+matching.OCOEntry struct
+matching.OCOEntry.PrimaryID int64
+matching.OCOEntry.StopID int64
+matching.OrderClass type
+matching.RestoreEngine(config Config, snap *EngineSnapshot) (*Engine, error)
+matching.Runner struct
+matching.RunnerConfig struct
+matching.RunnerConfig.Engine Config
+matching.RunnerConfig.Log CommandLog
+matching.RunnerConfig.QueueSize int
+matching.RunnerConfig.Replaying bool
+matching.STPAllow const
+matching.STPCancelBoth const
+matching.STPCancelNewest const
+matching.STPCancelOldest const
+matching.STPDecrement const
+matching.SelfTradePrevention type
+matching.SeqBits const
+matching.ShardIndexBits const
+matching.Shards struct
+matching.ShardsConfig struct
+matching.ShardsConfig.Manifest *Manifest
+matching.ShardsConfig.NewConfig func(symbol string) Config
+matching.ShardsConfig.NewLog func(symbol string) (CommandLog, error)
+matching.ShardsConfig.QueueSize int
+matching.SplitID(id int64) (shardIndex int, seq int64)
+matching.StateCancelOnly const
+matching.StateClosed const
+matching.StateClosingAuction const
+matching.StateHalted const
+matching.StateOpen const
+matching.StatePreOpen const
+matching.TrailingEntry struct
+matching.TrailingEntry.Order *types.Order
+matching.TrailingEntry.State types.TrailingState
+matching.TrailingEntry.Trail int64
+observability.(*Collector).Gauge(name, help string, fn func() float64)
+observability.(*Collector).GaugeFamily(name, help string, fn func() []Series)
+observability.(*Collector).Histogram(name string) *Histogram
+observability.(*Collector).OnEvents(evs []matching.Event)
+observability.(*Collector).Snapshot() Snapshot
+observability.(*Collector).WritePrometheus(w io.Writer) error
+observability.(*Histogram).Count() int64
+observability.(*Histogram).Observe(d time.Duration)
+observability.(*Histogram).Quantile(q float64) int64
+observability.(*Histogram).Sum() int64
+observability.Collector struct
+observability.Histogram struct
+observability.Label struct
+observability.Label.Name string
+observability.Label.Value string
+observability.NewCollector() *Collector
+observability.NewHistogram() *Histogram
+observability.Series struct
+observability.Series.Labels []Label
+observability.Series.Value float64
+observability.Snapshot struct
+observability.Snapshot.CancelOnly int64
+observability.Snapshot.EventsSeen int64
+observability.Snapshot.Halts int64
+observability.Snapshot.LastEventSeq int64
+observability.Snapshot.OrdersAccepted int64
+observability.Snapshot.OrdersCanceled int64
+observability.Snapshot.OrdersExpired int64
+observability.Snapshot.OrdersRejected int64
+observability.Snapshot.OrdersReplaced int64
+observability.Snapshot.Rejections map[string]int64
+observability.Snapshot.Resumes int64
+observability.Snapshot.StopsTriggered int64
+observability.Snapshot.TradedLots int64
+observability.Snapshot.TradedNotional int64
+observability.Snapshot.Trades int64
+orderbook.(*OrderBook).Add(order *types.Order) error
+orderbook.(*OrderBook).BestAsk() (price, qty int64, ok bool)
+orderbook.(*OrderBook).BestBid() (price, qty int64, ok bool)
+orderbook.(*OrderBook).Count() int
+orderbook.(*OrderBook).DepthWithin(lo, hi int64) int64
+orderbook.(*OrderBook).FrontOrder(side types.Side) (*types.Order, bool)
+orderbook.(*OrderBook).Get(orderID int64) (*types.Order, bool)
+orderbook.(*OrderBook).GetAskLevels(depth int) []*PriceLevel
+orderbook.(*OrderBook).GetBidLevels(depth int) []*PriceLevel
+orderbook.(*OrderBook).GetOrdersAtPrice(side types.Side, price int64) []*types.Order
+orderbook.(*OrderBook).LastTradePrice() int64
+orderbook.(*OrderBook).MidPrice() (int64, bool)
+orderbook.(*OrderBook).Orders() []*types.Order
+orderbook.(*OrderBook).OrdersByUser(userID string) int
+orderbook.(*OrderBook).PeekBestAskOrder() *types.Order
+orderbook.(*OrderBook).PeekBestBidOrder() *types.Order
+orderbook.(*OrderBook).Remove(orderID int64) (*types.Order, error)
+orderbook.(*OrderBook).RestoreOrderQuantity(orderID int64, qty int64)
+orderbook.(*OrderBook).SetLastTradePrice(price int64)
+orderbook.(*OrderBook).Snapshot(depth int) *Snapshot
+orderbook.(*OrderBook).SnapshotL3(depth int) *SnapshotL3
+orderbook.(*OrderBook).Spread() (int64, bool)
+orderbook.(*OrderBook).Symbol() string
+orderbook.(*OrderBook).UpdateOrderQuantity(orderID int64, filledQty int64)
+orderbook.(*StopBook).Add(s *types.StopOrder)
+orderbook.(*StopBook).All() []*types.StopOrder
+orderbook.(*StopBook).CheckTriggers(marketPrice int64) []*types.StopOrder
+orderbook.(*StopBook).Count() int
+orderbook.(*StopBook).Get(id int64) (*types.StopOrder, bool)
+orderbook.(*StopBook).Remove(id int64) bool
+orderbook.Config struct
+orderbook.Config.Clock func() time.Time
+orderbook.Config.MaxOrders int
+orderbook.Config.Symbol string
+orderbook.L3Order struct
+orderbook.L3Order.OrderID int64
+orderbook.L3Order.Price int64
+orderbook.L3Order.Quantity int64
+orderbook.L3Order.SequenceNum int64
+orderbook.L3Order.UserID string
+orderbook.New(config Config) *OrderBook
+orderbook.NewStopBook(symbol string) *StopBook
+orderbook.OrderBook struct
+orderbook.PriceLevel struct
+orderbook.PriceLevel.Price int64
+orderbook.PriceLevel.TotalQty int64
+orderbook.Snapshot struct
+orderbook.Snapshot.Asks []SnapshotLevel
+orderbook.Snapshot.Bids []SnapshotLevel
+orderbook.Snapshot.LastTradePrice int64
+orderbook.Snapshot.SequenceNum uint64
+orderbook.Snapshot.Symbol string
+orderbook.Snapshot.Timestamp time.Time
+orderbook.SnapshotL3 struct
+orderbook.SnapshotL3.Asks []L3Order
+orderbook.SnapshotL3.Bids []L3Order
+orderbook.SnapshotL3.SequenceNum uint64
+orderbook.SnapshotL3.Symbol string
+orderbook.SnapshotL3.Timestamp time.Time
+orderbook.SnapshotLevel struct
+orderbook.SnapshotLevel.Price int64
+orderbook.SnapshotLevel.Quantity int64
+orderbook.StopBook struct
+orderentry.(*HashedAccounts).Authenticate(account, secret string) bool
+orderentry.(*HashedAccounts).Count() int
+orderentry.(*NameIndex).OnEvents(evs []matching.Event)
+orderentry.(*Publisher).Close()
+orderentry.(*Publisher).Dropped() uint64
+orderentry.(*Publisher).OnEvents(evs []matching.Event)
+orderentry.(*Publisher).Pump()
+orderentry.(*Publisher).Wait()
+orderentry.(*Registry).Adopt(orders []*types.Order)
+orderentry.(*Registry).Incarnation() string
+orderentry.(*Registry).IsLiveClOrdID(account, clOrdID string) bool
+orderentry.(*Registry).Name(o *types.Order)
+orderentry.(*Registry).OrderIDFor(account, clOrdID string) (int64, bool)
+orderentry.(*Registry).Publish(evs []matching.Event)
+orderentry.(*Registry).Resume(incarnation, account string, afterSeq uint64) ([]Msg, error)
+orderentry.(*Registry).SetFillMemory(n int)
+orderentry.(*Registry).Stream(account string) *Stream
+orderentry.(*Registry).UnroutableBusts() int
+orderentry.(*StaticAccounts).Authenticate(account, secret string) bool
+orderentry.(*StaticAccounts).Count() int
+orderentry.(*Stream).Account() string
+orderentry.(*Stream).Seq() uint64
+orderentry.(*Stream).Since(seq uint64) ([]Msg, error)
+orderentry.Authenticator interface
+orderentry.Authenticator.Authenticate(account, secret string) bool (interface method)
+orderentry.ErrNoSuchStream var
+orderentry.ErrSequenceEvicted var
+orderentry.HashSecret(secret string) [sha256.Size]byte
+orderentry.HashedAccounts struct
+orderentry.KindAccepted const
+orderentry.KindBusted const
+orderentry.KindCanceled const
+orderentry.KindExecuted const
+orderentry.KindRejected const
+orderentry.KindReplaced const
+orderentry.Msg struct
+orderentry.Msg.Aggressor types.Side
+orderentry.Msg.ClOrdID string
+orderentry.Msg.Kind MsgKind
+orderentry.Msg.LeavesQty int64
+orderentry.Msg.Price int64
+orderentry.Msg.Quantity int64
+orderentry.Msg.Reason uint16
+orderentry.Msg.Seq uint64
+orderentry.Msg.Side types.Side
+orderentry.Msg.TradeID int64
+orderentry.MsgKind type
+orderentry.NameIndex struct
+orderentry.NewHashedAccounts(accounts map[string][sha256.Size]byte) *HashedAccounts
+orderentry.NewNameIndex(reg *Registry) *NameIndex
+orderentry.NewPublisher(reg *Registry, maxDepth int) *Publisher
+orderentry.NewRegistry(incarnation string, ringSize int) *Registry
+orderentry.NewStaticAccounts(accounts map[string]string) *StaticAccounts
+orderentry.Publisher struct
+orderentry.ReasonDuplicateClOrd const
+orderentry.ReasonFOKCannotFill const
+orderentry.ReasonFor(err error) uint16
+orderentry.ReasonHalted const
+orderentry.ReasonInvalidQuantity const
+orderentry.ReasonMalformed const
+orderentry.ReasonNone const
+orderentry.ReasonNotAuthorised const
+orderentry.ReasonOther const
+orderentry.ReasonOverloaded const
+orderentry.ReasonPostOnlyCross const
+orderentry.ReasonPriceBand const
+orderentry.ReasonSelfTrade const
+orderentry.ReasonShuttingDown const
+orderentry.ReasonThrottled const
+orderentry.ReasonTooLarge const
+orderentry.ReasonTooSmall const
+orderentry.ReasonTooSoon const
+orderentry.ReasonUnknownOrder const
+orderentry.Registry struct
+orderentry.StaticAccounts struct
+orderentry.Stream struct
+signals.(*CVD).Add(delta int64)
+signals.(*CVD).Observe(trades []*types.Trade) int64
+signals.(*CVD).Reset()
+signals.(*CVD).Value() int64
+signals.(*OFI).Cumulative() float64
+signals.(*OFI).CumulativeExact() int64
+signals.(*OFI).Observe(cur *orderbook.Snapshot) float64
+signals.(*OFI).Reset()
+signals.(AbsorptionConfig).Absorbed(delta int64, priceMove int64, trades int) bool
+signals.(DivergenceKind).String() string
+signals.(Interval).Overlaps(o Interval) bool
+signals.AbsorptionConfig struct
+signals.AbsorptionConfig.MaxMove int64
+signals.AbsorptionConfig.MinDelta int64
+signals.AbsorptionConfig.MinTrades int
+signals.BearishDivergence const
+signals.BestImbalance(snap *orderbook.Snapshot) float64
+signals.BullishDivergence const
+signals.CVD struct
+signals.DepthImbalance(snap *orderbook.Snapshot, levels int) float64
+signals.Divergence(prev, cur Extremes) DivergenceKind
+signals.DivergenceKind type
+signals.EstimateLambda(flow, dPrice []float64) LambdaFit
+signals.Extremes struct
+signals.Extremes.CVDHigh float64
+signals.Extremes.CVDLow float64
+signals.Extremes.PriceHigh float64
+signals.Extremes.PriceLow float64
+signals.Interval struct
+signals.Interval.Hi float64
+signals.Interval.Lo float64
+signals.Interval.N int
+signals.Interval.Rate float64
+signals.LambdaFit struct
+signals.LambdaFit.Intercept float64
+signals.LambdaFit.Lambda float64
+signals.LambdaFit.N int
+signals.LambdaFit.R2 float64
+signals.LeeReadySide(price int64, mid float64, prevPrice int64, prevSide types.Side) types.Side
+signals.LinReg(x, y []float64) (slope, intercept, r2 float64)
+signals.NewCVD() *CVD
+signals.NewOFI() *OFI
+signals.NoDivergence const
+signals.OFI struct
+signals.OFIStep(prev, cur *orderbook.Snapshot) int64
+signals.SignedFlow(trades []*types.Trade) int64
+signals.TickRuleSide(price, prevPrice int64, prevSide types.Side) types.Side
+signals.WilsonInterval(successes, n int, z float64) Interval
+signals.Z95 const
+sim.(*NoiseTrader).Act(v View, rng *rand.Rand) []*types.Order
+sim.Agent interface
+sim.Agent.Act(v View, rng *rand.Rand) []*types.Order (interface method)
+sim.Config struct
+sim.Config.Agents []Agent
+sim.Config.Depth int
+sim.Config.InitialPrice int64
+sim.Config.Seed int64
+sim.Config.Steps int
+sim.Config.Symbol string
+sim.DefaultNoiseTrader(userID string) *NoiseTrader
+sim.NoiseTrader struct
+sim.NoiseTrader.ActProb float64
+sim.NoiseTrader.MarketFraction float64
+sim.NoiseTrader.MaxOffsetTicks int
+sim.NoiseTrader.MaxSize int
+sim.NoiseTrader.MinSize int
+sim.NoiseTrader.Population int
+sim.NoiseTrader.Tick int64
+sim.NoiseTrader.UserID string
+sim.Result struct
+sim.Result.Engine *matching.Engine
+sim.Result.Final *orderbook.Snapshot
+sim.Result.Prices []int64
+sim.Result.Trades []*types.Trade
+sim.Run(cfg Config) *Result
+sim.View struct
+sim.View.HasBook bool
+sim.View.Ref int64
+sim.View.Snapshot *orderbook.Snapshot
+sim.View.Step int
+sim.View.Symbol string
+strategy.(*AvellanedaStoikov).Params() ASParams
+strategy.(*AvellanedaStoikov).Quote(mid, inventory, timeRemaining float64) Quote
+strategy.(ASParams).Validate() error
+strategy.ASParams struct
+strategy.ASParams.Gamma float64
+strategy.ASParams.Kappa float64
+strategy.ASParams.Sigma float64
+strategy.AvellanedaStoikov struct
+strategy.NewAvellanedaStoikov(p ASParams) (*AvellanedaStoikov, error)
+strategy.Quote struct
+strategy.Quote.Ask float64
+strategy.Quote.Bid float64
+strategy.Quote.Reservation float64
+strategy.Quote.Spread float64
+study.CalibrationConfig struct
+study.CalibrationConfig.Lambda float64
+study.CalibrationConfig.N int
+study.CalibrationConfig.NoiseSD float64
+study.CalibrationConfig.Seed int64
+study.DepthPoint struct
+study.DepthPoint.AvgDepth float64
+study.DepthPoint.Fit signals.LambdaFit
+study.DepthPoint.LambdaXDepth float64
+study.DepthPoint.SizeScale int
+study.DivergenceResult struct
+study.DivergenceResult.CVDAdds bool
+study.DivergenceResult.Divergence SignalResult
+study.DivergenceResult.PriceOnly SignalResult
+study.ExecutionArm struct
+study.ExecutionArm.ArrivalMid float64
+study.ExecutionArm.Filled int64
+study.ExecutionArm.Name string
+study.ExecutionArm.PermanentImpact float64
+study.ExecutionArm.RealizedImpact float64
+study.ExecutionArm.Shortfall float64
+study.ExecutionArm.SlipPerLot float64
+study.ExecutionArm.Unfilled int64
+study.ExecutionArm.VWAP float64
+study.ExecutionConfig struct
+study.ExecutionConfig.InitialPrice int64
+study.ExecutionConfig.Noise *sim.NoiseTrader
+study.ExecutionConfig.Quantity int64
+study.ExecutionConfig.RecoverySteps int
+study.ExecutionConfig.Seed int64
+study.ExecutionConfig.Side types.Side
+study.ExecutionConfig.SliceGap int
+study.ExecutionConfig.Slices int
+study.ExecutionConfig.Symbol string
+study.ExecutionConfig.Warmup int
+study.ExecutionResult struct
+study.ExecutionResult.Block ExecutionArm
+study.ExecutionResult.Sliced ExecutionArm
+study.FlowConfig struct
+study.FlowConfig.Horizon int
+study.FlowConfig.InitialPrice int64
+study.FlowConfig.Noise *sim.NoiseTrader
+study.FlowConfig.Seed int64
+study.FlowConfig.Steps int
+study.FlowConfig.Symbol string
+study.FlowConfig.Warmup int
+study.FlowConfig.Window int
+study.InferenceResult struct
+study.InferenceResult.LeeReadyAccuracy signals.Interval
+study.InferenceResult.LeeReadyCVD int64
+study.InferenceResult.LeeReadyCVDError float64
+study.InferenceResult.LeeReadyPathR2 float64
+study.InferenceResult.TickAccuracy signals.Interval
+study.InferenceResult.TickCVD int64
+study.InferenceResult.TickCVDError float64
+study.InferenceResult.TickPathR2 float64
+study.InferenceResult.Trades int
+study.InferenceResult.TrueCVD int64
+study.KyleConfig struct
+study.KyleConfig.DepthLevels int
+study.KyleConfig.InitialPrice int64
+study.KyleConfig.Noise *sim.NoiseTrader
+study.KyleConfig.Seed int64
+study.KyleConfig.Steps int
+study.KyleConfig.Symbol string
+study.KyleConfig.Warmup int
+study.KyleResult struct
+study.KyleResult.AvgDepth float64
+study.KyleResult.Fit signals.LambdaFit
+study.KyleResult.Trades int
+study.OFIConfig struct
+study.OFIConfig.InitialPrice int64
+study.OFIConfig.Noise *sim.NoiseTrader
+study.OFIConfig.Seed int64
+study.OFIConfig.Steps int
+study.OFIConfig.Symbol string
+study.OFIResult struct
+study.OFIResult.ContemporaneousR2 float64
+study.OFIResult.ContemporaneousSlope float64
+study.OFIResult.N int
+study.OFIResult.PredictiveR2 float64
+study.OFIResult.PredictiveSlope float64
+study.PoolSignals(results []SignalResult) SignalResult
+study.RunAbsorption(cfg FlowConfig) SignalResult
+study.RunDivergence(cfg FlowConfig) DivergenceResult
+study.RunExecution(cfg ExecutionConfig) ExecutionResult
+study.RunInference(cfg FlowConfig) InferenceResult
+study.RunKyleDepth(cfg KyleConfig, scales []int) []DepthPoint
+study.RunKyleLambda(cfg KyleConfig) KyleResult
+study.RunLambdaCalibration(cfg CalibrationConfig) signals.LambdaFit
+study.RunOFI(cfg OFIConfig) OFIResult
+study.RunSqueezeDemo(cfg SqueezeConfig) SqueezeDemo
+study.SignalResult struct
+study.SignalResult.BaseHits int
+study.SignalResult.BaseN int
+study.SignalResult.BaseRate signals.Interval
+study.SignalResult.Edge float64
+study.SignalResult.Episodes int
+study.SignalResult.Indistinct bool
+study.SignalResult.SignalHits int
+study.SignalResult.SignalN int
+study.SignalResult.SignalRate signals.Interval
+study.SqueezeConfig struct
+study.SqueezeConfig.InitialPrice int64
+study.SqueezeConfig.Noise *sim.NoiseTrader
+study.SqueezeConfig.Reversal int64
+study.SqueezeConfig.Seed int64
+study.SqueezeConfig.SellPressure int64
+study.SqueezeConfig.Symbol string
+study.SqueezeConfig.WallQty int64
+study.SqueezeConfig.Warmup int
+study.SqueezeDemo struct
+study.SqueezeDemo.AbsorbedLots int64
+study.SqueezeDemo.MoveWithWall float64
+study.SqueezeDemo.MoveWithoutWall float64
+study.SqueezeDemo.SqueezeMove float64
+surveillance.(*CloseMarkingDetector).Observe(e Event) []Alert
+surveillance.(*CrossBookMonitor).MonitorFor(symbol string) *Monitor
+surveillance.(*CrossBookMonitor).Observe(symbol string, e Event) []Alert
+surveillance.(*Monitor).Alerts() []Alert
+surveillance.(*Monitor).Observe(e Event) []Alert
+surveillance.(*OTRDetector).Observe(e Event) []Alert
+surveillance.(*PingingDetector).Observe(e Event) []Alert
+surveillance.(*RampingDetector).Observe(e Event) []Alert
+surveillance.(*RateLimiter).Observe(e Event) []Alert
+surveillance.(*SpoofDetector).Observe(e Event) []Alert
+surveillance.Alert struct
+surveillance.Alert.Detail string
+surveillance.Alert.Kind string
+surveillance.Alert.Seq uint64
+surveillance.Alert.UserID string
+surveillance.CloseMarkingConfig struct
+surveillance.CloseMarkingConfig.MaxShare float64
+surveillance.CloseMarkingConfig.MinVolume int64
+surveillance.CloseMarkingConfig.Window uint64
+surveillance.CloseMarkingDetector struct
+surveillance.CrossBookConfig struct
+surveillance.CrossBookConfig.MinSymbols int
+surveillance.CrossBookConfig.Window uint64
+surveillance.CrossBookMonitor struct
+surveillance.Detector interface
+surveillance.Detector.Observe(e Event) []Alert (interface method)
+surveillance.Event struct
+surveillance.Event.Kind EventKind
+surveillance.Event.MakerOrderID int64
+surveillance.Event.OrderID int64
+surveillance.Event.Price int64
+surveillance.Event.Quantity int64
+surveillance.Event.Seq uint64
+surveillance.Event.Side types.Side
+surveillance.Event.TakerOrderID int64
+surveillance.Event.UserID string
+surveillance.EventKind type
+surveillance.Monitor struct
+surveillance.NewCloseMarkingDetector(cfg CloseMarkingConfig) *CloseMarkingDetector
+surveillance.NewCrossBookMonitor(cfg CrossBookConfig, build func() []Detector) *CrossBookMonitor
+surveillance.NewMonitor(detectors ...Detector) *Monitor
+surveillance.NewOTRDetector(cfg OTRConfig) *OTRDetector
+surveillance.NewPingingDetector(cfg PingingConfig) *PingingDetector
+surveillance.NewRampingDetector(cfg RampingConfig) *RampingDetector
+surveillance.NewRateLimiter(cfg RateConfig) *RateLimiter
+surveillance.NewSpoofDetector(cfg SpoofConfig) *SpoofDetector
+surveillance.OTRConfig struct
+surveillance.OTRConfig.MaxRatio float64
+surveillance.OTRConfig.MinOrders int
+surveillance.OTRConfig.Window uint64
+surveillance.OTRDetector struct
+surveillance.OrderCancelled const
+surveillance.OrderPlaced const
+surveillance.PingingConfig struct
+surveillance.PingingConfig.MaxLifetime uint64
+surveillance.PingingConfig.MaxSize int64
+surveillance.PingingConfig.MinCount int
+surveillance.PingingConfig.Window uint64
+surveillance.PingingDetector struct
+surveillance.RampingConfig struct
+surveillance.RampingConfig.MinMoveTicks int64
+surveillance.RampingConfig.MinTrades int
+surveillance.RampingConfig.Window uint64
+surveillance.RampingDetector struct
+surveillance.RateConfig struct
+surveillance.RateConfig.MaxOrders int
+surveillance.RateConfig.Window uint64
+surveillance.RateLimiter struct
+surveillance.SpoofConfig struct
+surveillance.SpoofConfig.MaxLifetime uint64
+surveillance.SpoofConfig.MinSize int64
+surveillance.SpoofDetector struct
+surveillance.Trade const
+types.(*IcebergOrder).IsFullyFilled() bool
+types.(*IcebergOrder).Refill() bool
+types.(*IcebergOrder).Refills() int64
+types.(*IcebergOrder).RestoreRefills(n int64)
+types.(*IcebergOrder).TotalRemaining() int64
+types.(*Order).AsPostOnly() *Order
+types.(*Order).Cancel() error
+types.(*Order).Fill(qty int64) error
+types.(*Order).Fresh() *Order
+types.(*Order).IsActive() bool
+types.(*Order).IsFilled() bool
+types.(*Order).NotionalValue() int64
+types.(*Order).RemainingValue() int64
+types.(*StopOrder).IsTriggered() bool
+types.(*StopOrder).ShouldTrigger(marketPrice int64) bool
+types.(*StopOrder).Trigger()
+types.(*Trade).IsSelfTrade() bool
+types.(*Trade).NotionalValue() int64
+types.(*TrailingStop).IsTriggered() bool
+types.(*TrailingStop).Observe(marketPrice int64)
+types.(*TrailingStop).RestoreState(s TrailingState)
+types.(*TrailingStop).ShouldTrigger(marketPrice int64) bool
+types.(*TrailingStop).State() TrailingState
+types.(*TrailingStop).StopPrice() int64
+types.(*TrailingStop).Trigger()
+types.(Instrument).LotsToQty(l int64) decimal.Decimal
+types.(Instrument).NewOrder(userID string, side Side, orderType OrderType, price, quantity decimal.Decimal, tif TimeInForce) (*Order, error)
+types.(Instrument).PriceToTicks(p decimal.Decimal) int64
+types.(Instrument).QtyToLots(q decimal.Decimal) int64
+types.(Instrument).TicksToPrice(t int64) decimal.Decimal
+types.(TimeInForce).Expiring() bool
+types.ErrCancelTooSoon var
+types.ErrDuplicateClientOrderID var
+types.ErrFOKCannotFill var
+types.ErrFillExceedsRemaining var
+types.ErrForceTradeTooLarge var
+types.ErrInvalidDisplayQuantity var
+types.ErrInvalidExpiry var
+types.ErrInvalidOrderType var
+types.ErrInvalidPegReference var
+types.ErrInvalidPrice var
+types.ErrInvalidQuantity var
+types.ErrInvalidSide var
+types.ErrInvalidStopPrice var
+types.ErrInvalidTimeInForce var
+types.ErrMarkDepthTooThin var
+types.ErrMarkStepTooLarge var
+types.ErrMarketOrderNoLiquidity var
+types.ErrNewOrdersHalted var
+types.ErrNilOrder var
+types.ErrNoSessionClose var
+types.ErrNotionalOverflow var
+types.ErrOrderBelowMinNotional var
+types.ErrOrderBelowMinQty var
+types.ErrOrderBookFull var
+types.ErrOrderExceedsMaxNotional var
+types.ErrOrderExceedsMaxQty var
+types.ErrOrderExpired var
+types.ErrOrderNotActive var
+types.ErrOrderNotFound var
+types.ErrOrderTypeDisabled var
+types.ErrPegReferenceUnavailable var
+types.ErrPostOnlyWouldCross var
+types.ErrPriceOutsideBand var
+types.ErrSelfTradeNotAllowed var
+types.ErrTooManyOrders var
+types.ErrTradingHalted var
+types.IcebergOrder struct
+types.IcebergOrder.DisplayQty int64
+types.IcebergOrder.Hidden int64
+types.IcebergOrder.JitterBps int64
+types.IcebergOrder.Order *Order
+types.Instrument struct
+types.Instrument.LotSize decimal.Decimal
+types.Instrument.Symbol string
+types.Instrument.TickSize decimal.Decimal
+types.NewIcebergOrder(order *Order, displayQty int64) (*IcebergOrder, error)
+types.NewInstrument(symbol string, tickSize, lotSize decimal.Decimal) Instrument
+types.NewOCOOrder(primary *Order, stop *StopOrder) (*OCOOrder, error)
+types.NewOrder(userID, symbol string, side Side, orderType OrderType, price, quantity int64, tif TimeInForce) (*Order, error)
+types.NewPeggedOrder(order *Order, ref PegReference, offset int64) (*PeggedOrder, error)
+types.NewStopOrder(order *Order, stopPrice int64) (*StopOrder, error)
+types.NewTrade(symbol string, price, quantity int64, buyOrder, sellOrder *Order, takerSide Side) *Trade
+types.NewTradeValue(symbol string, price, quantity int64, buyOrder, sellOrder *Order, takerSide Side) Trade
+types.NewTrailingStop(order *Order, trail int64) (*TrailingStop, error)
+types.OCOOrder struct
+types.OCOOrder.Primary *Order
+types.OCOOrder.Stop *StopOrder
+types.Order struct
+types.Order.ClientOrderID string
+types.Order.CreatedAt time.Time
+types.Order.ExpiresAt time.Time
+types.Order.FilledQty int64
+types.Order.ID int64
+types.Order.PostOnly bool
+types.Order.Price int64
+types.Order.Privileged bool
+types.Order.Quantity int64
+types.Order.RemainingQty int64
+types.Order.STPMode string
+types.Order.Side Side
+types.Order.Status OrderStatus
+types.Order.Symbol string
+types.Order.TimeInForce TimeInForce
+types.Order.TradeGroupID int64
+types.Order.Type OrderType
+types.Order.UpdatedAt time.Time
+types.Order.UserID string
+types.OrderStatus type
+types.OrderStatusCancelled const
+types.OrderStatusFilled const
+types.OrderStatusNew const
+types.OrderStatusPartiallyFilled const
+types.OrderStatusPendingTrigger const
+types.OrderStatusRejected const
+types.OrderType type
+types.OrderTypeLimit const
+types.OrderTypeMarket const
+types.PegReference type
+types.PegToAsk const
+types.PegToBid const
+types.PegToMid const
+types.PeggedOrder struct
+types.PeggedOrder.Offset int64
+types.PeggedOrder.Order *Order
+types.PeggedOrder.Ref PegReference
+types.Side type
+types.SideBuy const
+types.SideSell const
+types.StopOrder struct
+types.StopOrder.Order *Order
+types.StopOrder.StopPrice int64
+types.TIFDay const
+types.TIFFillOrKill const
+types.TIFGoodTillCancel const
+types.TIFGoodTillDate const
+types.TIFImmediateOrCancel const
+types.TimeInForce type
+types.Trade struct
+types.Trade.Auction bool
+types.Trade.BuyOrderID int64
+types.Trade.BuyerUserID string
+types.Trade.CreatedAt time.Time
+types.Trade.ID int64
+types.Trade.MakerOrderID int64
+types.Trade.Price int64
+types.Trade.Quantity int64
+types.Trade.SellOrderID int64
+types.Trade.SellerUserID string
+types.Trade.SequenceNum int64
+types.Trade.Symbol string
+types.Trade.TakerOrderID int64
+types.Trade.TakerSide Side
+types.TrailingState struct
+types.TrailingState.Extreme int64
+types.TrailingState.Initialized bool
+types.TrailingState.StopPrice int64
+types.TrailingState.Triggered bool
+types.TrailingStop struct
+types.TrailingStop.Order *Order
+types.TrailingStop.Trail int64
+wal.(*Writer).AppendBust(tradeID int64, reason string) (int64, error)
+wal.(*Writer).AppendCancel(orderID int64, userID string) (int64, error)
+wal.(*Writer).AppendCancelAll(userID string) (int64, error)
+wal.(*Writer).AppendCancelOnly() (int64, error)
+wal.(*Writer).AppendHalt() (int64, error)
+wal.(*Writer).AppendIceberg(ib *types.IcebergOrder) (int64, error)
+wal.(*Writer).AppendOCO(o *types.OCOOrder) (int64, error)
+wal.(*Writer).AppendPegged(p *types.PeggedOrder) (int64, error)
+wal.(*Writer).AppendReduce(orderID, newQty int64, userID string) (int64, error)
+wal.(*Writer).AppendReplace(orderID int64, userID string, replacement *types.Order) (int64, error)
+wal.(*Writer).AppendResume() (int64, error)
+wal.(*Writer).AppendSetMark(price int64) (int64, error)
+wal.(*Writer).AppendStop(s *types.StopOrder) (int64, error)
+wal.(*Writer).AppendSubmit(o *types.Order) (int64, error)
+wal.(*Writer).AppendTrailing(ts *types.TrailingStop) (int64, error)
+wal.(*Writer).Checksummed() bool
+wal.(*Writer).Close() error
+wal.(*Writer).Seq() int64
+wal.(*Writer).SetOnAppend(fn func(seq int64, record []byte))
+wal.(*Writer).Sync() error
+wal.Checkpoint(path string, eng *matching.Engine, lastAppliedSeq int64) error
+wal.Entry struct
+wal.Entry.BustReason string
+wal.Entry.CancelID int64
+wal.Entry.DisplayQty int64
+wal.Entry.Kind EntryKind
+wal.Entry.MarkPrice int64
+wal.Entry.NewQty int64
+wal.Entry.Order *types.Order
+wal.Entry.PegOffset int64
+wal.Entry.PegRef string
+wal.Entry.Seq int64
+wal.Entry.StopOrder *types.Order
+wal.Entry.StopPrice int64
+wal.Entry.TradeID int64
+wal.Entry.Trail int64
+wal.Entry.UserID string
+wal.EntryKind type
+wal.ErrCorrupt var
+wal.KindBust const
+wal.KindCancel const
+wal.KindCancelAll const
+wal.KindCancelOnly const
+wal.KindHalt const
+wal.KindIceberg const
+wal.KindOCO const
+wal.KindPegged const
+wal.KindReduce const
+wal.KindReplace const
+wal.KindResume const
+wal.KindSetMark const
+wal.KindStop const
+wal.KindSubmit const
+wal.KindTrailing const
+wal.Magic const
+wal.MaxRecordBytes const
+wal.Open(path string) (*Writer, error)
+wal.ReadAll(path string) ([]Entry, error)
+wal.ReadSnapshot(path string) (*matching.EngineSnapshot, error)
+wal.Recover(config matching.Config, snapPath, walPath string) (*matching.Engine, error)
+wal.Restore(eng *matching.Engine, entries []Entry)
+wal.RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64)
+wal.SnapMagic const
+wal.WriteSnapshot(path string, snap *matching.EngineSnapshot) (err error)
+wal.Writer struct

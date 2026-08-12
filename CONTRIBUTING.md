@@ -53,6 +53,11 @@ we can say yes:
   repository has shipped six of them in tests that read perfectly well: see
   [docs/TESTING.md](docs/TESTING.md) for what they looked like and why each one
   was green.
+- **Do not break `pkg/...` by accident.** The exported surface is frozen in
+  `internal/apicheck/testdata/surface.txt` and a test fails when it moves. If the
+  change is intended, regenerate it, read the diff, and say what breaks in the
+  changelog — [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) has the rule and the
+  list of things that are breaking even though they look additive.
 - **Follow the ground rules above** (int64, downward layering, no clock/RNG in
   the match path); keep it `gofmt`-clean, focused, and documented if it changes
   public API.

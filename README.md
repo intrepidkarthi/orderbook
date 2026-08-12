@@ -339,6 +339,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [REPLICATION.md](docs/REPLICATION.md) | The primary-backup reference: what "committed" means, the incarnation fence, drills D1–D7 — and §8, what building it actually found versus what the spec predicted. |
 | [TRADE-BUST.md](docs/TRADE-BUST.md) | Annulling a published print on an append-only stream: the four things a bust deliberately does *not* rewind, and §7 on the durability gap writing the spec uncovered. |
 | [CONSOLE-SPEC.md](docs/CONSOLE-SPEC.md) | The live console and the operator dashboard: why a browser WASM market instead of a feed-connected desktop app, and every panel mapped to the call that produces it. |
+| [COMPATIBILITY.md](docs/COMPATIBILITY.md) | What will not move under you: which packages are frozen, which changes are breaking even though they look additive, and the test that makes the promise checkable rather than stated. |
 | [TESTING.md](docs/TESTING.md) | The one rule that keeps the rest honest: a test does not count until it has been run against code broken the way it claims to detect. Five case studies from this repository of tests that were green for the wrong reason — or red for none. |
 | [CHANGELOG.md](CHANGELOG.md) | Release history with breaking-change notes. |
 
