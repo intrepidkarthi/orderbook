@@ -9,6 +9,25 @@ versions may include breaking changes).
 
 ### Added
 
+- **The exported surface of `pkg/...` is frozen**
+  ([COMPATIBILITY.md](docs/COMPATIBILITY.md)). `internal/apicheck` renders all 1,113
+  exported declarations — names, signatures, struct fields, interface methods — to a
+  golden file, and a test fails when any of it moves. Same device `internal/wire`
+  uses for the protocol, for the same reason.
+
+  It does not prevent a breaking change and does not try. It makes one impossible to
+  ship without a human reading a diff headed *"REMOVED or CHANGED — this breaks code
+  that compiles today"*. Verified against both shapes: adding a method to an exported
+  interface (which reads as an addition and breaks every outside implementer) and
+  deleting an exported method.
+
+  **From v0.26.0, a breaking change to a covered package requires a minor bump, a
+  changelog entry naming what breaks, and a regenerated `surface.txt` in the same
+  commit.** Pre-1.0 licence to break anything at any time is hereby declined — it is
+  what produced two breaking wire bumps and four other breaks in two days. 1.0 is
+  explicitly not claimed yet, and the reason is in the doc.
+
+
 - **`obgw -symbols` and `-datadir`; `obsoak -symbols`.** The gateway grew multi-symbol
   config fields in v0.22.0 and neither reached a command-line flag, so the binary
   could not be told to serve two books. The soak harness now picks an instrument per
