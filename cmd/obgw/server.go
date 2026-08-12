@@ -75,6 +75,11 @@ type Config struct {
 	// it off means an acknowledged order can be lost if the process dies inside
 	// the 20ms sync window — see syncingLog and pkg/wal's package comment.
 	SyncEveryCommand bool
+	// Profiling mounts net/http/pprof on the admin listener. Off by default: a heap
+	// dump is a snapshot of everything the venue holds, and /debug/pprof/profile
+	// costs 30 seconds of CPU. Turn it on when you need to ask the process what it
+	// is retaining, which is a question metrics cannot answer.
+	Profiling bool
 	// MDAddr, when set, starts a market-data listener on its own port. Order entry
 	// is authenticated and per-account; market data is anonymous and identical for
 	// everyone. Sharing one port would put an unauthenticated subscriber on the same

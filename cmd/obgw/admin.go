@@ -7,6 +7,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"runtime"
 	"runtime/metrics"
@@ -96,6 +97,9 @@ func (s *Server) startAdmin() error {
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
+	if s.cfg.Profiling {
+		registerPprof(mux)
+	}
 
 	s.admin.ln = ln
 	s.admin.srv = &http.Server{
@@ -112,6 +116,27 @@ func (s *Server) startAdmin() error {
 		}
 	}()
 	return nil
+}
+
+// registerPprof mounts net/http/pprof on the admin mux.
+//
+// Off by default and behind its own flag, because these handlers are not free: a
+// heap or goroutine dump is a snapshot of everything the venue is holding, including
+// account identifiers, and /debug/pprof/profile takes 30 seconds of CPU by default.
+// Nothing here should ever face a participant, which is why it goes on the admin
+// listener — already a separate port on the operator's side of the venue — and not
+// on the order-entry or market-data edges.
+//
+// It exists because a soak found a heap floor rising 28.8% over half an hour and
+// there was no way to ask the process what it was holding. A venue that cannot be
+// profiled in place cannot answer that question in production either, and "restart
+// it and see" is not an answer at a venue.
+func registerPprof(mux *http.ServeMux) {
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 }
 
 // AdminAddr reports the bound admin address, valid after Listen when configured.

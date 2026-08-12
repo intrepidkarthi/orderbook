@@ -106,6 +106,7 @@ func main() {
 		walPath      = flag.String("wal", "", "write-ahead log path (empty = no durability)")
 		snapPath     = flag.String("snapshot", "", "snapshot path, used with -wal to bound restart time")
 		ckpt         = flag.Duration("checkpoint", 30*time.Second, "checkpoint interval")
+		profiling    = flag.Bool("pprof", false, "mount net/http/pprof on the admin listener (operator-only; a heap dump exposes everything the venue holds)")
 		syncEvery    = flag.Bool("sync-every-command", false, "fsync each command before applying it, so durability precedes acknowledgement (correct, and ~210x slower than the 20ms group commit)")
 	)
 	flag.Parse()
@@ -143,6 +144,7 @@ func main() {
 		SnapshotPath:     *snapPath,
 		CheckpointEvery:  *ckpt,
 		SyncEveryCommand: *syncEvery,
+		Profiling:        *profiling,
 	}
 	if auth.Count() == 0 {
 		log.Println("obgw: no accounts configured — every login will be rejected")
