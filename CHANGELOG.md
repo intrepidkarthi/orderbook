@@ -28,6 +28,23 @@ versions may include breaking changes).
 
 ### Fixed
 
+- **The soak harness's orphan detector got less sensitive under load** — the one
+  condition it exists to watch. Driving the venue to saturation returned a
+  believed-resting count of 2,180 against a hard ceiling of 800, which the client's
+  own bookkeeping cannot produce.
+
+  A refused command was put back on the resting list whether it was a cancel or an
+  enter. A refused cancel leaves its order resting and belongs back; a refused enter
+  never rested, and `act` had already added it optimistically, so putting it back
+  files the same id twice. Below saturation almost nothing is refused and the drift
+  is invisible; at 42% rejection it compounds every second.
+
+  That count is the orphan check's baseline, so inflating it disables the check
+  twice: it shrinks the venue-minus-believed gap and raises the `believed/10`
+  threshold the gap is tested against. Orphaned orders are the one serious defect
+  this project has actually had. Nothing was wrong with the engine — the instrument
+  was wrong, in the direction that hides failures rather than inventing them.
+
 - The gateway's startup line logged one instrument while serving three, because it
   printed the single-symbol config field. Cosmetic, and the sort of thing that makes
   an operator distrust the rest of the log.
