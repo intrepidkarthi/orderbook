@@ -9,6 +9,14 @@ versions may include breaking changes).
 
 ### Added
 
+- **`obgw -pprof`** mounts `net/http/pprof` on the admin listener, off by default. A
+  34-minute soak reported the heap floor up 28.8% with goroutines and descriptors
+  flat, and there was no way to ask the process what it was holding — metrics can
+  count things, not name what retains them. Off by default because a heap dump is a
+  snapshot of everything the venue holds including account identifiers, and
+  `/debug/pprof/profile` costs 30 seconds of CPU; on the admin listener because that
+  is already the operator's side of the venue.
+
 - **The exported surface of `pkg/...` is frozen**
   ([COMPATIBILITY.md](docs/COMPATIBILITY.md)). `internal/apicheck` renders all 1,113
   exported declarations — names, signatures, struct fields, interface methods — to a
