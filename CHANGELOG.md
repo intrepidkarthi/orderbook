@@ -9,6 +9,18 @@ versions may include breaking changes).
 
 ### Added
 
+- **A four-hour soak across three books** ([SOAK.md](docs/SOAK.md) §1e): 14,400,199
+  messages at 1,000/s, durable, zero errors, and **goroutines, descriptors and the
+  book's own size flat across 240 samples**. No orphans. The longest run this project
+  has done, and the first on the multi-symbol path.
+
+  The heap floor rose 26.7%, which the harness calls growth. Across three runs of the
+  same workload the trend reads +50.9, +6.0, **+4.3 MiB/hour** — an order of
+  magnitude of decay, which is caches filling rather than a leak. Left idle
+  afterwards the heap fell to 59.6 MiB against a 69.8 MiB end-of-run floor. What
+  four hours could *not* settle is stated in the doc: the machine's own probe read
+  307% apart between a busy evening and an idle night, and GC pacing follows CPU.
+
 - **`obgw -pprof`** mounts `net/http/pprof` on the admin listener, off by default. A
   34-minute soak reported the heap floor up 28.8% with goroutines and descriptors
   flat, and there was no way to ask the process what it was holding — metrics can
