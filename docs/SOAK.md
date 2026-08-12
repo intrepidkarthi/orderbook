@@ -396,6 +396,41 @@ not the 20,000 that found the orphaned-order defect. And it is five and a half
 minutes: long enough for the harness to stop saying "inconclusive", far short of a
 trading day.
 
+### Under saturation, and the detector that had quietly stopped working
+
+The run above kept the queue at zero. Pushed to 4,000 msg/s the venue saturates, and
+saturation is where this project's one serious defect lived — the orphaned orders of
+§1 appeared within thirty seconds at high rate and were invisible below about 4,000.
+Multi-symbol adds a mutex and a map write to every order and another to every fill,
+which is contention that a quiet queue never exercises.
+
+Both configurations were driven to saturation. Goroutines and descriptors did not
+move by one in either (43 and 19 on one book, 45 and 21 on three), no errors, no
+orphans. The rejection rates are not comparable between them and no conclusion is
+drawn from the difference: three books have three command queues, so the same client
+rate is three times the buffer.
+
+What the run did find was in the harness. **The believed-resting count came back at
+2,180 against a hard ceiling of 800**, which is not a number the client's own
+bookkeeping can produce.
+
+The cause: a refused command was put back on the resting list whether it was a cancel
+or an enter. A refused *cancel* leaves its order resting and belongs back on the
+list. A refused *enter* never rested, and `act` had already added it optimistically,
+so putting it back files the same id twice. Below saturation almost nothing is
+refused and the drift is invisible; at 42% rejection it compounds every second.
+
+That number is the orphan detector's baseline, and inflating it disables the detector
+twice over: it shrinks the venue-minus-believed gap, and it raises the `believed/10`
+threshold that gap is tested against. **The check gets less sensitive exactly under
+the load it exists to watch.** Fixed by recording what was sent alongside when, so the
+reject path can tell the two apart; the same saturated run now reports 797 against the
+ceiling of 800.
+
+Nothing was wrong with the engine. The instrument was wrong, and it was wrong in the
+direction that hides failures rather than inventing them — see
+[TESTING.md](TESTING.md) for why that is the direction worth checking first.
+
 ### What it turned up on the way
 
 Neither of these is a defect in the engine, and both cost time to work out, so they

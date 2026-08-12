@@ -356,12 +356,19 @@ type participant struct {
 	// order that no participant would ever cancel again, and the book grew to the
 	// engine's MaxOrders ceiling while the harness reported a bounded workload.
 	mu       sync.Mutex
-	inflight map[string]time.Time
+	inflight map[string]sentCmd
 	resting  []string // ids believed live, oldest first
 }
 
 // dropResting removes an id the venue has told us is not resting after all.
 func (p *participant) dropResting(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.dropRestingLocked(id)
+}
+
+// dropRestingLocked is dropResting for callers already holding p.mu.
+func (p *participant) dropRestingLocked(id string) {
 	for i, v := range p.resting {
 		if v == id {
 			p.resting = append(p.resting[:i], p.resting[i+1:]...)
@@ -379,7 +386,7 @@ func newParticipant(cfg config, id int, st *stats, perSec float64) (*participant
 		cfg: cfg, id: id, st: st, conn: conn, perSec: perSec,
 		rng:      rand.New(rand.NewSource(cfg.seed + int64(id))),
 		resting:  make([]string, 0, cfg.resting+1),
-		inflight: make(map[string]time.Time, 1024),
+		inflight: make(map[string]sentCmd, 1024),
 	}
 	if err := p.login(); err != nil {
 		_ = conn.Close()
@@ -509,6 +516,15 @@ func (p *participant) pickSymbol() string {
 	return p.cfg.symbols[p.rng.Intn(len(p.cfg.symbols))]
 }
 
+// sentCmd is what a participant sent and when. The kind matters on the reject
+// path: a refused CANCEL leaves its order resting, a refused ENTER means the order
+// never rested at all, and treating the second like the first inflates the client's
+// model of the book. See the reject handler.
+type sentCmd struct {
+	at     time.Time
+	cancel bool
+}
+
 func (p *participant) nextID() string {
 	p.seq++
 	return fmt.Sprintf("%d-%d", p.id, p.seq)
@@ -539,7 +555,7 @@ func (p *participant) send(msgType uint8, id, symbol string, side uint8, price i
 	// measured, and a socket buffer that has filled is exactly the latency a
 	// participant would feel.
 	p.mu.Lock()
-	p.inflight[id] = time.Now()
+	p.inflight[id] = sentCmd{at: time.Now(), cancel: msgType == wire.MsgCancel}
 	p.mu.Unlock()
 
 	// A deadline, because a saturated venue stops draining its socket and a blocking
@@ -625,15 +641,35 @@ func (p *participant) readLoop(stop <-chan struct{}) {
 			id = m.ClOrdID
 			p.st.rejected.Add(1)
 			p.st.countReason("command", m.Reason)
-			// A cancel the venue refused for a transient reason leaves the order
-			// resting, so it goes back at the front of the queue to be retried. Refused
-			// because the order is unknown means it is genuinely gone and there is
-			// nothing to put back.
-			if retryable(m.Reason) {
-				p.mu.Lock()
+			// What to do here depends on what was refused, and getting that wrong is
+			// how this harness quietly stopped being able to detect the failure it
+			// exists for.
+			//
+			// A CANCEL refused for a transient reason leaves the order resting, so it
+			// goes back at the front of the queue to be retried. An ENTER refused for
+			// the same reason never rested, and act() had already added it
+			// optimistically — so it has to come OUT. Putting it back instead files
+			// the same id twice, and under saturation, where nearly every enter is
+			// refused for queue-full, the believed-resting count drifts far above the
+			// cap it is supposed to obey: 2,180 against a hard ceiling of 800 on the
+			// run that found this.
+			//
+			// That number is the orphan detector's baseline. Inflating it shrinks the
+			// venue-minus-believed gap AND raises the believed/10 threshold the gap is
+			// tested against, so the check gets less sensitive exactly under load —
+			// which is the condition the orphaned-order defect appeared in.
+			p.mu.Lock()
+			wasCancel := p.inflight[id].cancel
+			switch {
+			case !retryable(m.Reason):
+				// Genuinely gone, whichever command it was.
+				p.dropRestingLocked(id)
+			case wasCancel:
 				p.resting = append([]string{id}, p.resting...)
-				p.mu.Unlock()
+			default:
+				p.dropRestingLocked(id)
 			}
+			p.mu.Unlock()
 		default:
 			continue
 		}
@@ -642,7 +678,8 @@ func (p *participant) readLoop(stop <-chan struct{}) {
 		// arrival is correctly ignored rather than recorded as a suspiciously fast
 		// round trip.
 		p.mu.Lock()
-		sentAt, live := p.inflight[id]
+		sc, live := p.inflight[id]
+		sentAt := sc.at
 		if live {
 			delete(p.inflight, id)
 		}
