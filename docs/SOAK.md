@@ -431,6 +431,85 @@ Nothing was wrong with the engine. The instrument was wrong, and it was wrong in
 direction that hides failures rather than inventing them — see
 [TESTING.md](TESTING.md) for why that is the direction worth checking first.
 
+## 1e. Four hours, three books
+
+The run §1d asked for. Four hours at 1,000 messages a second across three
+instruments, durable, 8 connections over 4 accounts, every connection trading all
+three books and every cancel naming its order by client id alone.
+
+```
+  sent            14,400,199   (1,000/s, target 1,000/s)
+  acked           27,166,126
+  fills            4,832,122
+  rejected         1,207,872   (8.388%)
+  errors                   0
+  unanswered               8   (0.000%)
+
+steady state: 240 samples over 3h58m59s, after a 1m0s warmup
+  heap            floor   55.1 MiB ->   69.8 MiB   trend +4.3 MiB/hour
+  goroutines      floor         45 ->         45   trend +0/hour
+  descriptors     floor         21 ->         21   trend +0/hour
+  resting orders  floor        636 ->        647   trend +0/hour
+
+  participants believe            797 resting
+  venue reports                   682 resting
+```
+
+**Fourteen million messages, zero errors, and the three load-insensitive signals did
+not move.** Goroutines, descriptors and the book's own size are flat across four
+hours — those are the figures a busy machine cannot distort, and they are the ones
+this run was for. No orphans: participants believed more than the venue held, which
+is the harmless direction, and the orphan check stayed quiet.
+
+Storage: one log per book, 1.0 GB each and even across all three, which is its own
+small confirmation that flow spread across the shards rather than favouring one.
+Snapshots rewritten every 60s at ~165 KB, so replay stays bounded however large the
+logs get. Latency p50 5ms, p99 250ms, on a machine also running a desktop.
+
+### The heap floor, and what four hours could and could not settle
+
+The harness reports growth: floor up 26.7%. The trend across three runs of the same
+workload is the more useful number.
+
+| run | trend |
+|---|---:|
+| 34 minutes | +50.9 MiB/hour |
+| 2h12m (see below) | +6.0 MiB/hour |
+| **4 hours** | **+4.3 MiB/hour** |
+
+An order of magnitude of decay, which is caches filling and flattening rather than a
+leak. The idle measurement makes it concrete: left running with no clients for three
+and a half hours afterwards, the heap sat at **59.6 MiB against a 69.8 MiB
+end-of-run floor**, and a profile diff showed `session.entered` down 8.3 MB and the
+wire decode paths negative — memory handed back when the sessions closed. What
+remains held is the fill memory, which is a deliberately retained 65,536-entry cache
+and is [tested to stay bounded](../pkg/orderentry/fillmemory_test.go).
+
+**What four hours could not settle.** The machine's fixed-work probe read 191ms at
+the start and 47ms at the end — 307% apart, a busy evening against an idle night. GC
+pacing follows CPU availability, so some of that 26.7% is the machine getting
+quieter rather than the venue getting fatter, and this run cannot separate the two.
+At +4.3 MiB/hour a trading day costs about 28 MiB and a week about 700 MiB: small,
+not nothing, and the thing a day-long run on a quiet host would answer.
+
+### Two false starts, and what they cost
+
+The first attempt at this run was killed by the harness supervising it at 34 minutes.
+The second reported growth over 2h12m and was worthless, for a reason worth writing
+down: **the laptop was asleep for 172 of its 302 elapsed minutes.** macOS was putting
+it into Maintenance Sleep on battery, roughly 9.3 minutes in every 10 from 17:55
+onwards, and the venue only ran in the gaps.
+
+It is not obvious from inside. `obsoak -duration` is measured with Go's monotonic
+clock, which does not advance while the system sleeps — so a four-hour run silently
+becomes a four-hour-*awake* run that never ends, and the throughput figures collapse
+while every structural number stays perfectly healthy. The tell was the trade rate:
+85/s while awake, 12/s averaged across the sleeping.
+
+The fix is one word, and it is now in §3: run the harness under `caffeinate`. Note
+that `caffeinate -s` only takes effect on AC power; on battery only `-i` applies, and
+the battery becomes the binding constraint on how long a soak can last.
+
 ### What it turned up on the way
 
 Neither of these is a defect in the engine, and both cost time to work out, so they
@@ -524,6 +603,31 @@ obgw  -addr :9000 -admin :9100 -accounts "$ACCTS" -rate 1e9 -burst 1e9 \
 obsoak -addr :9000 -admin :9100 -conns 25 -rate 5000 -duration 30m -warmup 5m
 ```
 
+Multi-symbol needs a directory rather than two file paths, and `-symbols` on both
+sides so every connection trades every book:
+
+```sh
+obgw  -addr :9000 -admin :9100 -accounts "$ACCTS" -rate 1e9 -burst 1e9 \
+      -symbols BTC-USD,ETH-USD,SOL-USD -datadir /tmp/venue -checkpoint 60s
+obsoak -addr :9000 -admin :9100 -symbols BTC-USD,ETH-USD,SOL-USD \
+       -conns 8 -rate 1000 -duration 4h -warmup 60s -sample 60s
+```
+
+**On a laptop, wrap the client in `caffeinate`:**
+
+```sh
+caffeinate -ims obsoak ...
+```
+
+`-duration` is measured with Go's monotonic clock, which does not advance while the
+system sleeps. Without this, a machine that dozes turns a four-hour run into a
+four-hour-*awake* run that never ends, with throughput collapsing while every
+structural figure stays healthy — see §1e. `-s` requires AC power; on battery only
+`-i` applies and the battery itself bounds the run.
+
+Add `-pprof` to `obgw` when the heap is the question. Metrics can tell you the heap
+grew; only a profile can tell you what is holding it.
+
 ---
 
 ## 4. What is still unknown
@@ -531,10 +635,11 @@ obsoak -addr :9000 -admin :9100 -conns 25 -rate 5000 -duration 30m -warmup 5m
 Everything a longer run would tell you. The runs here are minutes; a trading day is
 hours and a deployment is months. In particular:
 
-- **Nothing has run for a day.** Fragmentation, log growth, snapshot cadence over a
-  full session, and the behaviour of a book that has been continuously churned for
-  hours are all unmeasured.
-- **Hundreds of connections are untested.** These runs use 25. The gateway's
+- **Nothing has run for a day.** Four hours is the longest (§1e) and a trading day is
+  six to eight. Fragmentation and the behaviour of a book churned for a full session
+  are still unmeasured, and the heap floor's +4.3 MiB/hour is exactly the figure a
+  day-long run on a quiet host would settle.
+- **Hundreds of connections are untested.** These runs use 25, and §1e used 8. The gateway's
   goroutine-per-connection model is fine in principle and unproven past a few dozen.
 - **One machine, one instrument, loopback.** No network, no NIC, no other tenant, no
   contention with anything a real deployment would have next to it.

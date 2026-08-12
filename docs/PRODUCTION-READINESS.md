@@ -33,7 +33,7 @@ in front of it.
 | Operational readiness | **Weak** — endpoints, thresholds and runbooks; none of it rehearsed |
 | Security at the edge | **Partial** — TLS, a credential seam and digests at rest ship; no rotation, revocation or expiry |
 | High availability | **Seams proven** — a drilled reference example; topology and consensus deliberately yours |
-| Sustained load / soak at venue scale | **Partial** — a harness, an hour on one book and five minutes on three |
+| Sustained load / soak at venue scale | **Partial** — a harness, an hour on one book and four hours on three; nothing for a full day |
 | Clearing, settlement, margin, fees | **Absent by design** |
 | Independent review | **None** |
 
