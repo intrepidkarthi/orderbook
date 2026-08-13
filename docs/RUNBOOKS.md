@@ -295,6 +295,120 @@ client whose order fell inside it.
 
 ---
 
+## Debugging a live venue
+
+The entries above are for failures with a known shape. This is for the other case:
+something is wrong, you do not yet know what, and the venue is up. Work down the
+list — each step is cheap and rules out a class before the next one.
+
+**Everything here is read-only and safe on a live venue.** Nothing enqueues a
+command, nothing takes the matching goroutine's lock, and none of it can change the
+book. That is a property of the admin edge, not an accident: a diagnostic that could
+stall the matcher would be worst exactly when it was needed. The one exception is
+flagged below.
+
+### 1. Is it the venue, or is it you?
+
+```sh
+curl -s localhost:9100/healthz          # process alive
+curl -s localhost:9100/readyz           # matcher advancing
+```
+
+`/readyz` reports the queue and the event sequence. **Queue near zero and a sequence
+that is not moving is a quiet market, not a stall** — the venue cannot tell you the
+difference and does not try. A backing queue with a stuck sequence is the stall; that
+has its own runbook above.
+
+### 2. What does the book think it is?
+
+```sh
+curl -s localhost:9100/metrics | grep -E 'best_(bid|ask)|spread|last_trade|phase'
+```
+
+Per instrument, since v0.24.0. `NaN` on a side means that side is **empty**, not
+zero — zero is a price, and the distinction is the whole reason those gauges report
+NaN. `orderbook_phase` of 3 is halted, 2 is cancel-only: a venue that is "not
+trading" may be doing exactly what it was told.
+
+### 3. Is it refusing work, and whose fault is that?
+
+```sh
+curl -s localhost:9100/metrics | grep -E 'rejections_total|queue_depth|queue_capacity'
+```
+
+`orderbook_rejections_total` is labelled by reason, and the reason tells you where to
+look. `queue_full` is the venue behind its clients. A duplicate client id or an
+unknown order is the client's model diverging from the book. A price-band rejection
+is the venue working as configured.
+
+**Depth approaching capacity is the number to alert on**, not depth being non-zero —
+by the time the queue is full, clients are already being refused.
+
+### 4. Is anybody being dropped?
+
+```sh
+curl -s localhost:9100/metrics | grep -E 'publisher_dropped|obgw_connections'
+```
+
+`obgw_publisher_dropped_total` is the most important number on the page and the last
+one that was added. A dropped batch is not a delayed message, it is a lost one, and
+every consumer downstream derives from that stream — the index that lets a client
+cancel its own order, and the execution reports for fills against it. **Non-zero
+here means orders in the book that no client can cancel.** See "The publisher is
+dropping batches".
+
+### 5. Is it growing?
+
+```sh
+curl -s localhost:9100/metrics | grep -E 'obgw_(heap_bytes|goroutines|open_files)'
+```
+
+Sample it repeatedly and **watch the floor, not the instantaneous value** — heap
+sawtooths between collections and a single reading tells you nothing. Goroutines and
+descriptors should be flat; a trend in either is a leak and is worth waking someone
+for. Descriptors are the one that ends a venue's day outright: at the limit, accept
+fails and no new participant can connect while everyone already on stays perfectly
+healthy.
+
+### 6. What is it actually holding?
+
+Metrics can tell you the heap grew. Only a profile can tell you what is holding it.
+
+```sh
+# obgw must have been started with -pprof; it is off by default.
+go tool pprof -top -sample_index=inuse_space http://localhost:9100/debug/pprof/heap
+go tool pprof -top http://localhost:9100/debug/pprof/goroutine
+```
+
+Take two profiles minutes apart and diff them with `-base`; a single profile shows
+you what is allocated, not what is growing. This is how a heap floor that rose 28.8%
+in half an hour was traced to four bounded caches filling for the first time rather
+than a leak.
+
+**The one unsafe endpoint**: `/debug/pprof/profile` takes 30 seconds of CPU by
+default. On a venue at its throughput ceiling that is a real cost. `heap` and
+`goroutine` are cheap snapshots.
+
+### 7. What did the venue think it was doing?
+
+The log is the record of every command that reached the engine, in order, and it is
+readable. `wal.ReadAll` parses it; the records are JSON. That is the last resort and
+also the most complete one: if a client and the venue disagree about an order, the
+log settles it.
+
+**Do not edit it.** See the two rules at the top of this page.
+
+### What none of this covers
+
+There is no tracing, so a slow request cannot be followed across the gateway, the
+matcher and the publisher — you can see that the queue is deep and not which stage
+put it there. There are no alert rules shipped, so every threshold above is one you
+have to wire up yourself. Both are named in
+[PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) as gaps rather than described as
+features.
+
+---
+
 ## What has no runbook
 
 Named because a gap you know about is worth more than a page that pretends otherwise.

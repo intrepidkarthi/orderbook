@@ -18,6 +18,13 @@ is named so you can check it rather than trust it.
 **The engine has never run a live market.** Everything below should be read with that
 in front of it.
 
+**And it is experimental, in the sense that word should carry.** No independent
+review, no production deployment, an API and a wire protocol that both broke inside a
+single week, and at least one known defect documented rather than fixed (see "Running
+continuously"). If you run this and it costs you something, that is yours — the MIT
+licence disclaims warranty and the author disclaims responsibility. This page exists
+so that decision is an informed one, not a warm one.
+
 ---
 
 ## Summary

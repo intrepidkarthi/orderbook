@@ -34,6 +34,26 @@ grounded in a real enforcement case or incident, catalogued in
 reproducible market-microstructure research harness and an interactive
 WebAssembly demo that runs the real engine in the browser.
 
+> ### ⚠ Experimental. Use at your own risk.
+>
+> **This is an experiment, not a product.** It has never run a live market. It has
+> had no independent review. Its Go API and its wire protocol have each broken more
+> than once in a single week, and the compatibility promise that now governs them
+> ([docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)) is days old. Known problems are
+> documented rather than fixed — a venue left running becomes progressively harder
+> to restart, because the command log never shrinks and recovery reads all of it.
+>
+> **If you run this and something goes wrong — lost orders, a wrong book, money —
+> that is yours, not mine.** The MIT licence's "without warranty of any kind" is the
+> legal form of that sentence; this is the plain one. I am not responsible for what
+> happens in your production, and nobody has run it in theirs.
+>
+> What this repository does offer is unusual specificity about its own limits. Every
+> claim names the test or the measurement behind it, several sections exist only to
+> correct earlier claims that were wrong, and
+> [docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) is a list of what
+> would stop you. Read those before trusting any of this, not after.
+
 **Scope.** *Embeddable* concedes the venue is not here — and no adjective in
 this README claims what only a deployment can prove. Production readiness is a
 property of a deployment, not of code:
@@ -341,7 +361,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [research/ofi.md](docs/research/ofi.md) | Does order-flow imbalance predict the next move? Contemporaneous R² ≈ 0.24, predictive R² ≈ 0.0004 — a ~577× gap, and the little that remains points the other way. |
 | [research/kyle-lambda.md](docs/research/kyle-lambda.md) | Price impact measured end to end: the λ a real book produces, why it scales as 1/depth, and what a block order costs against working the same quantity. |
 | [research/order-flow.md](docs/research/order-flow.md) | Delta, CVD, and absorption against ground truth: a 94.5%-accurate aggressor rule builds a CVD wrong by 169%, and CVD divergence loses to a price-only control. |
-| [RUNBOOKS.md](docs/RUNBOOKS.md) | Procedures for the failures this venue can have — torn log, corrupt snapshot, stuck matcher, dropped publisher batches, evicted subscriber — each written from the code that produces it, with the alert thresholds and what makes each one worse. Includes what has no runbook. |
+| [RUNBOOKS.md](docs/RUNBOOKS.md) | Procedures for the failures this venue can have — torn log, corrupt snapshot, stuck matcher, dropped publisher batches, evicted subscriber — each written from the code that produces it, with the alert thresholds and what makes each one worse. Plus a step-by-step guide to debugging a live venue when you do not yet know what is wrong, and what has no runbook. |
 | [SOAK.md](docs/SOAK.md) | Sustained load: what `cmd/obsoak` measures, the methodology that took three wrong versions to get right, and the correctness defect the first hour of it found. |
 | [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) | What a venue actually needs, with an honest status for each item — what ships, what is deliberately absent, and what you would have to build. Production readiness is a property of a deployment, not of a library, and this says so. |
 | [PROTOCOL.md](docs/PROTOCOL.md) | The binary order-entry protocol `cmd/obgw` speaks: framing, session and resume, every message, the reason-code vocabulary, and what is deliberately absent from the wire. |

@@ -1,0 +1,150 @@
+name: Soak
+
+# A long run on a machine that does not sleep.
+#
+# Two of the first three four-hour soaks on a laptop were lost: one to the process
+# supervising them, one to macOS putting the machine into Maintenance Sleep for 172
+# of its 302 elapsed minutes. A hosted runner has neither problem, which is the
+# entire reason this workflow exists.
+#
+# What it does NOT do is publish timings. A shared, virtualised runner cannot produce
+# a throughput or latency figure worth comparing to anything, and the harness's own
+# fixed-work probe will say so. What survives a noisy machine is the structural
+# findings — leaked goroutines, leaked descriptors, orphaned orders, errors — and
+# those are exactly what this asserts. See docs/SOAK.md §2.
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "How long to sustain load (a job is capped at 6h)"
+        default: "4h"
+      rate:
+        description: "Aggregate messages per second"
+        default: "1000"
+      symbols:
+        description: "Comma-separated instruments"
+        default: "BTC-USD,ETH-USD,SOL-USD"
+  schedule:
+    # 02:00 UTC. Scheduled runs can be delayed under load, and GitHub disables them
+    # after 60 days without repository activity — check the tab, do not assume.
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    # Above the 4h default so a run is killed by its own limit rather than the
+    # platform's, which would lose the report.
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Record what we are running on
+        run: |
+          {
+            echo "commit    $GITHUB_SHA"
+            echo "cpus      $(nproc)"
+            echo "memory    $(free -g | awk '/^Mem:/{print $2}') GiB"
+            echo "disk free $(df -BG --output=avail / | tail -1 | tr -d ' ')"
+          } | tee runner.txt
+          # The log is the thing that fills a disk: about 220 bytes per client
+          # message, so 4h at 1000/s is roughly 3 GB across three books.
+          avail=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          if [ "$avail" -lt 10 ]; then
+            echo "::error::only ${avail}G free; a soak needs headroom for the log"
+            exit 1
+          fi
+
+      - name: Build
+        run: |
+          go build -o ./obgw ./cmd/obgw
+          go build -o ./obsoak ./cmd/obsoak
+
+      - name: Run the soak
+        env:
+          DURATION: ${{ github.event.inputs.duration || '4h' }}
+          RATE: ${{ github.event.inputs.rate || '1000' }}
+          SYMBOLS: ${{ github.event.inputs.symbols || 'BTC-USD,ETH-USD,SOL-USD' }}
+        run: |
+          set -o pipefail
+          mkdir -p venue
+          ACCTS=$(./obsoak -conns 8 -users 4 -print-accounts)
+          ./obgw -addr 127.0.0.1:9000 -admin 127.0.0.1:9100 -pprof \
+                 -symbols "$SYMBOLS" -datadir venue -checkpoint 60s \
+                 -accounts "$ACCTS" -rate 1e9 -burst 1e9 > gateway.log 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -sf -m 2 http://127.0.0.1:9100/healthz >/dev/null && break
+            sleep 1
+          done
+          curl -sf -m 5 http://127.0.0.1:9100/debug/pprof/heap -o heap-start.pb.gz || true
+
+          ./obsoak -addr 127.0.0.1:9000 -admin 127.0.0.1:9100 \
+                   -symbols "$SYMBOLS" -conns 8 -users 4 \
+                   -rate "$RATE" -duration "$DURATION" -warmup 60s -sample 60s \
+                   2>&1 | tee soak.txt
+
+          curl -sf -m 5 http://127.0.0.1:9100/debug/pprof/heap -o heap-end.pb.gz || true
+          du -sh venue | tee wal-size.txt
+
+      - name: Judge it on the structural findings only
+        run: |
+          fail=0
+          note() { echo "::error::$1"; fail=1; }
+
+          grep -q "ORPHANED" soak.txt && \
+            note "orphaned orders: the book holds orders no participant is tracking"
+
+          errs=$(awk '/^  errors/{print $2}' soak.txt | tr -d ',')
+          [ "${errs:-0}" -gt 0 ] && note "$errs client errors"
+
+          # Trends are reported per hour and must be zero. A heap trend is NOT
+          # asserted: it follows GC pacing, which follows CPU, which on a shared
+          # runner is somebody else's business.
+          for what in goroutines descriptors; do
+            line=$(grep -E "^  $what " soak.txt || true)
+            [ -z "$line" ] && { note "no $what line in the report"; continue; }
+            case "$line" in
+              *"trend +0/hour"*|*"trend -0/hour"*) : ;;
+              *) note "$what moved: $line" ;;
+            esac
+          done
+
+          {
+            echo "## Soak — structural result"
+            echo ''
+            echo 'Timings are deliberately absent: a shared runner cannot produce a'
+            echo 'throughput or latency figure worth comparing. See docs/SOAK.md §2.'
+            echo ''
+            echo '```'
+            cat runner.txt
+            echo ''
+            sed -n '/^  sent/,/^  unanswered/p' soak.txt
+            echo ''
+            sed -n '/^steady state/,/^VERDICT/p' soak.txt
+            echo ''
+            echo "log on disk: $(cat wal-size.txt)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit $fail
+
+      - name: Keep the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            soak.txt
+            gateway.log
+            runner.txt
+            wal-size.txt
+            heap-start.pb.gz
+            heap-end.pb.gz
