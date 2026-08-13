@@ -648,6 +648,15 @@ hours and a deployment is months. In particular:
   figures. Run a soak on a host you control, and quote the probe value with any number
   you take from it.
 
+- **Restart after a long run is untested, and the arithmetic is bad.** Every soak so
+  far has recovered from a log measured in gigabytes at most. `wal.Recover` reads the
+  whole log into memory before skipping the records the snapshot covers, so restart
+  cost is O(total log): 4 ms at a thousand records, 1.47 s at half a million, with
+  nothing to apply in either case, and 611 MiB of allocation for 87.7 MiB of log.
+  Nothing rotates or truncates the file. A venue that runs for days becomes
+  unrestartable, and no soak here has run long enough to hit it — see
+  [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) for the numbers.
+
 A soak that finds nothing is evidence for the length of the soak, and for nothing
 longer. That sentence is printed in the harness's own verdict for the same reason it
 is written here.

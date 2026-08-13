@@ -61,7 +61,7 @@ Each row names the evidence, because a checklist that only asserts is worth noth
 | Recovery is exact | Snapshot + log tail rebuilds a byte-identical engine, including all three sequence counters, the duplicate guard and conditional-order state |
 | The log cannot silently corrupt | CRC-32C per record; a complete record failing its checksum refuses to start the venue rather than truncating |
 | Neither can the snapshot | CRC-32C over the whole file, refused the same way. It is the base the log is replayed on top of, so a wrong one is worse than a wrong record — and it had no check at all until writing the runbook for it showed the procedure would have been "you cannot detect this" |
-| Nothing leaks over an hour | 9,000,170 messages at 2,500/s: across 101 samples spanning 50 minutes the goroutine and descriptor counts did not move by one and the heap floor moved by 0.2 MiB |
+| Nothing leaks over four hours | 14,400,199 messages at 1,000/s across three books: 240 samples over 3h58m, goroutines and descriptors did not move by one, the book held its size, zero errors. The heap floor rose 26.7% on a trend decaying run-over-run (+50.9, +6.0, +4.3 MiB/hour) and is discussed in [SOAK.md](SOAK.md) §1e rather than claimed here |
 | The hot path allocates nothing | Measured against `runtime.MemStats`, not the rounded `allocs/op` column: cancel 0.0002/op, maker churn 0.009/op |
 | Level aggregates match the orders | Invariant asserted after full fills, after removals, and across a 2,000-operation churn |
 | Market data cannot drift from the book | Derived L2 compared against the engine's own snapshot after every command of a random tape |
@@ -116,12 +116,11 @@ named scenarios and recovery time at three book sizes.
 
 What they still do not cover, and this is the gap that matters for a production claim:
 
-- **Nothing has run for a day.** The longest run is an hour: 9,000,170 messages at
-  2,500/s, 50 minutes of steady state across 101 samples, with the goroutine and
-  descriptor counts not moving by one and the heap floor moving by 0.2 MiB
-  ([SOAK.md §1c](SOAK.md)). That rules out the leaks that appear in an hour and says
-  nothing about the ones that appear in a week. A trading day is longer and a
-  deployment is months.
+- **Nothing has run for a day.** The longest run is four hours: 14,400,199 messages
+  at 1,000/s across three books, 240 samples, goroutines and descriptors flat and no
+  orphans ([SOAK.md §1e](SOAK.md)). That rules out the leaks that appear in four
+  hours and says nothing about the ones that appear in a week. A trading day is six
+  to eight hours and a deployment is months.
 - **Hundreds of connections are still untested.** The soak runs use 25. The gateway's
   goroutine-per-connection model is fine in principle and unproven past a few dozen.
 - **There is no capacity plan, and the first attempt at one was wrong.** The rates
@@ -300,6 +299,46 @@ sharding exists to remove. Per-symbol metric series ship: the price gauges carry
 series per book, and they do so even at a one-instrument venue — a metric whose
 label set depends on how the venue happens to be configured is one no dashboard
 can be written against.
+
+### Running continuously — the log is the wall, and it arrives within days
+
+Nothing here is a memory problem. Every in-process cache is fixed-size and the
+four-hour run says so: goroutines and descriptors flat, heap trend decaying
+run-over-run. **The thing that stops a venue running 24×7 is the command log, and it
+stops it in two ways.**
+
+**It never shrinks.** Nothing rotates, truncates or archives it. Measured at about
+220 bytes of journal per client message — 44 GiB a day at 2,500/s, 18 GB a day at
+the gentler rate the four-hour run used. A snapshot bounds what a restart *applies*;
+it does not remove a single byte from the file.
+
+**And a restart reads all of it.** `wal.Recover` calls `ReadAll`, which parses the
+entire log into memory, and only then does `RestoreAfter` skip the records the
+snapshot already covers. So restart cost is O(total log), not O(tail):
+
+| log, entirely covered by the snapshot | `Recover` |
+|---:|---:|
+| 1,000 records | 4 ms |
+| 100,000 records | 428 ms |
+| 500,000 records | 1.47 s |
+
+Linear, about 3 µs a record, with **nothing to apply in any of those rows**. Memory
+is the sharper edge: 300,000 records occupying 87.7 MiB on disk cost 611 MiB of
+allocation to recover — roughly 2.1 KB per record against 306 bytes stored.
+
+Put together: one day of continuous operation at the four-hour run's rate is about
+59 million records, so a restart reads for roughly three minutes and allocates on
+the order of 100 GB. At 2,500/s it is 144 million records. **A venue left running
+becomes unrestartable within days, and the failure appears only when you try to
+restart it** — which is the worst possible moment to find out.
+
+This is not a design flaw so much as an unfinished piece. The records are sequential
+and the sequence is the record ordinal, so a recovery could skip an already-covered
+prefix by reading length prefixes without parsing, and a log could be archived and
+truncated once a snapshot that covers it is durable. Neither exists, and both should
+before anyone runs this for a week. The existing benchmark cannot see the problem:
+`BenchmarkRecoverSnapshotPlusTail` builds a log that is *only* the tail, so the
+prefix it is meant to be skipping is never there.
 
 ### The financial stack — absent by design
 
