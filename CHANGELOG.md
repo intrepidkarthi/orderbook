@@ -7,6 +7,28 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Snapshots bound restart time" was wrong in seven places.** A snapshot bounds
+  what a restart *applies*; `wal.Recover` reads and parses the entire log regardless,
+  so restart cost scales with total log size and not with the tail. Measured: 4 ms at
+  1,000 records, 428 ms at 100,000, **1.47 s at 500,000 — with nothing to apply in
+  any of them** — and 611 MiB of allocation for 87.7 MiB of log.
+
+  Combined with a log that nothing rotates or truncates (~220 bytes per client
+  message, 44 GiB a day at 2,500/s), **a venue left running becomes slower and
+  hungrier to restart every day it stays up, and finds out at the worst moment.**
+  One day of continuous operation is roughly 59M records: about three minutes of
+  reading and on the order of 100 GB of allocation to come back up.
+
+  Corrected in `wal.Recover`'s doc comment, `obgw`'s config field and `-snapshot`
+  flag, `checkpointLoop`, PROTOCOL.md, INTEGRATION.md and the README. Both halves are
+  fixable and neither is done — the record ordinal is the sequence, so a covered
+  prefix could be skipped without parsing, and a log could be archived once a
+  snapshot covering it is durable. `BenchmarkRecoverSnapshotPlusTail` cannot see the
+  problem: it builds a log that is only the tail, so the prefix it exists to skip is
+  never present.
+
 ### Added
 
 - **A four-hour soak across three books** ([SOAK.md](docs/SOAK.md) §1e): 14,400,199
