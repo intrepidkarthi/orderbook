@@ -104,7 +104,7 @@ func main() {
 		rate         = flag.Float64("rate", 1000, "per-account orders/second")
 		burst        = flag.Float64("burst", 200, "per-account burst allowance")
 		walPath      = flag.String("wal", "", "write-ahead log path (empty = no durability)")
-		snapPath     = flag.String("snapshot", "", "snapshot path, used with -wal to bound restart time")
+		snapPath     = flag.String("snapshot", "", "snapshot path, used with -wal to bound how much log a restart replays (it is still read in full)")
 		ckpt         = flag.Duration("checkpoint", 30*time.Second, "checkpoint interval")
 		profiling    = flag.Bool("pprof", false, "mount net/http/pprof on the admin listener (operator-only; a heap dump exposes everything the venue holds)")
 		syncEvery    = flag.Bool("sync-every-command", false, "fsync each command before applying it, so durability precedes acknowledgement (correct, and ~210x slower than the 20ms group commit)")

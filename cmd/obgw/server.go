@@ -63,8 +63,9 @@ type Config struct {
 	// WALPath, when set, turns on durability: every command is written to the log
 	// before it is applied, and the server recovers from it on start.
 	WALPath string
-	// SnapshotPath is where periodic checkpoints are written. Recovery replays
-	// only the log tail after the snapshot, so this bounds restart time.
+	// SnapshotPath is where periodic checkpoints are written. Recovery APPLIES only
+	// the log tail after the snapshot — but it still reads the whole file, so this
+	// bounds replay work and not restart time. See wal.Recover.
 	SnapshotPath string
 	// CheckpointEvery bounds how much log a restart must replay. Zero disables
 	// checkpointing, which is legal but means replay grows without limit.
@@ -540,7 +541,9 @@ func (s *Server) syncLoop() {
 	}
 }
 
-// checkpointLoop bounds restart time by snapshotting on a cadence. The snapshot
+// checkpointLoop bounds how much log a restart has to APPLY by snapshotting on a
+// cadence. It does not bound how much a restart reads, which is the whole file
+// however recent the snapshot — see wal.Recover. The snapshot
 // is taken on the matching goroutine and stamped with the log position it is
 // consistent with, so recovery replays only the tail after it.
 func (s *Server) checkpointLoop() {

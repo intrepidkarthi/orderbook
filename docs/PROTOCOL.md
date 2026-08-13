@@ -551,7 +551,7 @@ deliberately not implemented rather than half implemented.
 
 `obgw -wal path` turns on the write-ahead log: every command is written before it
 is applied, group-committed every 20ms, and replayed on start. With `-snapshot`
-and `-checkpoint` it also snapshots on a cadence, so a restart replays only the
+and `-checkpoint` it also snapshots on a cadence, so a restart re-applies only the
 tail after the last checkpoint rather than all history.
 
 Records are CRC-32C-checksummed behind a magic header. A crash mid-write leaves a

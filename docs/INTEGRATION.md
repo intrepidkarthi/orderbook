@@ -191,7 +191,7 @@ eng.Process(order)                // then apply
 lastApplied = seq
 wal.Checkpoint("snap.json", eng, lastApplied)
 
-// Recovery: snapshot + only the log tail after it.
+// Recovery: snapshot + the log tail after it (the whole log is still read).
 eng, err := wal.Recover(cfg, "snap.json", "wal.log")
 ```
 

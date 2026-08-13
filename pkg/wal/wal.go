@@ -729,6 +729,20 @@ func Checkpoint(path string, eng *matching.Engine, lastAppliedSeq int64) error {
 // sequence join and get the boundary wrong. A missing snapshot replays the whole
 // log; a missing log yields the snapshot alone; neither present yields a fresh
 // engine.
+// Recover rebuilds an engine from a snapshot plus the log records after it.
+//
+// The snapshot bounds what is APPLIED, not what is read. ReadAll parses the whole
+// file before RestoreAfter skips the covered prefix, so the cost of a restart scales
+// with the total size of the log and not with the tail: measured at 4ms for a
+// thousand records, 1.47s for half a million, with nothing to apply in either case,
+// and 611 MiB of allocation for 87.7 MiB of log.
+//
+// Nothing here truncates or rotates the log either. A venue that runs continuously
+// therefore gets slower and hungrier to restart every day it stays up, and finds out
+// at the worst moment. Both halves are fixable — the record ordinal is the sequence,
+// so a covered prefix could be skipped by reading length prefixes without parsing,
+// and a log could be archived once a snapshot covering it is durable — and neither
+// is done. See docs/PRODUCTION-READINESS.md, "Running continuously".
 func Recover(config matching.Config, snapPath, walPath string) (*matching.Engine, error) {
 	snap, err := ReadSnapshot(snapPath)
 	if err != nil {

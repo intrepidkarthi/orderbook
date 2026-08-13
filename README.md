@@ -53,7 +53,10 @@ operator dashboard that is an ordinary subscriber of the venue's own feed), and 
 [live console](https://intrepidkarthi.github.io/orderbook/console.html) running
 the engine, signals and surveillance in the browser.
 
-What does not, and is yours: **credential lifecycle** (the reference speaks TLS and
+What does not, and is yours: **continuous operation** (the command log never
+shrinks and a restart reads all of it, so a venue left running becomes slower and
+hungrier to restart every day it stays up — the first thing to fix before running
+this for a week), **credential lifecycle** (the reference speaks TLS and
 holds secret digests, never plaintext — but rotation, revocation and expiry are
 yours, and it says so), **multi-symbol routing** (order ids and
 sequences are per-engine, so several symbols means several engines and a router
@@ -92,7 +95,11 @@ no library work can close, because they are properties of your deployment.
   backtests. `Runner.Checkpoint` and `wal.Recover` join the snapshot to its log
   position, and the property is gated in CI against a 2,000-command tape:
   checkpoint anywhere, recover, and the book, all three sequence counters, the
-  duplicate guard and the conditional-order state match the uninterrupted run.
+  duplicate guard and the conditional-order state match the uninterrupted run. What
+  a snapshot bounds is the *replay*, not the read: recovery still parses the whole
+  log, and nothing rotates it, so restart cost grows with every day a venue stays up
+  — measured, and unfixed, in
+  [docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md).
 - **An event stream that reconstructs the book.** `Accepted`/`Trade`/`Canceled`/
   `Replaced` replay into an L3 book identical to the engine's, asserted on every
   commit across 23 scenarios covering every order class — including iceberg
@@ -134,8 +141,10 @@ no library work can close, because they are properties of your deployment.
   engine's own event stream, so they count what the book saw rather than what the
   gateway believed it sent, and nothing a scrape touches goes through the command
   queue. `cmd/obsoak` drives the venue at a sustained rate and reports what grows.
-  The first hour of running it found a defect that 480 tests, two fuzzers and the
-  race detector had not: under load the venue refused cancels for orders live in its
+  The longest run is four hours over three books — 14.4M messages, goroutines and
+  descriptors flat across 240 samples, no orphans ([docs/SOAK.md](docs/SOAK.md) §1e).
+  The first hour of ever running it found a defect that the whole test suite, two
+  fuzzers and the race detector had not: under load the venue refused cancels for orders live in its
   own book, and filled to its order ceiling while reporting itself healthy. Fixed,
   regression-tested, and written up in [docs/SOAK.md](docs/SOAK.md).
 - **A market-data edge.** `cmd/obgw -mdaddr` publishes the venue's public feed on its
