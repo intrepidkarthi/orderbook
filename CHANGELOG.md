@@ -7,6 +7,38 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- **A restart-cost benchmark that can actually see the problem.**
+  `BenchmarkRecoverBehindACoveredPrefix` holds the work constant at 1,000 records to
+  apply and grows the already-snapshotted prefix behind it: **8 ms / 253 ms / 664 ms**
+  and 5 MB / 141 MB / 457 MB allocated for 1k / 50k / 200k. `BenchmarkRecoverSnapshotPlusTail`
+  cannot show this — it builds a log that is *only* the tail, so the prefix it exists
+  to skip is never present. A test pins the shape so it cannot silently worsen, and
+  its failure message says how to invert it once `Recover` learns to skip.
+
+- **A nightly soak on a machine that does not sleep**
+  (`.github/workflows/soak.yml`). Two of the first three four-hour runs on a laptop
+  were lost, one to the process supervising it and one to macOS sleeping for 172 of
+  302 elapsed minutes. It asserts **only** structural findings — orphans, errors,
+  goroutine and descriptor trends — and publishes no timings, because a shared runner
+  cannot produce a throughput figure worth comparing. Verified against the real
+  four-hour report (passes) and against synthetic reports with orphans and goroutine
+  drift (fail).
+
+- **[RUNBOOKS.md](docs/RUNBOOKS.md) — "Debugging a live venue."** Seven read-only
+  steps for when something is wrong and you do not yet know what: is it the venue or
+  you, what the book thinks it is, what it is refusing and whose fault that is, who
+  is being dropped, whether it is growing, what it is actually holding, and what the
+  log says. Every step is safe on a live venue, and the one endpoint that is not is
+  flagged.
+
+- **A disclaimer** at the top of the README and in
+  [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md): this is an experiment, not
+  a product. No independent review, no production deployment, an API and a wire
+  protocol that both broke inside a single week, and at least one known defect
+  documented rather than fixed. If running it costs you something, that is yours.
+
 ### Fixed
 
 - **"Snapshots bound restart time" was wrong in seven places.** A snapshot bounds
