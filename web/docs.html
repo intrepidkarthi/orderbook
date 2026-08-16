@@ -25,6 +25,7 @@
       <nav>
         <span class="docs-nav-title">Documentation</span>
         <a href="#overview">Overview</a>
+        <a href="#paths">Choose a path</a>
         <a href="#architecture">Architecture</a>
         <a href="#internals">Order book internals</a>
         <a href="#order-types">Order types</a>
@@ -52,6 +53,17 @@
         <p>New to order books? Start with the <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">from-scratch guide</a>.
         For the full API, see <a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">pkg.go.dev</a>;
         for release history, the <a href="https://github.com/intrepidkarthi/orderbook/blob/main/CHANGELOG.md">changelog</a>.</p>
+      </section>
+
+      <section id="paths">
+        <h2>Choose a path</h2>
+        <p>There is a lot here. Start with the thing you need, not the whole repository.</p>
+        <div class="path-grid">
+          <a class="path" href="learn.html"><b>Learn the mechanics →</b><span>The interactive tutorial, then <code>docs/LEARN.md</code> for the longer explanation.</span></a>
+          <a class="path" href="#start"><b>Embed the core →</b><span>Quickstart code, package boundaries, and the integration checklist.</span></a>
+          <a class="path" href="#recovery"><b>Recover after a crash →</b><span>Read the WAL and snapshot model before choosing an operating design.</span></a>
+          <a class="path" href="#security"><b>Review market integrity →</b><span>Threat model, pre-trade controls, surveillance, and the core boundary.</span></a>
+        </div>
       </section>
 
       <section id="architecture">
@@ -309,21 +321,21 @@ types      (Order, Trade, iceberg, errors)</code></pre>
       <section id="start">
         <h2>Getting started</h2>
         <pre class="code"><code>go get github.com/intrepidkarthi/orderbook/pkg/matching</code></pre>
-        <pre class="code"><code>eng := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
+        <pre class="code"><code>inst := types.NewInstrument("BTC-USD", dec("0.01"), dec("0.001"))
+eng := matching.NewEngine(matching.DefaultConfig(inst.Symbol))
 
-// A resting sell (maker) — integer ticks &amp; lots
-ask, _ := types.NewOrder("alice", "BTC-USD", types.SideSell,
-    types.OrderTypeLimit, 30000, 5, types.TIFGoodTillCancel)
+ask, _ := inst.NewOrder("alice", types.SideSell, types.OrderTypeLimit,
+    dec("30000"), dec("0.5"), types.TIFGoodTillCancel)
 eng.Process(ask)
 
-// A crossing buy (taker) — trades against it at the maker price
-bid, _ := types.NewOrder("bob", "BTC-USD", types.SideBuy,
-    types.OrderTypeLimit, 30000, 3, types.TIFGoodTillCancel)
+bid, _ := inst.NewOrder("bob", types.SideBuy, types.OrderTypeLimit,
+    dec("30000"), dec("0.3"), types.TIFGoodTillCancel)
 res := eng.Process(bid)
 
 for _, t := range res.Trades {
-    fmt.Printf("%d @ %d\n", t.Quantity, t.Price)   // 3 @ 30000
+    fmt.Printf("trade: %s @ %s\n", inst.LotsToQty(t.Quantity), inst.TicksToPrice(t.Price))
 }</code></pre>
+        <p class="hint">This is the core of <a href="https://github.com/intrepidkarthi/orderbook/blob/main/examples/basic/main.go">examples/basic</a>; use that file for imports and a complete <code>main</code>.</p>
         <p>Turn on the market-integrity controls that fit your venue via <code>matching.Config</code>
         (see <a href="#security">Security</a>), wrap the engine in a <code>Runner</code> for
         concurrency, and enable <code>pkg/wal</code> for durability. Runnable examples:

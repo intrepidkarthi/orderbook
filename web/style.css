@@ -102,6 +102,14 @@ main, .hero { max-width: var(--maxw); margin: 0 auto; padding: 0 20px; }
 .mini { color: var(--muted); font-size: 14px; padding-left: 18px; }
 .mini li { margin: 6px 0; }
 
+/* paths */
+.path-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.path { display: block; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; color: var(--fg); }
+.path:hover { border-color: var(--muted); text-decoration: none; }
+.path b { display: block; margin-bottom: 5px; color: var(--gold); }
+.path span { display: block; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.path code { font-size: .82em; }
+
 /* features */
 .feat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
 .feat { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }

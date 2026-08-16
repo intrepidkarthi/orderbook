@@ -18,8 +18,9 @@
     .rail .st {
       display: flex; align-items: center; gap: 7px; padding: 6px 12px;
       border: 1px solid var(--line); border-radius: 999px;
-      color: var(--muted); font-size: 12.5px; background: var(--card);
+      color: var(--muted); font: inherit; font-size: 12.5px; background: var(--card); cursor: pointer; text-align: left;
     }
+    .rail .st:hover { border-color: var(--muted); color: var(--fg); }
     .rail .st .n {
       font-family: ui-monospace, Menlo, monospace; font-size: 11px;
       width: 18px; height: 18px; border-radius: 50%; display: inline-flex;
@@ -137,6 +138,10 @@
     <div id="boot" class="boot">loading the engine (WebAssembly)…</div>
 
     <div id="ui" hidden>
+      <details class="card" open style="margin-bottom:16px">
+        <summary style="cursor:pointer;color:var(--fg);font-weight:650">How to use this tutorial</summary>
+        <p style="margin:8px 0 0;color:var(--muted);font-size:13px;line-height:1.6">Each chapter gives you one job. Use the controls, watch the book change, and continue only when the engine can prove the objective. Refreshing starts over; nothing is sent to a server.</p>
+      </details>
       <div class="rail" id="rail" aria-label="Chapters"></div>
 
       <div class="stage">

@@ -49,6 +49,16 @@
   </header>
 
   <main>
+    <section class="sec" aria-labelledby="choose-heading">
+      <h2 id="choose-heading">Where to start</h2>
+      <p class="sec-lede">Pick the path that matches what you are trying to do. The pages and examples use the same engine.</p>
+      <div class="path-grid">
+        <a class="path" href="learn.html"><b>I’m new to order books →</b><span>Work through six short chapters. You place orders and the engine checks what happened.</span></a>
+        <a class="path" href="console.html"><b>I want to see it run →</b><span>Watch a simulated market, place your own orders, and trigger the surveillance detectors.</span></a>
+        <a class="path" href="#start"><b>I want to embed it →</b><span>Install the package, run the small Go example, then read the integration guide.</span></a>
+        <a class="path" href="docs.html#docs-index"><b>I want to operate it →</b><span>Read the recovery model, the runbooks, and the readiness checklist that states what is missing.</span></a>
+      </div>
+    </section>
     <!-- WHAT -->
     <section id="what" class="sec">
       <h2>What is this?</h2>
@@ -224,24 +234,22 @@
           <p class="sec-lede">Install:</p>
           <pre class="code"><code>go get github.com/intrepidkarthi/orderbook/pkg/matching</code></pre>
           <p class="sec-lede">Create an engine, submit orders, read the book:</p>
-          <pre class="code"><code>eng := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
+          <pre class="code"><code>inst := types.NewInstrument("BTC-USD", dec("0.01"), dec("0.001"))
+eng := matching.NewEngine(matching.DefaultConfig(inst.Symbol))
 
-// A resting sell (maker) — integer ticks &amp; lots
-ask, _ := types.NewOrder("alice", "BTC-USD", types.SideSell,
-    types.OrderTypeLimit, 30000, 5,
-    types.TIFGoodTillCancel)
+// Rest a sell, then cross it with a buy.
+ask, _ := inst.NewOrder("alice", types.SideSell, types.OrderTypeLimit,
+    dec("30000"), dec("0.5"), types.TIFGoodTillCancel)
 eng.Process(ask)
 
-// A crossing buy (taker) — trades against it
-bid, _ := types.NewOrder("bob", "BTC-USD", types.SideBuy,
-    types.OrderTypeLimit, 30000, 3,
-    types.TIFGoodTillCancel)
+bid, _ := inst.NewOrder("bob", types.SideBuy, types.OrderTypeLimit,
+    dec("30000"), dec("0.3"), types.TIFGoodTillCancel)
 res := eng.Process(bid)
 
 for _, t := range res.Trades {
-    fmt.Printf("%d @ %d\n", t.Quantity, t.Price) // 3 @ 30000
-}
-best, qty, _ := eng.BestAsk()                     // 30000 x 2 left</code></pre>
+    fmt.Printf("trade: %s @ %s\n", inst.LotsToQty(t.Quantity), inst.TicksToPrice(t.Price))
+}</code></pre>
+          <p class="hint">The complete runnable version, including imports and decimal setup, is in <a href="https://github.com/intrepidkarthi/orderbook/blob/main/examples/basic/main.go">examples/basic</a>.</p>
         </div>
         <div>
           <p class="sec-lede">Runnable examples:</p>

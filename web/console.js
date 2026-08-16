@@ -29,6 +29,12 @@
   let running = !matchMedia("(prefers-reduced-motion: reduce)").matches;
   let speed = 1;
   let alertCount = 0;
+  const seedParam = new URLSearchParams(location.search).get("seed");
+  const initialSeed = seedParam && Number.isFinite(+seedParam) ? +seedParam : null;
+  if (initialSeed != null) {
+    obReset(initialSeed);
+    $("c-seed").value = initialSeed;
+  }
   let yourPrices = new Set();   // prices where "you" rest, for the ladder markers
   const mids = [], ofis = [], cvds = [];
 

@@ -110,6 +110,13 @@
     .arow .det { color: var(--muted); }
     .surv-empty { padding: 12px 14px; color: var(--muted); font-size: 13px; }
 
+    .guide {
+      margin-bottom: 14px; padding: 12px 16px; border: 1px solid var(--line); border-radius: 10px;
+      background: var(--card); color: var(--muted); font-size: 13px; line-height: 1.55;
+    }
+    .guide summary { color: var(--fg); cursor: pointer; font-weight: 650; }
+    .guide ol { margin: 8px 0 0 20px; padding: 0; }
+    .guide code { font-size: .9em; }
     .fineprint {
       margin-top: 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px;
       color: var(--muted); font-size: 13px; line-height: 1.55;
@@ -152,6 +159,15 @@
     <div id="boot" class="boot">loading the engine (WebAssembly)…</div>
 
     <div id="ui" hidden>
+      <details class="guide" open>
+        <summary>First run: make one trade, then trip a detector</summary>
+        <ol>
+          <li>Let the market run for a few seconds, then press <b>Pause</b>.</li>
+          <li>Place a limit order away from the touch. It will rest and appear with a <b>●</b>.</li>
+          <li>Send a market order, then read the print in the tape.</li>
+          <li>Press <b>Run a spoof</b>. <code>pkg/surveillance</code> raises the alert you see, not the page.</li>
+        </ol>
+      </details>
       <div class="mkt-bar">
         <span class="sym">DEMO</span>
         <span class="kv">mid<b id="mv-mid">—</b></span>
@@ -281,7 +297,8 @@
         <b>What this is.</b> The real engine — <code>pkg/matching</code> compiled to WebAssembly — matching
         a market of <code>sim.NoiseTrader</code> agents, with every panel computed by the shipping library
         code and titled by the exact call that produced it. Same seed, same market, every time: that is
-        the engine's determinism, demonstrated rather than claimed.
+        the engine's determinism, demonstrated rather than claimed. Put a seed in the URL
+        (<code>?seed=42</code>) and whoever you send it to opens the same market.
         <b>What it is not.</b> A trading signal. The noise market contains none by construction, and the
         <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/research/ofi.md">OFI study</a>
         found a ~540× R² gap between contemporaneous and predictive even in richer flow. Latency numbers

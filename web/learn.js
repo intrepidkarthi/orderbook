@@ -86,8 +86,15 @@
     $("rail").innerHTML = CHAPTERS.map((c, i) => {
       const cls = i < current ? "done" : i === current ? "cur" : "";
       const mark = i < current ? "✓" : i + 1;
-      return `<span class="st ${cls}"><span class="n">${mark}</span>${c.title}</span>`;
+      const selected = i === current ? ' aria-current="step"' : "";
+      return `<button type="button" class="st ${cls}" data-chapter="${i}"${selected}><span class="n">${mark}</span>${c.title}</button>`;
     }).join("");
+    $("rail").querySelectorAll("[data-chapter]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const i = +button.dataset.chapter;
+        if (i !== current) startChapter(i);
+      });
+    });
   }
   function setGoal(met) {
     $("goal").classList.toggle("met", met);
@@ -97,6 +104,7 @@
 
   function startChapter(i) {
     current = i;
+    history.replaceState(null, "", `#chapter-${i + 1}`);
     const c = CHAPTERS[i];
     chapterState = {};
     tapeCount = 0;
@@ -472,5 +480,7 @@
     if (!$("btn-next").disabled) return;
     if (c.check()) setGoal(true);
   }, 300);
-  startChapter(0);
+  const chapterHash = location.hash.match(/^#chapter-(\d+)$/);
+  const initialChapter = chapterHash ? Math.min(+chapterHash[1] - 1, CHAPTERS.length - 1) : 0;
+  startChapter(Math.max(0, initialChapter));
 })();
