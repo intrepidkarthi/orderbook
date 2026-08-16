@@ -7,6 +7,84 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Changed
+
+- **A restart no longer parses the part of the log its snapshot already covers.**
+  `wal.Recover` walks every record in the file and verifies every CRC, and decodes and
+  retains only the records past the snapshot's sequence. Measured on
+  `BenchmarkRecoverBehindACoveredChurnPrefix`, which grows the log while keeping the
+  recovered book near empty so the log term is on its own — 1,000 records to apply in
+  every row, Apple M4, medians of 5:
+
+  | covered prefix | log on disk | before | after | allocated before | after |
+  |---:|---:|---:|---:|---:|---:|
+  | 50,000 | 8.93 MiB | 161 ms | **11 ms** | 70.6 MiB | **2.0 MiB** |
+  | 200,000 | 35.4 MiB | 639 ms | **37 ms** | 277 MiB | **2.0 MiB** |
+  | 500,000 | 88.4 MiB | 1.66 s | **64 ms** | 772 MiB | **2.0 MiB** |
+
+  **Allocation is now flat in the covered prefix** — that column does not move between
+  50,000 records and 500,000. Time fell ~26×, which is more than the design predicted:
+  it planned from a `BENCHMARKS.md` row labelled "`ReadAll` — read + CRC-verify the
+  log", and `ReadAll` decodes every record too. Between the 50,000- and
+  500,000-record rows the marginal cost of a covered record went from ~3.33 µs to
+  ~106 ns, so the decode was ~97% of it. That label is corrected. The saving is
+  proportional and not a large-log effect: a 1,000-record covered prefix in front of a
+  1,000-record tail skips half the file and goes 6.2 ms → 3.4 ms.
+
+  **Every byte is still read and every checksum is still checked**, wherever in the log
+  the damage is. Seeking past the covered prefix would be faster still and would stop
+  detecting bit rot behind the snapshot — permanently, since each checkpoint buries it
+  deeper — and no test in the suite would have caught the change, because none of them
+  corrupted a record behind a snapshot. `TestCorruptionInTheCoveredPrefixStillRefuses`
+  now does, and it fails against a seek-based skip.
+
+  **Restart time is reduced, not bounded.** The file still never shrinks (~44 GiB a day
+  at 2,500 msg/s) and reading it is still O(total log). Rotation is what removes that,
+  and it is not built. Design, sabotage runs and the three places the code disagreed
+  with its own spec: [BOUNDED-RECOVERY.md](docs/BOUNDED-RECOVERY.md).
+
+  `wal.Open` was paying for a *second* full parse of the log, inside `lastSeq`, to
+  learn one number. It now walks the frames and decodes one record, and still refuses a
+  log with a damaged frame or a failed checksum. `ReadAll`'s behaviour, signature and
+  errors are unchanged — it is the same walk with the boundary at zero — and it stopped
+  allocating a fresh buffer per record on the way to `json.Unmarshal`. That is worth
+  three allocations and ~328 bytes per record on the paths with no skip in them at all:
+  `ReadAll` of 100,000 records goes 175.2 → 142.4 MB, and a snapshotless `Recover` of
+  the same log (`BenchmarkReplayTail`) 235.0 → 202.2 MB. Useful, and no more than that
+  — a first draft of this entry credited buffer reuse with "457 MiB to 107 MiB", which
+  is a different fixture (`BenchmarkRecoverBehindACoveredPrefix/covered200000`, where
+  the reduction is the covered-prefix skip) in different units.
+
+  **One thing a venue used to refuse now starts.** A record that is complete on disk,
+  passes its CRC and is not valid JSON — a writer bug or a format mismatch, never bit
+  rot — is only detected where recovery decodes it, so it is refused at and past the
+  snapshot's boundary and walked past strictly behind it. The recovered book is
+  identical either way, because a covered record is dropped for its sequence whether or
+  not it decoded; `ReadAll` still decodes every record and still reports it. Found by
+  differential fuzzing after the change was written, documented in
+  [BOUNDED-RECOVERY.md](docs/BOUNDED-RECOVERY.md) §5.2 rather than reverted, and pinned
+  by `TestUndecodableRecordBehindTheSnapshotStartsTheVenue`. `wal.Open` is deliberately
+  the most permissive reader of the three: recovery's strictness moves with the snapshot
+  boundary and `Open` does not know where the boundary is, so an `Open` stricter than the
+  laxest `Recover` could fail on a log that had just recovered successfully.
+
+  API: adds `wal.RecoverWithReport` and `wal.RecoverReport`, which name two conditions
+  that leave the recovered book correct and were previously silent — a log whose record
+  sequences are not their file ordinals (recovery re-reads the file whole rather than
+  guessing), and a snapshot stamped ahead of its log (reachable after an ordinary
+  crash, because a checkpoint does not sync the log first). `obgw` logs both. `Recover`
+  keeps its exact signature.
+
+  `TestRestartCostTracksTheWholeLogNotTheTail` asked in its own failure message to be
+  inverted when this landed; it is now `TestRestartCostsNoAllocationForTheCoveredPrefix`
+  and asserts the ratio stays under 1.5× for a 4× larger log. It asserts allocation and
+  not time on purpose: allocation goes flat, time does not. It uses a churn fixture to
+  isolate the log term, so `TestARealRestartAllocatesForItsBookAndNotForItsLog` covers
+  the restart whose book grows with its log — 355 bytes of allocation per additional
+  covered record with the skip, 2,105 without. `TestV1UndecodableRecordBehindTheSnapshotStillStops`
+  pins the one predicate that keeps headerless logs decoding every record, which the
+  clean-log v1 test does not.
+
 ### Added
 
 - **A restart-cost benchmark that can actually see the problem.**
@@ -15,7 +93,10 @@ versions may include breaking changes).
   and 5 MB / 141 MB / 457 MB allocated for 1k / 50k / 200k. `BenchmarkRecoverSnapshotPlusTail`
   cannot show this — it builds a log that is *only* the tail, so the prefix it exists
   to skip is never present. A test pins the shape so it cannot silently worsen, and
-  its failure message says how to invert it once `Recover` learns to skip.
+  its failure message says how to invert it once `Recover` learns to skip. *(It has
+  since been inverted; see the Changed entry above. A second fixture,
+  `BenchmarkRecoverBehindACoveredChurnPrefix`, was added alongside it because this one
+  grows the recovered book with the log and so measures two terms at once.)*
 
 - **A nightly soak on a machine that does not sleep**
   (`.github/workflows/soak.yml`). Two of the first three four-hour runs on a laptop
@@ -74,6 +155,10 @@ versions may include breaking changes).
   snapshot covering it is durable. `BenchmarkRecoverSnapshotPlusTail` cannot see the
   problem: it builds a log that is only the tail, so the prefix it exists to skip is
   never present.
+
+  *The first half has since been done — see the Changed entry at the top of this
+  release. The figures in this entry are what was measured before it. The second
+  half, rotation, is still not done.*
 
 ### Added
 
