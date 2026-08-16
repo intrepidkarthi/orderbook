@@ -39,6 +39,20 @@ versions may include breaking changes).
   protocol that both broke inside a single week, and at least one known defect
   documented rather than fixed. If running it costs you something, that is yours.
 
+- **A way into the site that is not the top of a long page.** The home page and
+  `web/docs.html` open with four paths — learn it, watch it run, embed it, operate it —
+  because the previous first screen asked a visitor to read everything to find the one
+  thing they came for. The console gets a four-step first run, the tutorial says in one
+  line how it works, and a seed in the console URL (`?seed=42`) opens the same market
+  for whoever you send it to: the determinism the page claims, now shareable. Tutorial
+  chapters are deep-linkable (`learn.html#chapter-4`) and the chapter rail is clickable
+  rather than decorative.
+
+  The quickstart on both pages now matches [examples/basic](examples/basic/main.go):
+  it builds an `Instrument` and passes decimals, which is what a caller writes. The old
+  snippet passed raw ticks and lots to `types.NewOrder` — still a valid call, and still
+  the wrong first thing to show someone.
+
 ### Fixed
 
 - **"Snapshots bound restart time" was wrong in seven places.** A snapshot bounds
