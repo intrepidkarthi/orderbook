@@ -8,9 +8,14 @@
 // snapshot + replay) and Binance (hourly snapshot + sequential replay) rely on.
 // Snapshotting bounds the REPLAY to O(recent) — only the WAL tail after the
 // snapshot's sequence is applied, at roughly 2µs per record. It does not bound the
-// restart: loading the snapshot itself is O(book), and at a 100,000-order book that
-// is ~174ms against ~21ms for a 10,000-record tail. Restart time is therefore
-// O(book) + O(tail), dominated by the first term. See docs/BENCHMARKS.md.
+// restart. A restart costs three terms: O(book) to load the snapshot (~174ms at a
+// 100,000-order book), O(total log) to read and checksum-verify every record
+// including the ones the snapshot already covers, and O(tail) to apply what is left
+// (~21ms for 10,000 records). Recovery skips decoding and retaining the covered
+// prefix, which makes its ALLOCATION flat in that prefix, but it still reads and
+// verifies every byte of it — see Recover and walkLog — and nothing here rotates or
+// truncates the file, so the middle term grows for as long as the venue runs. See
+// docs/BENCHMARKS.md and docs/BOUNDED-RECOVERY.md.
 //
 // Records are length-prefixed, CRC-32C-checksummed JSON, written write-ahead:
 // appended before the engine applies the command, so the log is never missing
@@ -53,6 +58,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -464,15 +470,98 @@ func (w *Writer) Close() error {
 // ReadAll reads every complete entry from a WAL file, in order, stopping cleanly
 // at a torn tail (a partial record left by a crash mid-write). A missing file
 // yields no entries.
+//
+// It is the whole log, deliberately: an operator reaching for it wants what is on
+// disk, and a dozen callers index the result by ordinal. Recovery and Open take the
+// same walk with a retention boundary (see walkLog), so all three agree exactly on
+// the framing and on every checksum: no reader in this package accepts bytes another
+// would call corrupt on those grounds.
+//
+// They differ in one thing, and only one: each decodes the records it hands back and
+// no more. ReadAll hands back every record, so it decodes every record, which makes
+// it the strictest reader here — the only one that reports a payload that passes its
+// CRC and is not a record, wherever in the file it sits. Recover decodes the tail it
+// applies; Open decodes the record whose sequence it resumes from. walkLog's second
+// paragraph says what that costs and why it was accepted.
 func ReadAll(path string) ([]Entry, error) {
+	w, err := walkLog(path, 0)
+	return w.entries, err
+}
+
+// retainNothing asks walkLog to keep no entries at all. No ordinal reaches it, so
+// every record is still read and verified and none is retained — which is what
+// lastSeq wants: one number, no slice.
+const retainNothing = int64(math.MaxInt64)
+
+// logWalk is what one pass over a log file learned.
+type logWalk struct {
+	// entries are the retained records: ordinal after+1 and beyond, in log order.
+	entries []Entry
+	// records is the ordinal of the last complete, verified record — the number of
+	// records the file holds.
+	records int64
+	// skipped counts records that were read and verified but not retained.
+	skipped int
+	// lastSeq is the Seq of the last complete record, 0 for an empty or absent file.
+	lastSeq int64
+	// present distinguishes an empty log from an absent one. A snapshot ahead of a
+	// log that does not exist yet is not a condition worth reporting.
+	present bool
+	// suspect reports that a parsed record's Seq was not its ordinal, i.e. the
+	// property the skip rests on does not hold in this file. The caller decides what
+	// to do about it; walkLog itself never guesses.
+	suspect bool
+}
+
+// walkLog reads a log file front to back, verifying every record, and retains only
+// those at ordinal afterSeq+1 and beyond.
+//
+// Every record is read in full and its CRC checked whether it is retained or not.
+// That is the point of the design and not an oversight: seeking past the covered
+// prefix would be faster and would stop detecting media corruption behind the
+// snapshot, permanently, since each checkpoint moves the boundary further along and
+// buries the damage deeper. What a skipped record saves is the json.Unmarshal and
+// the retained Entry, which is where recovery's allocation lives.
+//
+// What that costs is one check, and it is worth naming precisely rather than filing
+// under "verification". Bytes that changed on disk fail their CRC and are refused
+// wherever they sit, covered or not; that property is untouched. Bytes that are
+// complete, pass their CRC and are not valid JSON are a different animal — a writer
+// bug or a format mismatch, not media — and finding them costs exactly the decode
+// this walk stopped doing. So they are reported at and past the boundary and not
+// strictly behind it, where the only way to see them is to pay the whole bill the
+// skip exists to avoid. The recovered book is unaffected either way: RestoreAfter
+// drops a covered record for its sequence whether or not it decoded. What is given
+// up is the diagnostic, and it is given up permanently, because each checkpoint moves
+// the boundary further past it. That is a decision — docs/BOUNDED-RECOVERY.md §5.2 —
+// and it is why ReadAll still decodes everything.
+//
+// The skip rests on the ordinal of a record being its sequence number — true of
+// every file this package writes, because Writer.append increments seq and writes
+// one record under one mutex. It is a property of these files and not a law, so it
+// is checked rather than trusted: record 1 is parsed, so is every record from
+// ordinal afterSeq onward, and each parsed record must carry Seq equal to its
+// ordinal. A disagreement sets suspect and the caller re-reads the file whole.
+//
+// A v1 headerless log parses every record regardless. It has no checksum, so
+// "decodes" is its only integrity signal and the only guard against a misframed
+// walk after a damaged length prefix (see the break below). v1 therefore gets the
+// allocation saving and not the parse saving, and its invariant check is total
+// rather than sampled.
+//
+// afterSeq of 0 retains everything and behaves exactly as a full parse, record for
+// record and error for error.
+func walkLog(path string, afterSeq int64) (logWalk, error) {
+	var w logWalk
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return w, nil
 		}
-		return nil, err
+		return w, err
 	}
 	defer f.Close()
+	w.present = true
 	r := bufio.NewReader(f)
 
 	// Detect the framing. A header means every record carries a CRC; its absence
@@ -481,34 +570,50 @@ func ReadAll(path string) ([]Entry, error) {
 	checksummed := false
 	if hdr, err := r.Peek(len(Magic)); err == nil && string(hdr) == Magic {
 		if _, err := r.Discard(len(Magic)); err != nil {
-			return nil, err
+			return w, err
 		}
 		checksummed = true
 	}
 
-	var out []Entry
-	for {
-		var lenbuf [4]byte
-		if _, err := io.ReadFull(r, lenbuf[:]); err != nil {
+	// Two payload buffers, swapped after every verified record and grown to the
+	// largest record seen. cur receives the record being read; prev holds the last
+	// complete one, so a torn read of the next record cannot destroy it — which is
+	// what lets the walk name the last record's sequence without retaining anything.
+	//
+	// Reusing them is only safe because a decoded Entry keeps nothing that points into
+	// the bytes it came from: encoding/json copies strings, Entry has no []byte or
+	// json.RawMessage field, and neither does types.Order. Adding one would make every
+	// retained Entry alias the buffer the next record overwrites.
+	var cur, prev []byte
+	var lastParsed int64 // ordinal of the most recently parsed record
+	// Declared once, outside the loop. io.ReadFull takes an io.Reader, so the slice
+	// handed to it escapes; leaving these inside the loop costs eight heap bytes per
+	// record, which is invisible next to parsing every record and is most of what is
+	// left once parsing stops.
+	var hdr [8]byte
+	for ordinal := int64(1); ; ordinal++ {
+		if _, err := io.ReadFull(r, hdr[:4]); err != nil {
 			break // clean EOF or torn length prefix — stop at the last complete record
 		}
-		n := binary.BigEndian.Uint32(lenbuf[:])
+		n := binary.BigEndian.Uint32(hdr[:4])
 		// Bound before allocating: this length came off disk and a flipped bit in it
 		// must not turn recovery into a multi-gigabyte allocation.
 		if n == 0 || n > MaxRecordBytes {
-			return out, fmt.Errorf("%w: record %d declares %d bytes (limit %d)", ErrCorrupt, len(out)+1, n, MaxRecordBytes)
+			return w, fmt.Errorf("%w: record %d declares %d bytes (limit %d)", ErrCorrupt, ordinal, n, MaxRecordBytes)
 		}
 
 		var want uint32
 		if checksummed {
-			var crcbuf [4]byte
-			if _, err := io.ReadFull(r, crcbuf[:]); err != nil {
+			if _, err := io.ReadFull(r, hdr[4:8]); err != nil {
 				break // torn checksum — the record was never completely written
 			}
-			want = binary.BigEndian.Uint32(crcbuf[:])
+			want = binary.BigEndian.Uint32(hdr[4:8])
 		}
 
-		buf := make([]byte, n)
+		if cap(cur) < int(n) {
+			cur = make([]byte, n)
+		}
+		buf := cur[:n]
 		if _, err := io.ReadFull(r, buf); err != nil {
 			break // torn record body
 		}
@@ -516,31 +621,83 @@ func ReadAll(path string) ([]Entry, error) {
 			if got := crc32.Checksum(buf, crcTable); got != want {
 				// Complete on disk and altered since it was written. Stopping quietly
 				// here would look identical to a clean end of log while discarding
-				// everything after it.
-				return out, fmt.Errorf("%w: record %d checksum %08x, want %08x", ErrCorrupt, len(out)+1, got, want)
+				// everything after it. The record is named by its ordinal in the file,
+				// counting the ones this walk skipped: RUNBOOKS tells an operator to
+				// recover the records before the corrupt one, so a number that counted
+				// only retained records would send them to the wrong place.
+				return w, fmt.Errorf("%w: record %d checksum %08x, want %08x", ErrCorrupt, ordinal, got, want)
 			}
 		}
-		var e Entry
-		if err := json.Unmarshal(buf, &e); err != nil {
-			if checksummed {
-				// The checksum passed, so these are the bytes that were written and
-				// they are not a record. That is a bug or a format mismatch, not
-				// media corruption, and it must not be swallowed.
-				return out, fmt.Errorf("%w: record %d passed its checksum but does not decode: %v", ErrCorrupt, len(out)+1, err)
+
+		// Parse record 1 (the anchor: a segment that starts at some sequence other
+		// than 1 must be caught before any record is discarded), everything from the
+		// boundary onward, and — on a v1 log — everything.
+		parse := afterSeq == 0 || !checksummed || ordinal == 1 || ordinal >= afterSeq
+		retain := ordinal > afterSeq
+		if parse {
+			var e Entry
+			if err := json.Unmarshal(buf, &e); err != nil {
+				if checksummed {
+					// The checksum passed, so these are the bytes that were written and
+					// they are not a record. That is a bug or a format mismatch, not
+					// media corruption, and it must not be swallowed.
+					return w, fmt.Errorf("%w: record %d passed its checksum but does not decode: %v", ErrCorrupt, ordinal, err)
+				}
+				break // v1 log: unverifiable, so an undecodable record is treated as the tail
 			}
-			break // v1 log: unverifiable, so an undecodable record is treated as the tail
+			lastParsed, w.lastSeq = ordinal, e.Seq
+			if e.Seq != ordinal {
+				w.suspect = true
+			}
+			if retain {
+				w.entries = append(w.entries, e)
+			}
 		}
-		out = append(out, e)
+		if !retain {
+			w.skipped++
+		}
+		w.records = ordinal
+		cur, prev = prev, buf
 	}
-	return out, nil
+
+	// The last record of a skipping walk is usually parsed already — the boundary
+	// rule reaches the end of the file. It is not when the log stops short of the
+	// boundary, which is exactly the case worth reporting, so parse the retained
+	// tail payload for its sequence. A v1 log never reaches here: it parses every
+	// record, so lastParsed is always the last one.
+	if checksummed && w.records > 0 && lastParsed != w.records {
+		var e Entry
+		if err := json.Unmarshal(prev, &e); err != nil {
+			return w, fmt.Errorf("%w: record %d passed its checksum but does not decode: %v", ErrCorrupt, w.records, err)
+		}
+		w.lastSeq = e.Seq
+		if e.Seq != w.records {
+			w.suspect = true
+		}
+	}
+	return w, nil
 }
 
+// lastSeq returns the sequence of the last complete record, which is what Open
+// resumes from. It walks and verifies every frame and decodes record 1 and the last
+// record, so an obgw restart no longer pays a second full parse of the log on top of
+// Recover's.
+//
+// That makes Open the most permissive reader in this package, and it has to be.
+// Recovery's strictness moves with the snapshot boundary; Open does not know where
+// the boundary is. Were Open any stricter than the laxest Recover, a venue could
+// recover its book successfully and then fail to open the very log it recovered from
+// — an outage manufactured by two readers of the same bytes disagreeing. So Open
+// checks what Open depends on, all of it: every frame, every checksum, and the
+// sequence of the record it is about to append behind. A payload that passes its CRC
+// and does not decode in the middle of the file is not one of those things, and
+// ReadAll is where a caller goes to find it.
 func lastSeq(path string) (int64, error) {
-	entries, err := ReadAll(path)
-	if err != nil || len(entries) == 0 {
+	w, err := walkLog(path, retainNothing)
+	if err != nil {
 		return 0, err
 	}
-	return entries[len(entries)-1].Seq, nil
+	return w.lastSeq, nil
 }
 
 // Restore replays every entry into an engine (in log order), reproducing the
@@ -724,46 +881,129 @@ func Checkpoint(path string, eng *matching.Engine, lastAppliedSeq int64) error {
 	return WriteSnapshot(path, snap)
 }
 
+// RecoverReport describes what a recovery READ, as opposed to what it applied.
+//
+// It exists because two conditions a recovery can meet are worth naming and neither
+// is worth refusing to start over: a log whose sequences are not its ordinals, and a
+// snapshot that is ahead of its log. Both leave the recovered book correct and both
+// say something about the files that outlives the restart.
+type RecoverReport struct {
+	// SnapshotSeq is the snapshot's WALSeq, or 0 when there is no snapshot.
+	SnapshotSeq int64
+	// LogLastSeq is the sequence of the last complete record in the log, 0 if there
+	// are none.
+	LogLastSeq int64
+	// Skipped counts records read and CRC-verified but not retained.
+	Skipped int
+	// Applied counts the records the sequence filter let through — those with Seq
+	// greater than SnapshotSeq.
+	Applied int
+	// FellBack reports that the covered-prefix skip was abandoned and the log was
+	// re-read whole, because a record's sequence was not its ordinal. If this is
+	// routinely true the invariant is weaker than this package believes and restarts
+	// are slower than before, not faster; it is surfaced so that is visible rather
+	// than mysterious.
+	FellBack bool
+	// SnapshotAhead reports a snapshot whose WALSeq is beyond the log's last record.
+	//
+	// Recovery from that pair is still correct — the missing records' effects are
+	// already folded into the snapshot — which is why it is reported and not refused.
+	// It is reachable after an ordinary crash: a checkpoint does not sync the log
+	// first, and the log group-commits, so a snapshot can be durable while records it
+	// covers are still buffered. What outlives the restart is that Open resumes the
+	// sequence from the log, behind the snapshot's WALSeq, so the venue reuses
+	// sequences the stale snapshot already claims to cover — until the next
+	// checkpoint lands, a second crash would have RestoreAfter skip them. Naming the
+	// condition is what lets an operator force a checkpoint and close it.
+	SnapshotAhead bool
+}
+
 // Recover rebuilds an engine from a snapshot plus the log tail after it: the
 // standard bootstrap path, expressed once here so callers do not reimplement the
 // sequence join and get the boundary wrong. A missing snapshot replays the whole
 // log; a missing log yields the snapshot alone; neither present yields a fresh
 // engine.
-// Recover rebuilds an engine from a snapshot plus the log records after it.
 //
-// The snapshot bounds what is APPLIED, not what is read. ReadAll parses the whole
-// file before RestoreAfter skips the covered prefix, so the cost of a restart scales
-// with the total size of the log and not with the tail: measured at 4ms for a
-// thousand records, 1.47s for half a million, with nothing to apply in either case,
-// and 611 MiB of allocation for 87.7 MiB of log.
+// The snapshot bounds what is APPLIED. It now also bounds what is PARSED: records
+// the snapshot already covers are read and CRC-verified but not decoded or retained,
+// so recovery's allocation is flat in the covered prefix instead of linear in it.
+// The bytes are still all read and every checksum is still checked, wherever in the
+// log the damage is — see walkLog for why that is not negotiable.
 //
-// Nothing here truncates or rotates the log either. A venue that runs continuously
-// therefore gets slower and hungrier to restart every day it stays up, and finds out
-// at the worst moment. Both halves are fixable — the record ordinal is the sequence,
-// so a covered prefix could be skipped by reading length prefixes without parsing,
-// and a log could be archived once a snapshot covering it is durable — and neither
-// is done. See docs/PRODUCTION-READINESS.md, "Running continuously".
+// One check does move with the boundary, and it is the only one: a record that is
+// complete, passes its CRC and does not decode is refused at or past the snapshot's
+// sequence and is walked past strictly behind it. The recovered book is the same
+// either way — a covered record is dropped for its sequence regardless — so this
+// starts a venue that the previous full-parse recovery refused to start. walkLog
+// gives the reasoning; docs/BOUNDED-RECOVERY.md §5.2 records it as a decision.
+//
+// Restart time is reduced and not bounded. Reading and verifying is still O(total
+// log), and nothing here rotates, truncates or archives the file, so a venue that
+// runs continuously still gets slower to restart every day it stays up. Only
+// rotation removes that; see docs/BOUNDED-RECOVERY.md and
+// docs/PRODUCTION-READINESS.md, "Running continuously".
 func Recover(config matching.Config, snapPath, walPath string) (*matching.Engine, error) {
+	eng, _, err := RecoverWithReport(config, snapPath, walPath)
+	return eng, err
+}
+
+// RecoverWithReport is Recover plus what the read saw. Recover is this function with
+// the report dropped; embedders that want to log the conditions in RecoverReport —
+// cmd/obgw does — call this instead.
+func RecoverWithReport(config matching.Config, snapPath, walPath string) (*matching.Engine, RecoverReport, error) {
+	var rep RecoverReport
+	// The snapshot first, always: a venue whose base is unreadable should say so
+	// without first spending a minute reading a log it is not going to use.
 	snap, err := ReadSnapshot(snapPath)
 	if err != nil {
-		return nil, err
+		return nil, rep, err
 	}
-	entries, err := ReadAll(walPath)
-	if err != nil {
-		return nil, err
-	}
-	var eng *matching.Engine
 	var after int64
 	if snap != nil {
-		if eng, err = matching.RestoreEngine(config, snap); err != nil {
-			return nil, err
-		}
 		after = snap.WALSeq
+	}
+	rep.SnapshotSeq = after
+
+	walk, err := walkLog(walPath, after)
+	if err != nil {
+		return nil, rep, err
+	}
+	if after > 0 && walk.suspect {
+		// A parsed record's sequence was not its ordinal, so the records this walk
+		// already discarded may be exactly the ones that needed applying. Re-read the
+		// file from byte zero rather than guess an offset: continuing forward would
+		// turn a detected anomaly into undetected data loss.
+		rep.FellBack = true
+		if walk, err = walkLog(walPath, 0); err != nil {
+			return nil, rep, err
+		}
+	}
+	rep.Skipped = walk.skipped
+	rep.LogLastSeq = walk.lastSeq
+	for _, e := range walk.entries {
+		if e.Seq > after {
+			rep.Applied++
+		}
+	}
+	rep.SnapshotAhead = after > 0 && walk.present && walk.lastSeq < after
+
+	var eng *matching.Engine
+	if snap != nil {
+		if eng, err = matching.RestoreEngine(config, snap); err != nil {
+			return nil, rep, err
+		}
 	} else {
 		eng = matching.NewEngine(config)
 	}
-	RestoreAfter(eng, entries, after)
-	return eng, nil
+	// Ordinal arithmetic decided what was KEPT; the sequence filter decides what is
+	// applied out of that. The order matters and is not symmetric: a retained record
+	// whose sequence is covered is still dropped here, but a record the walk discarded
+	// by ordinal never reaches this filter at all. That is only safe because a
+	// disagreement between ordinal and sequence sets walk.suspect above and sends the
+	// whole file back through the full-parse path — which is why the anchor at record 1
+	// and the parse from the boundary onward are not decoration.
+	RestoreAfter(eng, walk.entries, after)
+	return eng, rep, nil
 }
 
 // ReadSnapshot reads a snapshot from path; a missing file yields (nil, nil).

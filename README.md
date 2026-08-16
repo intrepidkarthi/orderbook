@@ -116,10 +116,12 @@ no library work can close, because they are properties of your deployment.
   position, and the property is gated in CI against a 2,000-command tape:
   checkpoint anywhere, recover, and the book, all three sequence counters, the
   duplicate guard and the conditional-order state match the uninterrupted run. What
-  a snapshot bounds is the *replay*, not the read: recovery still parses the whole
-  log, and nothing rotates it, so restart cost grows with every day a venue stays up
-  — measured, and unfixed, in
-  [docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md).
+  a snapshot bounds is the *replay* and the *parse*, not the read: recovery reads and
+  checksum-verifies the whole log however recent the snapshot, and nothing rotates the
+  file, so restart time still grows with every day a venue stays up — with a constant
+  about 26× smaller than it was, and allocation that no longer grows at all. Measured
+  in [docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md); what was and was
+  not fixed is in [docs/BOUNDED-RECOVERY.md](docs/BOUNDED-RECOVERY.md).
 - **An event stream that reconstructs the book.** `Accepted`/`Trade`/`Canceled`/
   `Replaced` replay into an L3 book identical to the engine's, asserted on every
   commit across 23 scenarios covering every order class — including iceberg

@@ -80,6 +80,22 @@ means the bytes changed after they were written — media, not a crash. Recovery
 to start the venue rather than truncating, because truncating silently discards every
 record after the bad one and produces a book that is plausible and wrong.
 
+The `record N` in that message is the record's **ordinal in the file**, counting from
+the first record, including the ones a snapshot already covers. It is not a count of
+records recovery kept. This matters because recovery no longer decodes the covered
+prefix — it still reads and checksums every byte of it, so a record damaged long
+behind the snapshot is still caught and still refuses to start, and step 3 below
+still lands on the right place in the file.
+
+One narrower case does not refuse, and it is worth knowing before you go looking for
+it. A record whose bytes are intact and whose *content* is not a valid record — a
+writer bug or a format mismatch, never media damage, since the checksum matches — is
+only seen where recovery decodes the record. Behind the snapshot's boundary it is not
+decoded, so the venue starts, on exactly the book it would have recovered anyway. If
+you suspect that and want to know, `wal.ReadAll` decodes every record in the file and
+still reports it, by the same file ordinal. See
+[BOUNDED-RECOVERY.md](BOUNDED-RECOVERY.md) §5.2.
+
 **What to do.**
 
 1. Do not start this node again against this file.

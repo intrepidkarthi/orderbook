@@ -307,45 +307,69 @@ series per book, and they do so even at a one-instrument venue — a metric whos
 label set depends on how the venue happens to be configured is one no dashboard
 can be written against.
 
-### Running continuously — the log is the wall, and it arrives within days
+### Running continuously — the log is still the wall, but it is a different wall now
 
 Nothing here is a memory problem. Every in-process cache is fixed-size and the
 four-hour run says so: goroutines and descriptors flat, heap trend decaying
 run-over-run. **The thing that stops a venue running 24×7 is the command log, and it
-stops it in two ways.**
+used to stop it in two ways. One of them is fixed.**
 
 **It never shrinks.** Nothing rotates, truncates or archives it. Measured at about
 220 bytes of journal per client message — 44 GiB a day at 2,500/s, 18 GB a day at
 the gentler rate the four-hour run used. A snapshot bounds what a restart *applies*;
-it does not remove a single byte from the file.
+it does not remove a single byte from the file. This is unchanged and it is the
+remaining wall.
 
-**And a restart reads all of it.** `wal.Recover` calls `ReadAll`, which parses the
-entire log into memory, and only then does `RestoreAfter` skip the records the
-snapshot already covers. So restart cost is O(total log), not O(tail):
+**A restart still reads all of it — but it no longer parses all of it.** `wal.Recover`
+walks every record in the file and verifies every checksum, and decodes and retains
+only the records the snapshot does not already cover. What used to be a full JSON
+parse of the covered prefix is now a read and a CRC-32C over it, into two reused
+buffers.
 
-| log, entirely covered by the snapshot | `Recover` |
-|---:|---:|
-| 1,000 records | 4 ms |
-| 100,000 records | 428 ms |
-| 500,000 records | 1.47 s |
+Measured on `BenchmarkRecoverBehindACoveredChurnPrefix`, which writes submit/cancel
+pairs so the log grows while the recovered book stays near empty — the log term
+alone, with the same 1,000 records to apply in every row (Apple M4, `-benchtime 1x
+-count 5`, medians, file in page cache):
 
-Linear, about 3 µs a record, with **nothing to apply in any of those rows**. Memory
-is the sharper edge: 300,000 records occupying 87.7 MiB on disk cost 611 MiB of
-allocation to recover — roughly 2.1 KB per record against 306 bytes stored.
+| log, entirely covered by the snapshot | on disk | `Recover` before | after | allocated before | after |
+|---:|---:|---:|---:|---:|---:|
+| 1,000 records | 0.35 MiB | 6.2 ms | **3.4 ms** | 3.4 MiB | **2.0 MiB** |
+| 50,000 records | 8.9 MiB | 161 ms | **11 ms** | 70.6 MiB | **2.0 MiB** |
+| 200,000 records | 35.4 MiB | 639 ms | **37 ms** | 277 MiB | **2.0 MiB** |
+| 500,000 records | 88.4 MiB | 1.66 s | **64 ms** | 772 MiB | **2.0 MiB** |
 
-Put together: one day of continuous operation at the four-hour run's rate is about
-59 million records, so a restart reads for roughly three minutes and allocates on
-the order of 100 GB. At 2,500/s it is 144 million records. **A venue left running
-becomes unrestartable within days, and the failure appears only when you try to
-restart it** — which is the worst possible moment to find out.
+**Allocation is now flat in the covered prefix** — that column does not move at all
+between 50,000 records and 500,000, and what remains is the 1,000-record tail and the
+snapshot. The first row is in the table because it is the one that shows the payback is
+proportional rather than a large-log effect: that fixture is 1,000 covered records
+against a 1,000-record tail, so exactly half the log is skipped and the time nearly
+halves. There is no threshold below which this is not worth having.
 
-This is not a design flaw so much as an unfinished piece. The records are sequential
-and the sequence is the record ordinal, so a recovery could skip an already-covered
-prefix by reading length prefixes without parsing, and a log could be archived and
-truncated once a snapshot that covers it is durable. Neither exists, and both should
-before anyone runs this for a week. The existing benchmark cannot see the problem:
-`BenchmarkRecoverSnapshotPlusTail` builds a log that is *only* the tail, so the
-prefix it is meant to be skipping is never there.
+The time term fell by about 26× at half a million records, to roughly 112 ns a record
+(88.4 MiB read and checksummed in 56–64 ms). That is more than the design predicted: the
+JSON parse, not the read, was almost all of the old per-record cost. It is still
+linear in the total log, and every byte is still read on purpose — a record that is
+never read is a record whose checksum is never checked, and bit rot behind a snapshot
+would become undetectable and stay that way. See
+[BOUNDED-RECOVERY.md](BOUNDED-RECOVERY.md) §5.3.
+
+A real restart is that term plus the snapshot, which is O(book) and untouched. On the
+fixture whose orders all rest — log *and* book growing together — the same change
+takes 200,000 covered records from 1.32 s to 435 ms and 435 MiB to 102 MiB; the
+remainder there is the book, not the log. **Do not add the two tables together.**
+
+One day of continuous operation at the four-hour run's rate is about 59 million
+records, roughly 13 GiB of log. At 112 ns a record that is about 7 seconds rather than
+minutes, and about 2 MiB of allocation instead of 100 GB — so what bounds the read is
+now how fast the storage can deliver 13 GiB, not how fast Go can parse it. The
+measurement above has the file in page cache and a cold restart will not.
+
+**What has not changed: the file still grows without bound.** 44 GiB a day at 2,500/s
+is a disk-space problem long before it is a time problem, and restart time is still
+O(total log) with a smaller constant. Rotation and archival — dropping segments a
+durable snapshot already covers — is the piece that removes it, and it is not built.
+`BenchmarkRecoverSnapshotPlusTail` still cannot see any of this: it builds a log that
+is *only* the tail, so the prefix in question is never there.
 
 ### The financial stack — absent by design
 

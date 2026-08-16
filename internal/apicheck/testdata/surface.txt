@@ -1106,6 +1106,14 @@ wal.Open(path string) (*Writer, error)
 wal.ReadAll(path string) ([]Entry, error)
 wal.ReadSnapshot(path string) (*matching.EngineSnapshot, error)
 wal.Recover(config matching.Config, snapPath, walPath string) (*matching.Engine, error)
+wal.RecoverReport struct
+wal.RecoverReport.Applied int
+wal.RecoverReport.FellBack bool
+wal.RecoverReport.LogLastSeq int64
+wal.RecoverReport.Skipped int
+wal.RecoverReport.SnapshotAhead bool
+wal.RecoverReport.SnapshotSeq int64
+wal.RecoverWithReport(config matching.Config, snapPath, walPath string) (*matching.Engine, RecoverReport, error)
 wal.Restore(eng *matching.Engine, entries []Entry)
 wal.RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64)
 wal.SnapMagic const

@@ -64,8 +64,9 @@ type Config struct {
 	// before it is applied, and the server recovers from it on start.
 	WALPath string
 	// SnapshotPath is where periodic checkpoints are written. Recovery APPLIES only
-	// the log tail after the snapshot — but it still reads the whole file, so this
-	// bounds replay work and not restart time. See wal.Recover.
+	// the log tail after the snapshot, and PARSES only that tail — but it still reads
+	// and checksum-verifies the whole file, so this bounds replay work and recovery's
+	// allocation, not restart time. See wal.Recover.
 	SnapshotPath string
 	// CheckpointEvery bounds how much log a restart must replay. Zero disables
 	// checkpointing, which is legal but means replay grows without limit.
@@ -273,11 +274,27 @@ func NewServer(cfg Config) (*Server, error) {
 			// lifetime of executions at whoever connected next.
 			_, snapPath := cfg.paths(symbol)
 			var err error
-			if recovered, err = wal.Recover(eng, snapPath, walPath); err != nil {
+			var rep wal.RecoverReport
+			if recovered, rep, err = wal.RecoverWithReport(eng, snapPath, walPath); err != nil {
 				return nil, fmt.Errorf("obgw: recover %s: %w", symbol, err)
 			}
 			if n := recovered.OrderCount(); n > 0 {
-				log.Printf("obgw: %s recovered %d resting orders from %s", symbol, n, walPath)
+				log.Printf("obgw: %s recovered %d resting orders from %s (%d records applied, %d read past)",
+					symbol, n, walPath, rep.Applied, rep.Skipped)
+			}
+			// Two conditions that leave the recovered book correct and still say
+			// something about the files. Neither is a reason to refuse to start; both
+			// are things an operator should be told rather than left to infer.
+			if rep.SnapshotAhead {
+				log.Printf("obgw: %s snapshot is stamped at log sequence %d but the log ends at %d — "+
+					"the missing records are already folded into the snapshot, so this recovery is correct, "+
+					"but the venue will reuse those sequence numbers until the next checkpoint lands. "+
+					"Force a checkpoint to close it.", symbol, rep.SnapshotSeq, rep.LogLastSeq)
+			}
+			if rep.FellBack {
+				log.Printf("obgw: %s log record sequences are not their file ordinals, so recovery re-read the "+
+					"whole log rather than skipping the part the snapshot covers. The recovered book is correct; "+
+					"the restart was slower than it needed to be. See docs/BOUNDED-RECOVERY.md.", symbol)
 			}
 			// Rebuild the session layer's index over the recovered book. Recovery used
 			// to restore the book and nothing else, which left every recovered order
@@ -541,11 +558,18 @@ func (s *Server) syncLoop() {
 	}
 }
 
-// checkpointLoop bounds how much log a restart has to APPLY by snapshotting on a
-// cadence. It does not bound how much a restart reads, which is the whole file
-// however recent the snapshot — see wal.Recover. The snapshot
-// is taken on the matching goroutine and stamped with the log position it is
-// consistent with, so recovery replays only the tail after it.
+// checkpointLoop bounds how much log a restart has to APPLY, and to parse and hold
+// in memory, by snapshotting on a cadence. It does not bound how much a restart
+// READS, which is the whole file however recent the snapshot — see wal.Recover. The
+// snapshot is taken on the matching goroutine and stamped with the log position it
+// is consistent with, so recovery replays only the tail after it.
+//
+// It does not sync the log before writing the snapshot, so a checkpoint can be
+// durable while records it covers are still in the writer's 20ms group-commit
+// buffer. A crash in that window leaves a snapshot ahead of its log, which recovers
+// correctly and is reported by wal.RecoverReport.SnapshotAhead. Closing the window
+// means syncing the log first, which moves the checkpoint's pause cost onto the
+// matching goroutine; see docs/BOUNDED-RECOVERY.md §4.1.
 func (s *Server) checkpointLoop() {
 	t := time.NewTicker(s.cfg.CheckpointEvery)
 	defer t.Stop()

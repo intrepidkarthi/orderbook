@@ -50,7 +50,15 @@ Verified against the code at the time of writing, not quoted from other docs:
    (`pkg/matching/replay_admission_test.go`).
 4. **Snapshot bootstrap.** `wal.WriteSnapshot` / `wal.ReadSnapshot` /
    `wal.Recover(config, snapPath, walPath)` (`pkg/wal/wal.go`) — CRC-checked
-   snapshot plus log tail, already exercised by `cmd/obgw` checkpointing.
+   snapshot plus log tail, already exercised by `cmd/obgw` checkpointing. `Recover`
+   reads and verifies the whole file and decodes only the tail past the snapshot's
+   sequence; a follower bootstrapping from a large primary log therefore pays the
+   read but not the parse ([BOUNDED-RECOVERY.md](BOUNDED-RECOVERY.md)). The reference
+   primary's own catch-up read (`examples/replication/primary.go`) does **not** get
+   that: it calls `wal.ReadAll` and filters `Seq <= h.Have` itself, so a reconnecting
+   follower still costs the primary a full parse of its log. Serving it means
+   exporting the bounded reader, which means designing its contract for callers
+   outside `pkg/wal`, and that is not done.
 
 And the one seam this spec found missing on paper, since closed:
 

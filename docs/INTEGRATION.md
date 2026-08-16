@@ -191,7 +191,8 @@ eng.Process(order)                // then apply
 lastApplied = seq
 wal.Checkpoint("snap.json", eng, lastApplied)
 
-// Recovery: snapshot + the log tail after it (the whole log is still read).
+// Recovery: snapshot + the log tail after it. The whole log is still read and
+// checksum-verified; only the tail is decoded and applied.
 eng, err := wal.Recover(cfg, "snap.json", "wal.log")
 ```
 

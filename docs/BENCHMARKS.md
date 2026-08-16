@@ -177,10 +177,16 @@ dominates a restart.
 
 | Operation | 1 K | 10 K | 100 K |
 |---|---:|---:|---:|
-| `ReadAll` — read + CRC-verify the log | 3.7 ms | 21.4 ms | 214 ms |
+| `ReadAll` — read, CRC-verify **and decode** every record | 3.7 ms | 21.4 ms | 214 ms |
 | `ReplayTail` — full recovery, no snapshot | 4.3 ms | 25.1 ms | 234 ms |
 | `WriteSnapshot` — the checkpoint pause | 10.9 ms | 15.2 ms | 82.4 ms |
 | `RestoreSnapshot` — load a checkpoint, empty tail | 2.7 ms | 18.4 ms | 171 ms |
+
+That first row used to be labelled "read + CRC-verify the log", and reading it that
+way is how the covered-prefix work below was nearly mis-planned. `ReadAll` decodes
+every record into an `Entry` as well, and the decode is the overwhelming majority of
+it — see "Recovery behind a covered prefix", where reading and checksumming alone
+comes out at ~112 ns a record against this row's ~2.1 µs.
 
 Recovering a **100,000-order book**, which is what a real restart looks like:
 
@@ -194,15 +200,73 @@ Three things fall out of this, and the third corrects a claim:
 
 1. **A tail record costs ~2.1 µs**, so 10,000 of them add ~21 ms. Snapshotting really
    does bound the replay.
-2. **Reading the log is ~90% of replay cost** — 2.1 µs of the 2.3 µs per record — at
-   ~15 allocations per record, because records are JSON. This is where a binary record
-   format would pay. It would *not* help write throughput, which is fsync-dominated;
-   it would cut restart time.
+2. **Getting records off disk and into `Entry` values is ~90% of replay cost** —
+   2.1 µs of the 2.3 µs per record — at ~15 allocations per record, because records
+   are JSON. The next section splits that 2.1 µs: about 112 ns is the read and the
+   CRC, and the rest is `json.Unmarshal`. This is where a binary record format would
+   pay. It would *not* help write throughput, which is fsync-dominated; it would cut
+   restart time.
 3. **Restart is dominated by the snapshot, not the tail.** Loading a 100,000-order
    checkpoint is ~174 ms; the tail on top of it is tens of milliseconds. So recovery
    is O(book) for the snapshot **plus** O(tail) for the replay, and describing it as
    "bounded to O(recent)" understates it. The snapshot is what makes the *replay*
    cheap, not what makes the restart cheap.
+
+### Recovery behind a covered prefix
+
+A restart also pays for the part of the log the snapshot **already covers**, and none
+of the tables above can see that: they build logs that are only the tail. These build
+the prefix on purpose, holding the work constant at 1,000 records to apply while the
+already-snapshotted prefix in front of them grows.
+
+`Recover` now reads and CRC-verifies every record in the file and decodes and retains
+only the ones past the snapshot's boundary ([BOUNDED-RECOVERY.md](BOUNDED-RECOVERY.md)).
+"Before" is the previous behaviour — parse the whole file, then drop the covered
+part. Same machine as everything above, `-benchtime 1x -count 5`, medians, file in
+page cache.
+
+**`BenchmarkRecoverBehindACoveredChurnPrefix`** writes submit/cancel pairs so the log
+grows and the recovered book does not. It isolates the **log** term:
+
+| covered prefix | log on disk | before | after | alloc before | alloc after |
+|---:|---:|---:|---:|---:|---:|
+| 1,000 | 0.35 MiB | 6.2 ms | 3.4 ms | 3.4 MiB | 2.0 MiB |
+| 50,000 | 8.93 MiB | 161 ms | 11 ms | 70.6 MiB | 2.0 MiB |
+| 200,000 | 35.4 MiB | 639 ms | 37 ms | 277 MiB | 2.0 MiB |
+| 500,000 | 88.4 MiB | 1.66 s | 64 ms | 772 MiB | 2.0 MiB |
+
+**`BenchmarkRecoverBehindACoveredPrefix`** places orders that all rest, so the log and
+the recovered book grow together. It is what a real restart costs — O(book) **plus**
+O(log) — and it is the reason the two tables exist separately:
+
+| covered prefix | before | after | alloc before | alloc after |
+|---:|---:|---:|---:|---:|
+| 1,000 | 14.6 ms | 9.9 ms | 5.2 MiB | 3.4 MiB |
+| 50,000 | 426 ms | 202 ms | 134 MiB | 51.1 MiB |
+| 200,000 | 1.32 s | 435 ms | 435 MiB | 102 MiB |
+
+**Do not add rows from the two tables together, and do not read the second table's
+residual growth as a failed skip.** What still grows there is the snapshot restore,
+which is O(book) and untouched by this change.
+
+Three things fall out:
+
+1. **Allocation is flat in the covered prefix.** 2.0 MiB whether the prefix is 50,000
+   records or 500,000. Covered records are read into two reused buffers and never
+   decoded, so they allocate nothing at all.
+2. **Time fell by ~26× at half a million covered records**, to ~112 ns a record. The
+   design that specified this predicted roughly half, from the mislabelled `ReadAll`
+   row above. Taking the marginal cost between the 50,000- and 500,000-record rows,
+   a covered record went from ~3.33 µs to ~106 ns: `json.Unmarshal` was ~97% of it.
+   Measure, do not derive. And the saving is proportional, not a large-log effect —
+   the 1,000-record row skips half its file and takes a little over half the time.
+   The first version of that row was published as "6.0 ms" by transcription error and
+   explained away as "barely improves"; see [BOUNDED-RECOVERY.md](BOUNDED-RECOVERY.md)
+   §9.3 and §9.5.
+3. **It is still O(total log).** 88.4 MiB has to be read and checksummed however
+   recent the snapshot is, and nothing rotates or truncates the file. Skipping the
+   read as well would be faster still and would stop detecting corruption behind the
+   snapshot — permanently, since each checkpoint buries it deeper — so it is not done.
 
 ### Against the spec targets (§7)
 
