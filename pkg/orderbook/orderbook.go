@@ -88,6 +88,14 @@ func (pl *PriceLevel) unlink(n *node) {
 
 func (pl *PriceLevel) isEmpty() bool { return pl.count == 0 }
 
+// Count is how many orders the level believes it holds.
+//
+// It is the MAINTAINED count, incremented by push and decremented by unlink, not a
+// walk of the list — which is the whole reason it is exported. Comparing it against
+// an independent count of the orders actually there is what catches the two drifting
+// apart; deriving it from the list would compare a number with itself.
+func (pl *PriceLevel) Count() int { return pl.count }
+
 // OrderBook is a single-symbol CLOB.
 type OrderBook struct {
 	mu             sync.RWMutex
@@ -391,7 +399,10 @@ func (ob *OrderBook) GetBidLevels(depth int) []*PriceLevel {
 	levels := make([]*PriceLevel, 0, depth)
 	for i := 0; i < len(ob.bidPrices) && i < depth; i++ {
 		l := ob.bids[ob.bidPrices[i]]
-		levels = append(levels, &PriceLevel{Price: l.Price, TotalQty: l.TotalQty})
+		// count travels with the copy: it is maintained state a caller can compare
+		// against the orders it can see, and a copy that dropped it silently reported
+		// every level as empty.
+		levels = append(levels, &PriceLevel{Price: l.Price, TotalQty: l.TotalQty, count: l.count})
 	}
 	return levels
 }
@@ -403,7 +414,7 @@ func (ob *OrderBook) GetAskLevels(depth int) []*PriceLevel {
 	levels := make([]*PriceLevel, 0, depth)
 	for i := 0; i < len(ob.askPrices) && i < depth; i++ {
 		l := ob.asks[ob.askPrices[i]]
-		levels = append(levels, &PriceLevel{Price: l.Price, TotalQty: l.TotalQty})
+		levels = append(levels, &PriceLevel{Price: l.Price, TotalQty: l.TotalQty, count: l.count})
 	}
 	return levels
 }

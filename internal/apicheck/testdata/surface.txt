@@ -490,6 +490,7 @@ orderbook.(*OrderBook).SnapshotL3(depth int) *SnapshotL3
 orderbook.(*OrderBook).Spread() (int64, bool)
 orderbook.(*OrderBook).Symbol() string
 orderbook.(*OrderBook).UpdateOrderQuantity(orderID int64, filledQty int64)
+orderbook.(*PriceLevel).Count() int
 orderbook.(*StopBook).Add(s *types.StopOrder)
 orderbook.(*StopBook).All() []*types.StopOrder
 orderbook.(*StopBook).CheckTriggers(marketPrice int64) []*types.StopOrder

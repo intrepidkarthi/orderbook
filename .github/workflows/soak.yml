@@ -148,3 +148,51 @@ jobs:
             wal-size.txt
             heap-start.pb.gz
             heap-end.pb.gz
+
+  # The differential campaign. It is a separate job, not a step inside the soak,
+  # because it needs nothing the soak needs and a soak failure must not hide it.
+  #
+  # The committed sweep in `go test ./...` is a fixed handful of seeds -- a test
+  # people will actually run. This is the unbounded half: the fuzzer picks the seed
+  # and the tape length.
+  #
+  # What Go commits to pkg/matching/testdata/fuzz/FuzzDifferential on a failure is the
+  # fuzz INPUT -- a (uint64 seed, uint16 n) pair -- not the shrunk tape. This comment
+  # used to say "in its SHRUNK form", which it is not: the shrunk []tape.Cmd literal
+  # exists only in the printed failure message and is lost when this job's log
+  # rotates. So the regression test the corpus file produces replays the FULL tape,
+  # and anyone triaging a nightly failure should copy the shrunk literal out of the
+  # log into a hand-written test before the log ages out.
+  #
+  # The campaign runs the SAME oracle as the committed sweep (runDiff full=true). It
+  # used to run a weaker one, which made 30 minutes of fuzzing strictly less capable
+  # than a 0.25-second test. See docs/REFERENCE-MATCHER.md 5.
+  differential-fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run the committed seed corpus first
+        run: go test ./pkg/matching/ -run '^FuzzDifferential$' -count=1
+
+      - name: Fuzz the reference matcher against the engine
+        # Time-bounded, not execution-bounded: a hosted runner's throughput varies,
+        # and a fixed execution count would silently become a shorter campaign on a
+        # slower machine.
+        run: go test ./pkg/matching/ -run '^FuzzDifferential$' -fuzz '^FuzzDifferential$' -fuzztime 30m
+
+      - name: Keep any counterexample
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: differential-corpus-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            testdata/fuzz/FuzzDifferential
+            pkg/matching/testdata/fuzz/FuzzDifferential

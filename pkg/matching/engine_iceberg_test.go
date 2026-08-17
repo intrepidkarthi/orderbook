@@ -94,3 +94,67 @@ func TestIceberg_ImmediateCrossRefills(t *testing.T) {
 		t.Errorf("remaining ask = %d x %d, want 101 x 1", ask, qty)
 	}
 }
+
+// TestIceberg_RefillGoesToTheBackOfTheQueue is the queue-fairness property of the
+// iceberg: a refilled slice is NEW liquidity and joins its price level behind
+// everything already resting there. engine.go says so in a comment at the refill
+// site ("the refilled slice re-enters at the back of its price level"), and until
+// this test that sentence was the only thing asserting it.
+//
+// That gap mattered because docs/REFERENCE-MATCHER.md §3 credited the differential
+// harness's ranked L3 comparison with catching "an iceberg refill that lands in the
+// wrong place". It cannot: icebergs are tier 2 (see the commandTier table), so the
+// generator never emits one, and the ranked comparison never sees a refill. The
+// claim was checked by mutation — re-adding the refilled slice at the HEAD of its
+// level, using only the book's existing exported API — and `go test ./...` passed
+// across all 23 packages with the iceberg silently jumping the queue. The spec
+// sentence has been corrected and this test is what actually holds the property.
+//
+// It is a fairness rule with money attached. A hidden order that kept its place
+// through every refill would take priority it never queued for, which is the
+// advantage displaying liquidity is supposed to buy.
+func TestIceberg_RefillGoesToTheBackOfTheQueue(t *testing.T) {
+	e := newEngine()
+
+	// A 4-lot iceberg showing 2, then a plain 3-lot order joining behind it.
+	e.ProcessIceberg(iceberg(t, "whale", types.SideBuy, 100, 4, 2))
+	e.Process(lim(t, "joe", types.SideBuy, 100, 3))
+
+	queue := func() []string {
+		var users []string
+		for _, o := range e.Book().GetOrdersAtPrice(types.SideBuy, 100) {
+			users = append(users, o.UserID)
+		}
+		return users
+	}
+	if got, want := queue(), []string{"whale", "joe"}; !slicesEqual(got, want) {
+		t.Fatalf("queue at 100 before the refill = %v, want %v", got, want)
+	}
+
+	// Consume the whole visible slice, which forces a refill of the hidden 2.
+	e.Process(marketOrder(t, "taker", types.SideSell, 2))
+
+	// The refilled slice is behind joe, who was already waiting. If this reads
+	// [whale joe], the refill kept a queue position it did not earn.
+	if got, want := queue(), []string{"joe", "whale"}; !slicesEqual(got, want) {
+		t.Fatalf("queue at 100 after the refill = %v, want %v — the refilled slice must join at the BACK "+
+			"of its price level, not keep the consumed slice's priority", got, want)
+	}
+
+	// And the refill is real liquidity, not just a repositioned marker.
+	if _, qty, ok := e.BestBid(); !ok || qty != 5 {
+		t.Fatalf("visible depth at the touch = %d, want 5 (joe's 3 plus the refilled 2)", qty)
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

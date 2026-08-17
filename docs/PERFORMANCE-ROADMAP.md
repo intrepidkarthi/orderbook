@@ -91,7 +91,7 @@ one-line summary says *which part*.
 | M6 | Complete security lifecycle | **partial** | Authentication, hashed credentials, TLS, per-account DoS control and privilege separation are real and tested. Rotation, revocation, expiry, session invalidation, audit events, brute-force protection and any authorisation model are absent. |
 | M7 | Independent reconciliation | **not started** | The word "ledger" appears in no Go file. Every divergence property the repo claims is proven by an in-process test and by no running consumer. |
 | M8 | Market-data guarantees | **partial** | Commit point, dense sequence, retention, eviction, incarnation fence and full bust handling are built and proven over sockets. No subscriber-lag metric, no gap counter, no resnapshot limit, no drop copy. |
-| M9 | Model-based matching tests | **partial** | Invariants on random tapes, and exact output on hand-written tapes. The reference matcher — the milestone's central ask — does not exist in any form, so no random tape is ever compared against an expected answer. |
+| M9 | Model-based matching tests | **done for the continuous session** | `internal/refmatch` is an independent reference matcher and `pkg/matching/differential_test.go` compares a whole `Observation` after every command of a generated tape. Twenty-one deliberate engine mutations are all caught, each shrinking to 1-4 commands. Time-based TIF, the exotics and the auction are a written-down tier 2, and building this found three engine defects. |
 | M10 | Performance laboratory | **partial** | A substantial Go-only lab: seven latency scenarios to p99.99, durable-path and recovery benches, allocation pinned by direct measurement. No shared tape, no portable digest, no stage attribution, and the cross-language half does not exist in the repository. |
 | M11 | Optimize matching data structures | **partial** | Profile-first discipline is followed and one measured index replacement landed (cancel 47.7 ns → 23.3 ns). Experiments 2, 3 and 5 are untouched, 4 is half done, and no alternative is kept behind an interface for A/B — which is what the milestone asks for. |
 | M12 | Control runtime and hardware behavior | **not started** | Established by grep: `GOMAXPROCS`, `LockOSThread`, `GOGC`, `GOMEMLIMIT` and `PGO` each appear exactly once in the repository, in this file. |
@@ -101,8 +101,10 @@ one-line summary says *which part*.
 
 Two things this table is careful not to do. It does not count a **declared refusal** as
 missing work — M4's fencing and M15 in its entirety are decisions, not backlog. And it
-does not let a milestone with strong foundations read as nearly done: M9 has good tests
-and is still near-zero on its central ask, which the "partial" label alone would hide.
+does not let a milestone with strong foundations read as nearly done. M9 was the
+standing example — good tests, near-zero on its central ask, which the "partial" label
+alone would have hidden. It is now built for the continuous session, and its label says
+which session, because "done" over a tier-1 alphabet is not "done".
 
 ---
 
@@ -802,39 +804,54 @@ A slow market-data subscriber may be disconnected or resnapshotted. Critical exe
 
 ## M9 — Add model-based matching tests
 
-> **Status: partial by label, near-zero on the central ask.** Read the label carefully:
-> the test suite here is genuinely good, and **the reference matcher does not exist in
-> any form**. Every test that looks model-based is one of two things — invariant-only
-> on random input, or exact-output on hand-written input. Nothing compares a *generated*
-> tape against a *model's answer*, which is the whole milestone.
+> **Status: done for the continuous session, with a written-down tier 2.** The
+> reference matcher exists, it is independent, and a generated tape is compared
+> against its answer after every command.
 >
-> **Built.** Per-operation invariant checking on generated tapes (`checkInvariants`,
-> `pkg/matching/fuzz_test.go:13-27`: book never crossed, filled+remaining equals
-> quantity, remaining non-negative), driven by `FuzzEngine`, `FuzzExoticOrders` and
-> `TestSoak` (500,000 mixed ops). An independent L3 reconstruction compared against the
-> engine: `mirrorBook` (`pkg/matching/event_conformance_test.go:23-91`) rebuilds the
-> book from the event stream alone, and `TestEventStreamReconstructsBook` runs ~25
-> scenarios — all five STP modes, FOK both ways, post-only, iceberg refill and
-> exhaustion, OCO both legs, a stop cascade, pending-stop cancel, market and IOC
-> remainders, and the bust case. Sequence monotonicity is asserted inside that mirror.
-> Replay-equals-live and snapshot-restore-equals-uninterrupted
-> (`pkg/matching/digest_test.go:50`, `:63`). Random-tape differential testing exists —
-> but for the *derived feed*, not the matcher (`pkg/marketdata/feed_test.go:86`,
-> `l2feed_test.go:195`).
+> **Built.** [`internal/refmatch`](../internal/refmatch) — a deliberately slow
+> reference matcher, two sorted slices scanned linearly, written from the price-time
+> and order-type rules rather than from the engine, and mechanically prevented from
+> importing anything outside the standard library (`TestReferenceMatcherImportsNothing`).
+> [`internal/tape`](../internal/tape) — one generator for the whole repository, with a
+> deletion-closed command format and a delta-debugging shrinker that prints a shrunk
+> tape as a pasteable Go literal. `pkg/matching/differential_test.go` — the adapter and
+> `TestDifferentialTape`, which drives 3 profiles x 16 seeds (FIFO, pro-rata on a
+> non-zero shard, and a reachable book-size cap) and compares a whole
+> `refmatch.Observation` with `reflect.DeepEqual` after each of 2,240 commands: the
+> verdict as a mapped enum, the command's trades field by field, the resting book as a
+> RANKED L3 list, the L2 aggregate asymmetrically (the engine's maintained `TotalQty`
+> and `count` against the model's summed L3), order and trade ids exactly including the
+> shard field, the event stream as an ordered list, and the state, last trade price and
+> both next-id counters. Per-command snapshot-restore-equals-live on the generated path.
+> `FuzzDifferential` with a committed corpus and a nightly `-fuzz` job. Reflection
+> guards on both alphabets — every `Config` field classified, every `cmdKind` given a
+> tier, every modelled kind asserted GENERATED and every outcome asserted REACHED. The
+> `pkg/wal` boundary sweeps now draw from the same generator over a wider alphabet.
 >
-> **Missing.** *No reference matcher.* `pkg/orderbook` is not one — it is the
-> production book `pkg/matching` is built on. *No random tape is compared against
-> expected output*: trades, order ids, sequences, event streams, snapshots and replay
-> state are never checked against a model's answer on generated input. *Generated tapes
-> cover only limit/market/IOC/GTC/cancel and stop/iceberg/trailing* — pegged, OCO,
-> replace, reduce, pro-rata, auctions, halts, cancel-only, busts, DAY/GTD and STP are
-> hand-written scenarios only and are never generated. *The digest equivalence runs on
-> one fixed seven-command tape*, not after every command of a random one, which is what
-> the milestone asks for. *Four of the nine per-command assertions below are absent
-> from the generated path.* *`TestSoak` checks invariants every 50,000 ops of 500,000*,
-> so a violation that self-heals inside a window is invisible. *No fuzzing campaign in
-> CI* — the job is `go test -race ./...`, which runs the seed corpus and nothing more;
-> there is no `-fuzz` job and no committed corpus.
+> **Proven.** Twenty-one deliberate engine mutations (the eighteen of
+> [`REFERENCE-MATCHER.md`](REFERENCE-MATCHER.md) §7.1 plus three for the assertions
+> below) are **all caught**, every shrunk reproduction is **1 to 4 commands**, and the
+> twelve sabotage runs of §8 are recorded there including the two that did not behave
+> as the spec expected. Deleting the L2 comparison makes two mutations pass against a
+> broken engine; comparing the book as a set makes another pass. One seed catches 8 of
+> 18; the sweep catches 18 of 18.
+>
+> **Found.** Three engine defects, two of them predicted from the code before anything
+> was built: a rejected fill-or-kill still moves `LastTradePrice` (and therefore the
+> price collar); a self-trade-prevented maker can leave the book with the only
+> published event being the taker's `REJECTED`, which contradicts the event stream's
+> reconstruction claim; and pro-rata's skip-self rule rests a taker across the spread
+> and leaves the book crossed. All three are pinned by regression tests and none is
+> fixed here — see [`REFERENCE-MATCHER.md`](REFERENCE-MATCHER.md) §10.1.
+>
+> **Missing, and enumerated rather than implied.** DAY and GTD (a function of a clock,
+> the cheapest tier-2 item), stops, OCO, icebergs, pegged and trailing orders, the
+> auction uncross, and trade busts are **tier 2** — each with a written reason in the
+> `commandTier` table, and each a failing test the day a `cmdKind` is added without
+> one. Admission controls are never modelled and are held at their disabling values by
+> `TestHarnessConfigMatchesItsClassification`. `TestSoak` still checks invariants every
+> 50,000 ops of 500,000; a 500,000-op run with a per-op model comparison is a nightly
+> job and belongs with M13.
 
 Keep the optimized engine and add a deliberately simple reference matcher for testing.
 
@@ -871,14 +888,14 @@ Cover:
 Assert after every command:
 
 - ✅ no negative quantity — `checkInvariants`, on generated tapes
-- ❌ no duplicate order ID
+- ✅ no duplicate order ID — `runDiff`, on every generated tape; caught mutation 19 by name
 - ✅ no order in two states — filled+remaining equals quantity, `checkInvariants`
-- ❌ aggregate depth equals resting orders — the level-total invariant is pinned inside `pkg/orderbook` (`alloc_test.go:97-217`) from hand-written churn, never from an engine command tape
-- ❌ trade quantities balance
-- ✅ sequence is monotonic — inside `mirrorBook`, on hand-written scenarios
-- ✅ event stream reconstructs state — `TestEventStreamReconstructsBook`, on hand-written scenarios
-- ⚠️ replay equals live — proven exhaustively at every boundary of a 400-command tape (`pkg/wal/boundary_test.go:54`), but that tape is limit orders and cancels only
-- ❌ snapshot restore equals uninterrupted execution, *per command* — asserted once, on a seven-command fixture
+- ✅ aggregate depth equals resting orders — the engine's MAINTAINED `TotalQty`/`count` against the model's summed L3, after every command of a generated tape. Deleting this assertion makes two engine mutations pass (`REFERENCE-MATCHER.md` §10.3 row 2)
+- ✅ trade quantities balance — every print positive, and no order prints more in total than it was submitted for; caught mutation 21 by name
+- ✅ sequence is monotonic — `TestEventSequenceIsDenseAndMonotonic`, dense from 1 over a generated tape, plus `mirrorBook` on hand-written scenarios
+- ✅ event stream reconstructs state — `TestEventStreamReconstructsBook` on hand-written scenarios, and the ordered event list compared elementwise on every generated command. See `REFERENCE-MATCHER.md` §10.1(b): the generated path found a case where it does NOT
+- ✅ replay equals live — every boundary of a 400-command tape (`pkg/wal/boundary_test.go`), over the tier-1 alphabet plus reduce, replace, cancel-all and the control commands. This row was briefly marked ✅ while the recovery tape still drew nothing but GTC limit orders; `tape.Recovery` now carries the whole tier-1 payload and `TestRecoveryTapeSpeaksTheTierOneAlphabet` asserts it by outcome. See `REFERENCE-MATCHER.md` §3.5
+- ✅ snapshot restore equals uninterrupted execution, *per command* — two assertions, because the first alone was not the property. `restoreMatchesLive` compares the **restored engine's visible book** against the model after every command of the generated tape (a digest round-trip does not: it is blind to everything `LoadSnapshot` rebuilds, and a restore bug doubling every level aggregate passed all 23 packages). `TestSnapshotRestoreEqualsUninterruptedExecution` then restores at three fork points per tape and drives the **remainder** of the tape through the restored engine, comparing every observation — 48 subtests. See `REFERENCE-MATCHER.md` §3.3(c) and §3.5
 
 ---
 
@@ -1402,7 +1419,7 @@ being read.
 
 1. ✅ **Close the journal, and close the class.** `Runner.SetPhase` was a frozen public mutating command that runs an auction and was absent from `logCommand` — the third such escape after `Reduce` and `Halt`, each found by accident after shipping. The journal is now exhaustive *by construction*: every `cmdKind` is classified journalled-or-read-only, a read-only classification must leave `EngineSnapshot.Digest()` untouched, and every `wal.EntryKind` must have a replay arm. Spec and outcome: [`JOURNAL-COMPLETENESS.md`](JOURNAL-COMPLETENESS.md) (§8 for what it found, including two holes in the guard the spec itself specified). **Done.**
 2. **Export the sequence trio.** WAL written, last applied, last synced, plus commit mode and replica lag, as gauges from `cmd/obgw` and `examples/replication`. M2 and M4 both block on it, and [`REPLICATION.md`](REPLICATION.md) §4 already promises a graph that does not exist.
-3. **Build the reference matcher and the random-tape differential harness** (M9), including the four missing per-command invariants. This is the prerequisite for M11's structural experiments: choosing between a radix tree and a dense grid with only hand-written scenarios as an oracle is how a wrong book ships.
+3. ✅ **Build the reference matcher and the random-tape differential harness** (M9), including the four missing per-command invariants. `internal/refmatch` is an independent model, `internal/tape` is the one generator, and `TestDifferentialTape` compares a whole observation after every command of 2,240 generated commands. All four missing invariants are now asserted on the generated path — the fourth, snapshot-restore-equals-uninterrupted, needed two assertions rather than one, and adversarial review is what established that the version that shipped first was a digest round-trip blind to the state `LoadSnapshot` rebuilds. Twenty-one deliberate engine mutations are all caught, shrinking to 1-4 commands each; three engine defects were found doing it, and a fourth property (iceberg refill priority) turned out to be claimed rather than tested and now has a test. This unblocks M11 exactly as intended — the harness stays green across the pooling and price-container changes M11 will make, and red on every semantic one. Spec and outcome: [`REFERENCE-MATCHER.md`](REFERENCE-MATCHER.md) (§10 for what it found, including eleven places the spec was wrong about its own design, six of them found by review after the first implementation; §2.2 for the half of the independence rule that is *not* achieved). **Done for the continuous session; DAY/GTD, the exotics and the auction are tier 2, enumerated in the `commandTier` table.**
 4. **Add an independent reconciliation consumer** (M7), which needs a durable execution-report journal first — today the outbound stream is an in-memory ring.
 5. **Extract a seeded, serialisable command tape and a portable output digest** (M10), then the stage-attribution histograms. Only after that is the cross-language comparison reproducible.
 6. **Write the ADR set** (M0), seeded from [`SPEC.md`](SPEC.md) §6 plus the decisions already argued in [`BOUNDED-RECOVERY.md`](BOUNDED-RECOVERY.md), [`LOG-ROTATION.md`](LOG-ROTATION.md), [`REPLICATION.md`](REPLICATION.md) and [`TRADE-BUST.md`](TRADE-BUST.md). Parallel documentation work; it blocks nothing and is blocked by nothing.

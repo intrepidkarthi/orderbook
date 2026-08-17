@@ -5,116 +5,163 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/intrepidkarthi/orderbook/internal/tape"
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
 
-// tape is a deterministic pseudo-random command stream. It is generated from a
-// fixed seed rather than committed as a file so the generator itself is the
-// artefact under review, and it exercises order classes a hand-written tape does
-// not reach.
-type tapeCmd struct {
-	cancel   bool
-	cancelIx int
-	user     string
-	side     types.Side
-	price    int64
-	qty      int64
-	// setPhase makes this command a trading-phase transition rather than an order.
-	// The alphabet went without one for three releases, and docs/JOURNAL-COMPLETENESS.md
-	// §1 is about what that cost: every exhaustive property in this package was
-	// exhaustive over a tape that could not reach the command which escaped the
-	// journal.
-	setPhase bool
-	phase    matching.EngineState
-}
-
-// lcg is a tiny deterministic generator — math/rand's stream is not guaranteed
-// stable across Go releases, and a golden tape that changes under the test is
-// worse than no golden tape.
-type lcg uint64
-
-func (r *lcg) next() uint64 {
-	*r = lcg(uint64(*r)*6364136223846793005 + 1442695040888963407)
-	return uint64(*r) >> 11
-}
-
-func (r *lcg) intn(n int64) int64 { return int64(r.next() % uint64(n)) }
-
-// tapeSide maps 0/1 onto the Side constants. types.Side is a string, so a direct
-// conversion would produce a one-rune string rather than "BUY"/"SELL".
-func tapeSide(v int64) types.Side {
-	if v == 0 {
-		return types.SideBuy
-	}
-	return types.SideSell
-}
-
-// tapePhases are the phase transitions injected into every generated tape, by
-// command index. A session, in the order a venue runs one: the tape opens in
-// pre-open so the first orders accumulate into a legitimately crossed book, the
-// transition at 21 uncrosses it, the closing auction accumulates a second crossed
-// book on top of a live one, and the transition out of it prints the closing
-// uncross before continuous trading resumes.
+// The generator that used to live here — tapeCmd, lcg, tapeSide, tapePhases and
+// buildTape — now lives in internal/tape, and this package is a consumer.
 //
-// Fixed indices rather than generated ones, and all of them below 200, so every
-// caller of buildTape — the 2000-command recovery tape, the 400-command boundary
-// sweep and the 200-command snapshot-join sweep alike — runs the same session.
-var tapePhases = map[int]matching.EngineState{
-	0:   matching.StatePreOpen,
-	21:  matching.StateOpen,
-	120: matching.StateClosingAuction,
-	141: matching.StateOpen,
-}
-
-func buildTape(n int) []tapeCmd {
-	r := lcg(0x5EED1234)
-	out := make([]tapeCmd, 0, n)
-	for i := 0; i < n; i++ {
-		if p, ok := tapePhases[i]; ok {
-			out = append(out, tapeCmd{setPhase: true, phase: p})
-			continue
-		}
-		c := tapeCmd{
-			user:  fmt.Sprintf("u%d", r.intn(8)),
-			side:  tapeSide(r.intn(2)),
-			price: 95 + r.intn(11),
-			qty:   1 + r.intn(9),
-		}
-		// One command in six is a cancel of an earlier order.
-		if i > 20 && r.intn(6) == 0 {
-			c.cancel = true
-			c.cancelIx = int(r.intn(int64(i)))
-		}
-		out = append(out, c)
-	}
-	return out
-}
-
-// applyTapeCmd issues one tape command through a Runner, collecting the engine
-// ids it hands back so later cancels can name them.
+// It moved rather than being copied, and the reason is one this repository has
+// already paid for once. Two generators means two alphabets, means one of them is
+// extended and the other is not, means the sweep that claims to be the stronger test
+// is exercising less than the one it is supposed to dominate. The comment on the old
+// applyTapeCmd already said this; the move makes it structural, and the differential
+// harness in pkg/matching now draws from the same generator.
 //
-// It is one function rather than three copies because the tape's alphabet is now
+// The recovery alphabet is deliberately a SUPERSET of the differential one
+// (tape.Recovery vs tape.Differential): the replay oracle can check kinds the
+// reference model does not model, and narrowing this sweep because the model is
+// behind would be the exact trade docs/REFERENCE-MATCHER.md exists to argue against.
+//
+// "Superset" has two axes — the command KIND and the order PAYLOAD — and this sweep
+// shipped satisfying only the first. See tape.Recovery's comment for the measurement.
+// walOrder below now carries the whole tier-1 payload onto the journal, and
+// TestRecoveryTapeSpeaksTheTierOneAlphabet asserts it by outcome rather than by draw.
+
+// recoveryTape is the boundary sweeps' input: one alphabet, one seed, whatever
+// length the caller needs.
+func recoveryTape(n int) []tape.Cmd { return tape.Gen(tape.Recovery, 0x5EED1234, n) }
+
+// walPhase maps the tape's own phase enum onto the engine's. The tape may not import
+// pkg/matching — it is shared with a reference model that must stay independent of
+// it — so the translation lives at each consumer, and this is pkg/wal's.
+func walPhase(p tape.Phase) matching.EngineState {
+	switch p {
+	case tape.PhasePreOpen:
+		return matching.StatePreOpen
+	case tape.PhaseClosingAuction:
+		return matching.StateClosingAuction
+	case tape.PhaseHalted:
+		return matching.StateHalted
+	case tape.PhaseCancelOnly:
+		return matching.StateCancelOnly
+	case tape.PhaseClosed:
+		return matching.StateClosed
+	default:
+		return matching.StateOpen
+	}
+}
+
+// walOrder builds the order a Submit or Replace command carries.
+func walOrder(t *testing.T, c tape.Cmd) *types.Order {
+	t.Helper()
+	side := types.SideBuy
+	if c.Sell {
+		side = types.SideSell
+	}
+	ot := types.OrderTypeLimit
+	if c.MarketOrd {
+		ot = types.OrderTypeMarket
+	}
+	tif := types.TIFGoodTillCancel
+	switch c.TIF {
+	case 1:
+		tif = types.TIFImmediateOrCancel
+	case 2:
+		tif = types.TIFFillOrKill
+	}
+	o, err := types.NewOrder(c.User, "X", side, ot, c.Price, c.Qty, tif)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	o.PostOnly = c.PostOnly
+	// The rest of the tier-1 payload. These three decide whether self-trade
+	// prevention fires at all (STPMode), whether it fires ACROSS accounts
+	// (TradeGroupID), and whether it is bypassed (Privileged) — so a boundary sweep
+	// that dropped them, as this one silently did, never replays an STP-cancelled
+	// maker across a crash. Each has a json tag on types.Order, so each survives the
+	// journal; a field that did not would fail this sweep at the first boundary,
+	// which is the point.
+	o.TradeGroupID = c.TradeGroup
+	o.Privileged = c.Privileged
+	switch c.STP {
+	case 1:
+		o.STPMode = string(matching.STPCancelNewest)
+	case 2:
+		o.STPMode = string(matching.STPCancelOldest)
+	case 3:
+		o.STPMode = string(matching.STPCancelBoth)
+	case 4:
+		o.STPMode = string(matching.STPDecrement)
+	case 5:
+		o.STPMode = string(matching.STPAllow)
+	case 0:
+	default:
+		// No catch-all. An unmapped mode arriving as "venue default" would turn this
+		// half of the sweep off for exactly the orders it was widened for.
+		t.Fatalf("tape drew STP mode %d, which pkg/wal's driver does not map", c.STP)
+	}
+	// One client id per tape POSITION, so the duplicate guard sees a fresh key for
+	// every submit and a replay of the same tape sees the same keys in the same
+	// order.
+	o.ClientOrderID = fmt.Sprintf("c%d", c.Pos)
+	return o
+}
+
+// applyTapeCmd issues one tape command through a Runner, remembering the engine id
+// each submit was given so a later command can name it by tape POSITION.
+//
+// Position, not "index into the ids collected so far", which is what the superseded
+// generator used. That difference is what makes a tape deletion-closed: deleting a
+// submit leaves later commands naming a position that produced no order, which is a
+// well-formed command with a predictable rejection, instead of silently retargeting
+// every later cancel onto a different order.
+//
+// It is one function rather than four copies because the tape's alphabet is
 // something that grows: a command kind the drivers disagree about is a boundary
 // sweep that exercises less than the recovery test it is supposed to be stronger
 // than.
-func applyTapeCmd(t *testing.T, r *matching.Runner, c tapeCmd, i int, ids *[]int64) {
+func applyTapeCmd(t *testing.T, r *matching.Runner, c tape.Cmd, ids map[int]int64) {
 	t.Helper()
-	switch {
-	case c.setPhase:
-		r.SetPhase(c.phase)
-	case c.cancel && len(*ids) > 0:
-		_, _ = r.Cancel((*ids)[c.cancelIx%len(*ids)], c.user)
-	default:
-		o, err := types.NewOrder(c.user, "X", c.side, types.OrderTypeLimit, c.price, c.qty, types.TIFGoodTillCancel)
-		if err != nil {
-			t.Fatalf("NewOrder: %v", err)
+	switch c.Kind {
+	case tape.SetPhase:
+		r.SetPhase(walPhase(c.Phase))
+	case tape.Halt:
+		r.Halt()
+	case tape.Resume:
+		r.Resume()
+	case tape.CancelOnly:
+		r.SetCancelOnly()
+	case tape.CancelAll:
+		if _, err := r.CancelAllForUser(c.User); err != nil {
+			t.Fatalf("CancelAllForUser: %v", err)
 		}
-		o.ClientOrderID = fmt.Sprintf("c%d", i)
+	case tape.Cancel:
+		_, _ = r.Cancel(ids[c.Target], c.User)
+	case tape.Reduce:
+		_, _ = r.Reduce(ids[c.Target], c.NewQty, c.User)
+	case tape.Replace:
+		repl := walOrder(t, c)
+		ch, err := r.TryReplaceAsync(ids[c.Target], c.User, repl)
+		if err != nil {
+			t.Fatalf("TryReplaceAsync: %v", err)
+		}
+		<-ch
+		// Zero when the original could not be cancelled, in which case the
+		// replacement was never submitted and consumed no id.
+		if repl.ID != 0 {
+			ids[c.Pos] = repl.ID
+		}
+	case tape.Submit:
+		o := walOrder(t, c)
 		res := r.Process(o)
 		if res != nil && res.Order != nil {
-			*ids = append(*ids, res.Order.ID)
+			ids[c.Pos] = res.Order.ID
 		}
+	default:
+		t.Fatalf("no pkg/wal driver for tape kind %s", c.Kind)
 	}
 }
 
@@ -140,7 +187,7 @@ func tapeCfg() matching.Config {
 
 // runTape drives the tape through a Runner backed by a real WAL, checkpointing at
 // checkpointAt (0 => never). It returns the final digest.
-func runTape(t *testing.T, dir string, tape []tapeCmd, checkpointAt int) string {
+func runTape(t *testing.T, dir string, cmds []tape.Cmd, checkpointAt int) string {
 	t.Helper()
 	walPath := filepath.Join(dir, "wal.log")
 	snapPath := filepath.Join(dir, "snap.json")
@@ -151,9 +198,9 @@ func runTape(t *testing.T, dir string, tape []tapeCmd, checkpointAt int) string 
 	}
 	r := matching.NewRunner(matching.RunnerConfig{Engine: tapeCfg(), QueueSize: 4096, Log: w})
 
-	ids := make([]int64, 0, len(tape))
-	for i, c := range tape {
-		applyTapeCmd(t, r, c, i, &ids)
+	ids := make(map[int]int64, len(cmds))
+	for i, c := range cmds {
+		applyTapeCmd(t, r, c, ids)
 		if checkpointAt > 0 && i == checkpointAt {
 			snap, err := r.Checkpoint()
 			if err != nil {
@@ -187,12 +234,12 @@ func digestRunner(t *testing.T, r *matching.Runner) string {
 // orders CI used to gate determinism on: interrupt anywhere, rebuild from
 // snapshot plus log tail, and land on a byte-identical engine.
 func TestCrashRecoveryMatchesUninterrupted(t *testing.T) {
-	tape := buildTape(2000)
+	cmds := recoveryTape(2000)
 
 	for _, checkpointAt := range []int{0, 1, 500, 1337, 1999} {
 		t.Run(fmt.Sprintf("checkpoint@%d", checkpointAt), func(t *testing.T) {
 			dir := t.TempDir()
-			want := runTape(t, dir, tape, checkpointAt)
+			want := runTape(t, dir, cmds, checkpointAt)
 
 			got, err := Recover(tapeCfg(), filepath.Join(dir, "snap.json"), filepath.Join(dir, "wal.log"))
 			if err != nil {
@@ -205,10 +252,12 @@ func TestCrashRecoveryMatchesUninterrupted(t *testing.T) {
 	}
 }
 
-// TestTapeIsDeterministic guards the generator: if the tape drifts between runs,
-// every assertion above becomes meaningless.
+// TestTapeIsDeterministic guards the generator FROM THIS PACKAGE'S SIDE: if the tape
+// drifts between runs, every assertion above becomes meaningless. internal/tape has
+// its own version of this; the duplication is deliberate, because the thing at risk
+// is the tape pkg/wal actually drives, not the generator in the abstract.
 func TestTapeIsDeterministic(t *testing.T) {
-	a, b := buildTape(500), buildTape(500)
+	a, b := recoveryTape(500), recoveryTape(500)
 	for i := range a {
 		if a[i] != b[i] {
 			t.Fatalf("tape diverged at %d: %+v vs %+v", i, a[i], b[i])

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/intrepidkarthi/orderbook/internal/tape"
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
@@ -40,41 +41,46 @@ import (
 // Uncross as the likeliest place for the uncross to turn out non-deterministic on
 // replay — it stamps a wall-clock UpdatedAt on the victim — so the tape reaches it
 // rather than leaving the prediction untested.
-func auctionTape() []tapeCmd {
-	buy := func(user string, price, qty int64) tapeCmd {
-		return tapeCmd{user: user, side: types.SideBuy, price: price, qty: qty}
+func auctionTape() []tape.Cmd {
+	var out []tape.Cmd
+	add := func(c tape.Cmd) {
+		c.Pos = len(out)
+		out = append(out, c)
 	}
-	sell := func(user string, price, qty int64) tapeCmd {
-		return tapeCmd{user: user, side: types.SideSell, price: price, qty: qty}
+	buy := func(user string, price, qty int64) {
+		add(tape.Cmd{Kind: tape.Submit, User: user, Price: price, Qty: qty})
 	}
-	phase := func(p matching.EngineState) tapeCmd {
-		return tapeCmd{setPhase: true, phase: p}
+	sell := func(user string, price, qty int64) {
+		add(tape.Cmd{Kind: tape.Submit, User: user, Sell: true, Price: price, Qty: qty})
 	}
-	return []tapeCmd{
-		phase(matching.StatePreOpen),
-		buy("alice", 105, 6),
-		sell("bob", 98, 4),
-		buy("carol", 103, 5),
-		sell("dave", 99, 7),
-		buy("erin", 101, 3),
-		sell("frank", 100, 2),
-		buy("self", 104, 2),
-		sell("self", 97, 2),
-		phase(matching.StateOpen), // the opening uncross prints here
-		sell("bob", 102, 5),
-		buy("alice", 102, 5), // continuous, on the uncrossed book
-		{cancel: true, cancelIx: 2, user: "carol"},
-		buy("carol", 96, 4),
-		phase(matching.StateClosingAuction),
-		buy("dave", 108, 3),
-		sell("erin", 94, 3),
-		buy("frank", 107, 2),
-		phase(matching.StateClosed), // the closing uncross prints here
-		buy("alice", 100, 1),        // refused after the close, and journalled anyway
-		phase(matching.StatePreOpen),
-		sell("bob", 99, 2),
-		phase(matching.StateOpen),
-	}
+	phase := func(p tape.Phase) { add(tape.Cmd{Kind: tape.SetPhase, Phase: p}) }
+
+	phase(tape.PhasePreOpen)
+	buy("alice", 105, 6)
+	sell("bob", 98, 4)
+	buy("carol", 103, 5) // position 3, cancelled below
+	sell("dave", 99, 7)
+	buy("erin", 101, 3)
+	sell("frank", 100, 2)
+	buy("self", 104, 2)
+	sell("self", 97, 2)
+	phase(tape.PhaseOpen) // the opening uncross prints here
+	sell("bob", 102, 5)
+	buy("alice", 102, 5) // continuous, on the uncrossed book
+	// Named by the POSITION of the submit that created it, so deleting that submit
+	// would leave this cancelling a known-absent id rather than silently retargeting.
+	add(tape.Cmd{Kind: tape.Cancel, User: "carol", Target: 3})
+	buy("carol", 96, 4)
+	phase(tape.PhaseClosingAuction)
+	buy("dave", 108, 3)
+	sell("erin", 94, 3)
+	buy("frank", 107, 2)
+	phase(tape.PhaseClosed) // the closing uncross prints here
+	buy("alice", 100, 1)    // refused after the close, and journalled anyway
+	phase(tape.PhasePreOpen)
+	sell("bob", 99, 2)
+	phase(tape.PhaseOpen)
+	return out
 }
 
 // TestCrashAcrossAnAuction is deliverable 4 of docs/JOURNAL-COMPLETENESS.md, and it
@@ -87,8 +93,8 @@ func auctionTape() []tapeCmd {
 // the log holds four fewer records than the tape has commands, because four
 // SetPhase commands were applied and never written down.
 func TestCrashAcrossAnAuction(t *testing.T) {
-	tape := auctionTape()
-	n := len(tape)
+	cmds := auctionTape()
+	n := len(cmds)
 
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal.log")
@@ -106,9 +112,9 @@ func TestCrashAcrossAnAuction(t *testing.T) {
 	wantPrints := make([]int, n+1)
 	wantDigest[0] = digestRunner(t, r)
 
-	var ids []int64
-	for i, c := range tape {
-		applyTapeCmd(t, r, c, i, &ids)
+	ids := make(map[int]int64, len(cmds))
+	for i, c := range cmds {
+		applyTapeCmd(t, r, c, ids)
 		wantDigest[i+1] = digestRunner(t, r)
 		wantPrints[i+1] = len(live.prints)
 	}

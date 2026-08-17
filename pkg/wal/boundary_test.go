@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/intrepidkarthi/orderbook/internal/tape"
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
+	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
 
 // tapeSink records the trade tape as the engine emits it. Only trades: this is
@@ -50,6 +52,159 @@ func countAuctionPrints(prints []string) int {
 	return n
 }
 
+// reasonSink records every rejection reason the venue published and every order id
+// that appeared on a print, so a guard can assert what the tape REACHED rather than
+// what it drew.
+type reasonSink struct {
+	reasons map[string]int
+	printed map[int64]bool
+}
+
+func (s *reasonSink) OnEvents(evs []matching.Event) {
+	if s.reasons == nil {
+		s.reasons = map[string]int{}
+		s.printed = map[int64]bool{}
+	}
+	for _, e := range evs {
+		switch {
+		case e.Kind == matching.EventRejected && e.Reason != nil:
+			s.reasons[e.Reason.Error()]++
+		case e.Kind == matching.EventTrade && e.Trade != nil:
+			s.printed[e.Trade.BuyOrderID] = true
+			s.printed[e.Trade.SellOrderID] = true
+		}
+	}
+}
+
+// TestRecoveryTapeSpeaksTheTierOneAlphabet is the guard that would have caught the
+// hole this test file shipped with, and it is the reason the hole is worth writing
+// down rather than quietly patching.
+//
+// tape.Recovery's comment claimed the profile was "deliberately a SUPERSET of
+// Differential". It set Exotic:false, which made that true on the command-KIND axis
+// (it adds SetPhase) and false on the order-PAYLOAD axis: measured on this exact
+// 400-command tape, 287 submits, every one a plain GTC limit — no market orders, no
+// IOC, no FOK, no post-only, no per-order STP, no trade groups, no privileged
+// orders. So the replay oracle never crossed a crash boundary carrying a rejected
+// FOK's reversed prints or an STP-cancelled maker: the two paths
+// docs/REFERENCE-MATCHER.md §9 named IN ADVANCE as defect-bearing, and the two the
+// differential harness then confirmed as live defects.
+//
+// Every assertion in the file passed throughout, because they count prints, auction
+// prints and depth — none of which move if every submit is a plain limit. That is
+// docs/JOURNAL-COMPLETENESS.md §1 exactly: an exhaustive check over an incomplete
+// alphabet reporting completeness, in the sweep written to apply that lesson.
+//
+// So the alphabet is asserted here by OUTCOME wherever an outcome is observable
+// from outside — a rejection reason a consumer was actually told — and by draw only
+// where it is not. The two are labelled, because "drawn" and "reached" is the
+// distinction the reduce incident in internal/tape cost a round to learn.
+func TestRecoveryTapeSpeaksTheTierOneAlphabet(t *testing.T) {
+	const n = 400
+	cmds := recoveryTape(n)
+
+	// --- the draw axis --------------------------------------------------------
+	drawn := map[string]int{}
+	stpModes := map[uint8]int{}
+	for _, c := range cmds {
+		if c.Kind != tape.Submit && c.Kind != tape.Replace {
+			continue
+		}
+		if c.MarketOrd {
+			drawn["market"]++
+		}
+		if c.PostOnly {
+			drawn["post-only"]++
+		}
+		switch c.TIF {
+		case 1:
+			drawn["ioc"]++
+		case 2:
+			drawn["fok"]++
+		}
+		if c.STP != 0 {
+			drawn["stp-mode"]++
+			stpModes[c.STP]++
+		}
+		if c.TradeGroup != 0 {
+			drawn["trade-group"]++
+		}
+		if c.Privileged {
+			drawn["privileged"]++
+		}
+	}
+	for _, what := range []string{"market", "post-only", "ioc", "fok", "stp-mode", "trade-group", "privileged"} {
+		if drawn[what] == 0 {
+			t.Errorf("the recovery tape draws %s zero times, so the crash-boundary sweep never replays one. "+
+				"tape.Recovery claims to be a superset of tape.Differential; on the order-payload axis it is not", what)
+		}
+	}
+	// All five per-order modes, not just the ones that happen to be common: STP is
+	// where this engine is most likely to be self-consistently wrong, and a sweep
+	// carrying three of five modes still looks like a sweep over STP.
+	for mode := uint8(1); mode <= 5; mode++ {
+		if stpModes[mode] == 0 {
+			t.Errorf("no order on the recovery tape carries per-order STP mode %d", mode)
+		}
+	}
+
+	// --- the outcome axis -----------------------------------------------------
+	dir := t.TempDir()
+	w, err := Open(filepath.Join(dir, "wal.log"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	sink := &reasonSink{}
+	cfg := tapeCfg()
+	cfg.EventSink = sink
+	r := matching.NewRunner(matching.RunnerConfig{Engine: cfg, QueueSize: 64, Log: w})
+	ids := make(map[int]int64, len(cmds))
+	for _, c := range cmds {
+		applyTapeCmd(t, r, c, ids)
+	}
+	r.Close()
+	if err := w.Close(); err != nil {
+		t.Fatalf("wal Close: %v", err)
+	}
+
+	// Each of these is a distinct settleInto branch, and each is a branch the sweep
+	// could not reach at all before this tape carried the payload for it.
+	for _, want := range []error{
+		types.ErrFOKCannotFill,
+		types.ErrPostOnlyWouldCross,
+	} {
+		if sink.reasons[want.Error()] == 0 {
+			t.Errorf("no command on the recovery tape was refused with %q, so the crash-boundary sweep "+
+				"never carries that path across a boundary", want)
+		}
+	}
+	// Reachable in principle, NOT reached by this tape, listed rather than omitted
+	// so the two sets together account for the whole tier-1 rejection enum — the
+	// same idiom as TestDifferentialSweepReachesEveryOutcome. A reason that quietly
+	// moves between the lists is a change somebody has to make deliberately.
+	//
+	// types.ErrMarketOrderNoLiquidity needs a market order to arrive at an EMPTY
+	// opposite side. This tape keeps a peak resting depth in the thirties, so its
+	// market orders always find a counterparty. Rather than assert a rejection that
+	// does not happen, the market-order path is asserted by the outcome it DOES
+	// reach: at least one market order printed.
+	var marketPrinted int
+	for _, c := range cmds {
+		if !c.MarketOrd {
+			continue
+		}
+		if id, ok := ids[c.Pos]; ok && sink.printed[id] {
+			marketPrinted++
+		}
+	}
+	if marketPrinted == 0 {
+		t.Errorf("the recovery tape drew %d market orders and not one of them printed, so the market-order "+
+			"branch of the walk is drawn but never reached", drawn["market"])
+	}
+	t.Logf("recovery tape reached: %v (%d market orders printed)", sink.reasons, marketPrinted)
+	t.Logf("recovery tape drew: %v (stp modes %v)", drawn, stpModes)
+}
+
 // TestCrashAtEveryBoundary is the test a reader on r/highfreqtrading proposed
 // when the recovery design came up, phrased almost exactly this way: kill the
 // process at every write and emit boundary, then check that the replayed book
@@ -75,7 +230,7 @@ func TestCrashAtEveryBoundary(t *testing.T) {
 	// Every boundary means O(n²) applies, so n is chosen to keep this a test
 	// people will actually run rather than a nightly job they will not.
 	const n = 400
-	tape := buildTape(n)
+	cmds := recoveryTape(n)
 
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal.log")
@@ -95,9 +250,13 @@ func TestCrashAtEveryBoundary(t *testing.T) {
 	wantDigest[0] = digestRunner(t, r)
 	wantPrints[0] = 0
 
-	var ids []int64
-	for i, c := range tape {
-		applyTapeCmd(t, r, c, i, &ids)
+	ids := make(map[int]int64, len(cmds))
+	peakResting := 0
+	for i, c := range cmds {
+		applyTapeCmd(t, r, c, ids)
+		if d := r.OrderCount(); d > peakResting {
+			peakResting = d
+		}
 		wantDigest[i+1] = digestRunner(t, r)
 		wantPrints[i+1] = len(live.prints)
 	}
@@ -121,6 +280,27 @@ func TestCrashAtEveryBoundary(t *testing.T) {
 	}
 	if live.auctionPrints() == 0 {
 		t.Fatal("the tape ran no auction, so this sweep is back to the alphabet docs/JOURNAL-COMPLETENESS.md §1 diagnosed")
+	}
+	// Floors, not just non-zero.
+	//
+	// When the recovery alphabet was widened to the shared internal/tape generator,
+	// the sweep got WIDER and thinner at the same time: cancel-all, halt and
+	// cancel-only refuse or remove exactly the liquidity the sweep is comparing, and
+	// the measured effect on this 400-command tape was continuous prints 202 -> 117
+	// and peak resting depth 72 -> 45, against a gain of 11 -> 16 auction prints and
+	// five command kinds the old tape could not reach at all. That trade is
+	// deliberate and it is recorded here as numbers, so the NEXT alphabet change has
+	// to argue a number down rather than quietly hollow the sweep out while every
+	// assertion still passes. A bare "> 0" would not have noticed.
+	if got := len(live.prints); got < 100 {
+		t.Fatalf("the tape produced only %d prints; the trade-tape half of this sweep is being hollowed out", got)
+	}
+	if got := live.auctionPrints(); got < 10 {
+		t.Fatalf("the tape produced only %d auction prints, so the uncross is barely swept", got)
+	}
+	if peakResting < 30 {
+		t.Fatalf("the book never held more than %d resting orders; a sweep over a near-empty book compares "+
+			"a near-empty book", peakResting)
 	}
 
 	// --- crash at every boundary --------------------------------------------
@@ -162,7 +342,7 @@ func TestCrashAtEveryBoundary(t *testing.T) {
 // surprised.
 func TestCrashAtEveryBoundaryWithSnapshot(t *testing.T) {
 	const n = 200
-	tape := buildTape(n)
+	cmds := recoveryTape(n)
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal.log")
 	snapPath := filepath.Join(dir, "snap.json")
@@ -182,9 +362,9 @@ func TestCrashAtEveryBoundaryWithSnapshot(t *testing.T) {
 	wantPrints := make([]int, n+1)
 	wantDigest[0] = digestRunner(t, r)
 
-	var ids []int64
-	for i, c := range tape {
-		applyTapeCmd(t, r, c, i, &ids)
+	ids := make(map[int]int64, len(cmds))
+	for i, c := range cmds {
+		applyTapeCmd(t, r, c, ids)
 		if i == snapAt {
 			snap, err := r.Checkpoint()
 			if err != nil {
