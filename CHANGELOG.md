@@ -90,31 +90,125 @@ versions may include breaking changes).
 
 ### Fixed
 
-- Nothing. Three engine defects were found and **none is fixed in this slice** — each
-  is a matching-semantics or event-stream change with consequences past the matcher,
-  and this repository specs before it codes. All three are pinned by named regression
-  tests that say what a fix has to change:
+- **A rejected fill-or-kill no longer moves `LastTradePrice`.** The three defects the
+  reference matcher found were pinned rather than repaired, because each had more than
+  one defensible answer; [DIFFERENTIAL-FINDINGS.md](docs/DIFFERENTIAL-FINDINGS.md) is
+  the document that picked between them, and this is the first of the three.
 
-  - **A rejected fill-or-kill still moves `LastTradePrice`.** `match` records the last
-    price before `settleInto` unwinds the prints, and nothing puts it back. Since the
-    last trade price is the price collar's reference when no mark is set, an order that
-    never traded can move the band that admits the next one.
-    `TestRejectedFOKStillMovesTheLastTradePrice`.
-  - **A self-trade-prevented maker can leave the book with no event announcing it.** A
-    fill-or-kill taker under CANCEL_OLDEST removes a resting maker mid-walk, fails to
-    fill, and is rejected; the rejection drops the pending events, and the reversal
-    restores only makers that actually traded. The book loses an order and the only
-    thing published is the taker's REJECTED. That contradicts the event stream's
-    documented reconstruction claim, which holds for every hand-written scenario and
-    not for this combination. `TestSTPCancelledMakerVanishesWithNoEvent`.
-  - **Pro-rata can leave the book crossed.** Pro-rata SKIPS a taker's own liquidity
-    instead of STP-cancelling the taker, so a taker whose only counterparty at the
-    touch is its own resting order falls out of the walk and rests across the spread.
-    Two commands reproduce it, and the crossed state persists — on one sweep seed the
-    skipped order left and the touch became a crossing between two unrelated accounts.
-    `TestProRataSelfSkipCrossesTheBook`.
+  `match` recorded the last price from the final print, `settleInto`'s fill-or-kill
+  branch then reversed every one of those prints, and nothing put the price back. The
+  rule now stated in `recordLast`'s doc comment is that **`LastTradePrice` is the price
+  of the last trade this venue PUBLISHED** — every consumer of it wants that reading
+  (the collar's reference when no mark is set, stop and trailing-stop triggering, the
+  band-tick depth window, the "last" a subscriber prints, the mid fallback in
+  `pkg/study` / `pkg/sim` / `pkg/backtest`) and none wants "a price at which a match was
+  attempted and undone". An IOC's partials are published and stand; a busted print was
+  published and stands; a reversed fill-or-kill print reached no sink, no
+  `MatchResult`, no book and no journal, so `settleInto` restores the pre-match value
+  alongside `reverseTrade`.
+
+  **This is a behaviour change and the two consequences are visible from outside.**
+  *Stops that used to fire no longer fire*: with a stop resting at trigger 100 and
+  nothing ever traded, the rejected order's phantom price fired it and really printed 2
+  lots at 100 between two accounts that had not sent the rejected order. *A collar that
+  used to be armed by a rejected order is no longer armed by it*: with `PriceBand` at
+  10% and nothing ever traded, one rejected fill-or-kill armed the band and it then
+  refused an unrelated buy at 150.
+
+  `tradeSeq` is still burned, deliberately: an id is a **name**, and a counter that
+  goes backwards can name two prints once; a price is a **datum**, and restoring it
+  makes it correct again. The capture is in `settleInto` and not in `Match` because
+  `cascadeStops` re-enters `settleInto`, and a fill-or-kill fired as a stop must
+  restore the reference its own walk started from —
+  `TestNestedFOKRestoresItsOwnWalksReference` is what distinguishes the two placements,
+  and it is hand-written because stops are tier 2 and no generated tape reaches one.
+  `TestRejectedFOKStillMovesTheLastTradePrice` (inverted, keeping its name),
+  `TestRejectedFOKDoesNotFireAStop`, `TestRejectedFOKDoesNotMoveTheBand`.
 
 ### Changed
+
+- **A journal written by an earlier build replays into a different book under this
+  one, and nothing on disk says so.** All three changes below alter what matching does
+  with the same input, so a log recorded before them and recovered after them produces
+  state that never existed on the venue that wrote it. Pro-rata is the widest: a taker
+  that used to rest across the spread is now cancelled, so every command after it
+  replays against a book that differs from the one the live venue had.
+
+  Neither `wal.Entry` nor `EngineSnapshot` carries an engine version, so recovery
+  cannot detect this and refuse — it will replay the log and start, and the book will
+  be wrong in a way nothing downstream flags. **Before upgrading, take a checkpoint and
+  archive the log it covers.** Recovering across the boundary means recovering from a
+  snapshot written by the old build, which is a book that build agreed with, rather
+  than replaying its commands through this one.
+
+  Stamping a version into both is the fix and is not done here; it is a format change
+  and belongs with the other one M3 still owes.
+
+- **A `REJECTED` command's event batch may now carry further events, and a consumer
+  must apply them.** `EventSink` consumers — `cmd/obgw`, `pkg/marketdata` and anything
+  built on the interface — could reasonably have assumed a rejected command publishes
+  exactly one `REJECTED`, because that was true of every command this engine had ever
+  processed. It is no longer true: a `REJECTED` may be followed by `CANCELED`,
+  `REPLACED`, `ACCEPTED` and `TRIGGERED`.
+
+  The rule is that **a rejection drops only the events describing state the engine
+  actually undid**. The only place that undoes anything is `settleInto`'s fill-or-kill
+  branch, which now removes its own reversed `EventTrade` entries from the pending
+  batch; `emitResult` no longer clears the batch wholesale. A reversed print still
+  reaches nobody, which is unchanged and correct.
+
+  What that repairs: a fill-or-kill taker under `CANCEL_OLDEST` or `CANCEL_BOTH`
+  removed a resting maker mid-walk, failed to fill, and was rejected — and the book
+  lost an order with nothing on the stream to say so, so every consumer rebuilding L3
+  from the stream kept a phantom resting order forever. `DECREMENT` did the same, and
+  also mutated the taker of an order that ends REJECTED. An OCO stop leg destroyed by a
+  stranger's rejected fill-or-kill was equally silent. The maker is **not** restored,
+  and that was decided on a measurement rather than a principle: restoring is not
+  composable with the other four non-trade mutations the walk makes, one of which
+  already leaves an iceberg with a negative `FilledQty`, and it would tell an account
+  its `CANCEL_BOTH` had been withdrawn because of an unrelated liquidity condition.
+
+  `EventKind`'s reconstruction claim is narrowed to what is actually proven and its
+  citation moves from a hand-written scenario list to a generated-path check:
+  `TestDifferentialTape` now rebuilds a book from the event stream alone and compares
+  it against the engine's own after **every one of 2,240 commands**, which is the
+  assertion that catches this class without anyone predicting it. `internal/wire`'s
+  `LeavesQty` justification survives and cites the same check.
+  `TestSTPCancelledMakerVanishesWithNoEvent` (inverted, keeping every assertion it
+  had), `TestRejectedFOKAnnouncesTheDecrementedMaker`,
+  `TestRejectedFOKAnnouncesAStandingCancellation`, and three fill-or-kill × STP
+  scenarios added to `TestEventStreamReconstructsBook`.
+
+- **Under `ProRata`, a taker that meets its own resting liquidity is no longer
+  skipped: self-trade prevention decides, and the verdict changes.** With the default
+  `CANCEL_NEWEST` a taker that used to rest is now cancelled. The five outcomes at a
+  level whose remaining liquidity is all the taker's own: `CANCEL_NEWEST` cancels the
+  taker and ends the walk; `CANCEL_OLDEST` removes the maker, publishes its `CANCELED`
+  and re-allocates what is left at the level; `CANCEL_BOTH` does both and ends the
+  walk; `DECREMENT` shrinks both by their overlap, publishes `REPLACED` or `CANCELED`,
+  and continues; `ALLOW` includes the order in the allocation and trades with it.
+
+  `matchProRata` never called `takerSTP` at all, so **all five modes** left the taker's
+  remainder resting across the spread — bid 100 / ask 99 on a continuous book. A venue
+  configured `ALLOW` did not get the self-trade it had asked for and one configured
+  `CANCEL_BOTH` cancelled neither order, which means pro-rata was silently overriding
+  the venue's self-trade-prevention configuration. It also declined unrelated accounts'
+  liquidity on the way: a taker bidding 100 with a stranger offering 5 at 100 printed
+  nothing, because the walk ended at the taker's own order at 99 instead of resolving
+  it.
+
+  The allocation arithmetic is untouched, and in every case where the taker's own
+  liquidity is not needed the fills are byte-for-byte what they were. The rule is
+  written as prose in [REFERENCE-MATCHER.md](docs/REFERENCE-MATCHER.md) §2.3, which
+  `internal/refmatch` implements — the paragraph is the artefact under review, not the
+  loop. On the committed differential sweep the pro-rata profile was in a crossed state
+  after 107 of its 700 commands and is now 0; its prints rose 77 → 82 and its
+  cancellations 71 → 79. The `crossingIsExpected` narrowing that let that profile run a
+  weaker crossed-book assertion is **deleted**, so `checkInvariants` now runs at full
+  strength on every profile. `TestProRataSelfSkipCrossesTheBook` (inverted, keeping its
+  name), `TestProRata_STPModeDecides`,
+  `TestProRata_ReachesUnrelatedLiquidityUnderCancelOldest`,
+  `TestProRata_MixedLevelTradesEligibleBeforeSTPFires`.
 
 - **The crash-boundary sweeps now drive a wider alphabet**, from the shared generator:
   reduce, replace, cancel-all, halt and cancel-only at every boundary, none of which
