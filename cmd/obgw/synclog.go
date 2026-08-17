@@ -102,3 +102,12 @@ func (s *syncingLog) AppendSetMark(price int64) (int64, error) {
 func (s *syncingLog) AppendBust(tradeID int64, reason string) (int64, error) {
 	return s.sync(s.w.AppendBust(tradeID, reason))
 }
+
+// AppendSetPhase syncs for the same reason the rest do, and with the sharpest
+// version of the argument: a lost phase transition is not one missing command but
+// an entire auction, and it is not recoverable by inspection either — the book
+// comes back crossed, with prints on subscribers' tapes that the venue's own log
+// has no record of.
+func (s *syncingLog) AppendSetPhase(phase matching.EngineState) (int64, error) {
+	return s.sync(s.w.AppendSetPhase(phase))
+}

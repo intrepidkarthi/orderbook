@@ -99,6 +99,29 @@ const (
 	KindCancelOnly // a SetCancelOnly()
 	KindSetMark    // a SetMarkPrice(price)
 	KindBust       // a Bust(tradeID, reason)
+
+	// KindSetPhase records a Runner.SetPhase transition — the opening or closing
+	// uncross, and the trading phase the venue moves into.
+	//
+	// The third control command to be applied and never written down, after
+	// Reduce and Halt, and the most expensive of the three: the transition runs an
+	// auction, so losing it does not merely restore the wrong enum, it makes the
+	// replayed venue print trades that never happened (a lost move INTO pre-open
+	// matches orders the live venue rested) or lose trades subscribers already
+	// received (a lost move OUT of it skips the uncross). See
+	// docs/JOURNAL-COMPLETENESS.md §3.
+	KindSetPhase // a SetPhase(phase)
+
+	// entryKindCount is a sentinel: keep it last, and unexported so it never
+	// reaches disk and stays off the frozen surface.
+	//
+	// It exists so TestEveryEntryKindReplays can ENUMERATE this block. Journalled
+	// is not the same as replayed: a kind can have a Writer method, a CommandLog
+	// method and a logCommand case, and still be dropped on the floor by
+	// restoreEntry's switch — a durable record that recovery silently discards.
+	// The command-side guard in pkg/matching cannot see that half; this sentinel
+	// is what lets the wal side check it. See docs/JOURNAL-COMPLETENESS.md §8.
+	entryKindCount
 )
 
 // Entry is one durable command-log record.
@@ -140,6 +163,24 @@ type Entry struct {
 	// unrecoverable rather than merely wrong.
 	TradeID    int64  `json:"trade_id,omitempty"`
 	BustReason string `json:"bust_reason,omitempty"`
+
+	// Phase is the target trading phase of a KindSetPhase, written as its NAME
+	// ("OPEN", "PRE_OPEN", …) rather than its ordinal.
+	//
+	// This is deliberately against the grain of the codebase: matching.EngineState
+	// is a uint8 iota and EngineSnapshot.State is already encoded as its number, so
+	// a number here would be consistent. Lifetime is what makes it wrong. A
+	// snapshot is rewritten every checkpoint, so the oldest ordinal on disk is
+	// minutes old; a segment is retained for as long as retention says and may be
+	// archived for years (docs/LOG-ROTATION.md §5). Reordering the EngineState
+	// block is a change nobody would think of as a format change, and it would
+	// silently reinterpret every archived phase record. A name also fails loudly on
+	// a value the reader has never heard of where an ordinal fails quietly, and an
+	// operator reading a segment during an incident sees "PRE_OPEN" rather than 3.
+	// Same argument that gave MarkPrice its own field instead of borrowing CancelID.
+	//
+	// omitempty keeps every pre-existing record byte-identical.
+	Phase string `json:"phase,omitempty"` // KindSetPhase
 }
 
 // Header, record framing and the bounds that make a corrupt file safe to read.
@@ -1003,6 +1044,21 @@ func (w *Writer) AppendBust(tradeID int64, reason string) (int64, error) {
 	return w.append(Entry{Kind: KindBust, TradeID: tradeID, BustReason: reason})
 }
 
+// AppendSetPhase logs a trading-phase transition, by name.
+//
+// Like AppendHalt it records what was ATTEMPTED: a transition to the phase the
+// venue is already in is a no-op on the engine and is still written down, because
+// replay reaches the same verdict by attempting the same thing and a filter here
+// would put a second copy of Engine.SetPhase's early-return in the writer.
+//
+// An undeclared EngineState would render as "OPEN" through String's default arm,
+// which would durably record a transition under a name meaning a different phase.
+// matching.TestEngineStateNamesRoundTrip is what keeps String total over the
+// declared block; see docs/JOURNAL-COMPLETENESS.md §4.1.
+func (w *Writer) AppendSetPhase(phase matching.EngineState) (int64, error) {
+	return w.append(Entry{Kind: KindSetPhase, Phase: phase.String()})
+}
+
 // Sync flushes buffered records and fsyncs the file — the durability point. Call
 // it before acknowledging the commands since the last Sync (group commit).
 //
@@ -1499,72 +1555,107 @@ func RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64) {
 		if e.Seq <= afterSeq {
 			continue
 		}
-		switch e.Kind {
-		case KindSubmit:
-			if e.Order != nil {
-				eng.Process(e.Order.Fresh())
-			}
-		case KindCancel:
-			_, _ = eng.Cancel(e.CancelID, e.UserID)
-		case KindReduce:
-			// Refusals are ignored for the same reason a cancel's are: the log is
-			// written write-ahead, so a command the engine went on to refuse is on
-			// disk too, and replay must refuse it identically rather than treat it
-			// as corruption.
-			_, _ = eng.Reduce(e.CancelID, e.NewQty, e.UserID)
-		case KindCancelAll:
-			eng.CancelAllForUser(e.UserID)
-		case KindReplace:
-			// Refusals are ignored for the same reason a cancel's are: the log records
-			// what was attempted, and replay must reach the same outcome by attempting
-			// the same thing.
-			_, _ = eng.Replace(e.CancelID, e.UserID, e.Order.Fresh())
-		case KindStop:
-			if s, err := types.NewStopOrder(e.Order.Fresh(), e.StopPrice); err == nil {
-				eng.ProcessStop(s)
-			}
-		case KindOCO:
-			if e.StopOrder == nil {
-				continue
-			}
-			s, err := types.NewStopOrder(e.StopOrder.Fresh(), e.StopPrice)
-			if err != nil {
-				continue
-			}
-			if o, err := types.NewOCOOrder(e.Order.Fresh(), s); err == nil {
-				eng.ProcessOCO(o)
-			}
-		case KindIceberg:
-			if ib, err := types.NewIcebergOrder(e.Order.Fresh(), e.DisplayQty); err == nil {
-				eng.ProcessIceberg(ib)
-			}
-		case KindPegged:
-			if p, err := types.NewPeggedOrder(e.Order.Fresh(), types.PegReference(e.PegRef), e.PegOffset); err == nil {
-				eng.ProcessPegged(p)
-			}
-		case KindTrailing:
-			if ts, err := types.NewTrailingStop(e.Order.Fresh(), e.Trail); err == nil {
-				eng.ProcessTrailingStop(ts)
-			}
-		case KindHalt:
-			eng.Halt()
-		case KindResume:
-			eng.Resume()
-		case KindCancelOnly:
-			eng.SetCancelOnly()
-		case KindSetMark:
-			// A refused step (ErrMarkStepTooLarge) is ignored for the same reason a
-			// cancel's refusal is: the guard is deterministic, so replaying the same
-			// call against the same state reaches the same verdict.
-			_ = eng.SetMarkPrice(e.MarkPrice)
-		case KindBust:
-			// Refusals replay as refusals here too, and this one has teeth: a bust
-			// recorded against a trade id the replayed engine has not reached yet
-			// would be refused, which is why the log is replayed in order and the
-			// trade counter is restored from the snapshot before the tail runs.
-			_ = eng.Bust(e.TradeID, e.BustReason)
-		}
+		restoreEntry(eng, e)
 	}
+}
+
+// restoreEntry applies one record to an engine and reports whether its kind was
+// recognised at all.
+//
+// The boolean is the whole reason this is a function rather than the body of
+// RestoreAfter's loop. An unrecognised kind falls out of the switch and is
+// silently discarded, which is correct for a FORWARD-compatibility skip — an older
+// reader meeting a record a newer build wrote should ignore it and diverge
+// detectably rather than refuse to start — and is indistinguishable from the bug
+// where a kind this build writes itself has no arm here. TestEveryEntryKindReplays
+// enumerates entryKindCount against this return value, so the second case is a
+// test failure while the first stays a skip.
+func restoreEntry(eng *matching.Engine, e Entry) bool {
+	switch e.Kind {
+	case KindSubmit:
+		if e.Order != nil {
+			eng.Process(e.Order.Fresh())
+		}
+	case KindCancel:
+		_, _ = eng.Cancel(e.CancelID, e.UserID)
+	case KindReduce:
+		// Refusals are ignored for the same reason a cancel's are: the log is
+		// written write-ahead, so a command the engine went on to refuse is on
+		// disk too, and replay must refuse it identically rather than treat it
+		// as corruption.
+		_, _ = eng.Reduce(e.CancelID, e.NewQty, e.UserID)
+	case KindCancelAll:
+		eng.CancelAllForUser(e.UserID)
+	case KindReplace:
+		// Refusals are ignored for the same reason a cancel's are: the log records
+		// what was attempted, and replay must reach the same outcome by attempting
+		// the same thing.
+		_, _ = eng.Replace(e.CancelID, e.UserID, e.Order.Fresh())
+	case KindStop:
+		if s, err := types.NewStopOrder(e.Order.Fresh(), e.StopPrice); err == nil {
+			eng.ProcessStop(s)
+		}
+	case KindOCO:
+		if e.StopOrder == nil {
+			return true
+		}
+		s, err := types.NewStopOrder(e.StopOrder.Fresh(), e.StopPrice)
+		if err != nil {
+			return true
+		}
+		if o, err := types.NewOCOOrder(e.Order.Fresh(), s); err == nil {
+			eng.ProcessOCO(o)
+		}
+	case KindIceberg:
+		if ib, err := types.NewIcebergOrder(e.Order.Fresh(), e.DisplayQty); err == nil {
+			eng.ProcessIceberg(ib)
+		}
+	case KindPegged:
+		if p, err := types.NewPeggedOrder(e.Order.Fresh(), types.PegReference(e.PegRef), e.PegOffset); err == nil {
+			eng.ProcessPegged(p)
+		}
+	case KindTrailing:
+		if ts, err := types.NewTrailingStop(e.Order.Fresh(), e.Trail); err == nil {
+			eng.ProcessTrailingStop(ts)
+		}
+	case KindHalt:
+		eng.Halt()
+	case KindResume:
+		eng.Resume()
+	case KindCancelOnly:
+		eng.SetCancelOnly()
+	case KindSetMark:
+		// A refused step (ErrMarkStepTooLarge) is ignored for the same reason a
+		// cancel's refusal is: the guard is deterministic, so replaying the same
+		// call against the same state reaches the same verdict.
+		_ = eng.SetMarkPrice(e.MarkPrice)
+	case KindBust:
+		// Refusals replay as refusals here too, and this one has teeth: a bust
+		// recorded against a trade id the replayed engine has not reached yet
+		// would be refused, which is why the log is replayed in order and the
+		// trade counter is restored from the snapshot before the tail runs.
+		_ = eng.Bust(e.TradeID, e.BustReason)
+	case KindSetPhase:
+		// Replay RE-RUNS the uncross, and it must. Restoring the phase field alone
+		// would leave the crossed book that pre-open accumulated unresolved and the
+		// auction's prints missing from a tape subscribers already received — the
+		// very divergence this record exists to fix. The uncross is a pure function
+		// of the book, the book at this point in the tape is reproduced by the
+		// records before it, and replay mode suppresses only the minimum resting
+		// time and the band-breach pause, neither of which is on the uncross path.
+		//
+		// An unparseable name is skipped rather than guessed at. That is the point
+		// of writing the phase as a name: a phase this build has never heard of
+		// leaves the venue in the last phase it does understand and diverges
+		// detectably, where an ordinal would have decoded into a valid-looking
+		// state nobody defined. See docs/JOURNAL-COMPLETENESS.md §4.1 and §4.3.
+		if p, err := matching.ParseEngineState(e.Phase); err == nil {
+			eng.SetPhase(p)
+		}
+	default:
+		return false
+	}
+	return true
 }
 
 // WriteSnapshot writes a snapshot to path durably: write to a temp file, fsync

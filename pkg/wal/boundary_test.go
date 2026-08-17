@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
-	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
 
 // tapeSink records the trade tape as the engine emits it. Only trades: this is
@@ -23,12 +22,33 @@ func (s *tapeSink) OnEvents(evs []matching.Event) {
 		t := e.Trade
 		// Trade ids and the aggressor are part of the contract; wall-clock is
 		// not, for the same reason snapDigest normalises it.
-		s.prints = append(s.prints, fmt.Sprintf("%d|%d|%d|%s|%s|%s",
-			t.ID, t.Price, t.Quantity, t.TakerSide, t.BuyerUserID, t.SellerUserID))
+		//
+		// Auction is in the line because it is part of the contract too: a print a
+		// consumer was told came from an uncross must not replay as a continuous
+		// fill, and a comparison that dropped the flag would call those two tapes
+		// equal.
+		s.prints = append(s.prints, fmt.Sprintf("%d|%d|%d|%s|%s|%s|auction=%t",
+			t.ID, t.Price, t.Quantity, t.TakerSide, t.BuyerUserID, t.SellerUserID, t.Auction))
 	}
 }
 
 func (s *tapeSink) tape(n int) string { return strings.Join(s.prints[:n], "\n") }
+
+// auctionPrints counts the uncross prints on the tape. The boundary sweeps assert
+// it is non-zero: without that, extending the tape's alphabet with phase
+// transitions could silently degrade into transitions that uncross nothing, and
+// the sweep would go back to proving what it proved before.
+func (s *tapeSink) auctionPrints() int { return countAuctionPrints(s.prints) }
+
+func countAuctionPrints(prints []string) int {
+	var n int
+	for _, p := range prints {
+		if strings.HasSuffix(p, "|auction=true") {
+			n++
+		}
+	}
+	return n
+}
 
 // TestCrashAtEveryBoundary is the test a reader on r/highfreqtrading proposed
 // when the recovery design came up, phrased almost exactly this way: kill the
@@ -77,19 +97,7 @@ func TestCrashAtEveryBoundary(t *testing.T) {
 
 	var ids []int64
 	for i, c := range tape {
-		if c.cancel && len(ids) > 0 {
-			_, _ = r.Cancel(ids[c.cancelIx%len(ids)], c.user)
-		} else {
-			o, err := types.NewOrder(c.user, "X", c.side, types.OrderTypeLimit, c.price, c.qty, types.TIFGoodTillCancel)
-			if err != nil {
-				t.Fatalf("NewOrder: %v", err)
-			}
-			o.ClientOrderID = fmt.Sprintf("c%d", i)
-			res := r.Process(o)
-			if res != nil && res.Order != nil {
-				ids = append(ids, res.Order.ID)
-			}
-		}
+		applyTapeCmd(t, r, c, i, &ids)
 		wantDigest[i+1] = digestRunner(t, r)
 		wantPrints[i+1] = len(live.prints)
 	}
@@ -110,6 +118,9 @@ func TestCrashAtEveryBoundary(t *testing.T) {
 	}
 	if wantPrints[n] == 0 {
 		t.Fatal("the tape produced no trades, so the emit half of this test asserts nothing")
+	}
+	if live.auctionPrints() == 0 {
+		t.Fatal("the tape ran no auction, so this sweep is back to the alphabet docs/JOURNAL-COMPLETENESS.md §1 diagnosed")
 	}
 
 	// --- crash at every boundary --------------------------------------------
@@ -173,19 +184,7 @@ func TestCrashAtEveryBoundaryWithSnapshot(t *testing.T) {
 
 	var ids []int64
 	for i, c := range tape {
-		if c.cancel && len(ids) > 0 {
-			_, _ = r.Cancel(ids[c.cancelIx%len(ids)], c.user)
-		} else {
-			o, err := types.NewOrder(c.user, "X", c.side, types.OrderTypeLimit, c.price, c.qty, types.TIFGoodTillCancel)
-			if err != nil {
-				t.Fatalf("NewOrder: %v", err)
-			}
-			o.ClientOrderID = fmt.Sprintf("c%d", i)
-			res := r.Process(o)
-			if res != nil && res.Order != nil {
-				ids = append(ids, res.Order.ID)
-			}
-		}
+		applyTapeCmd(t, r, c, i, &ids)
 		if i == snapAt {
 			snap, err := r.Checkpoint()
 			if err != nil {
@@ -213,6 +212,12 @@ func TestCrashAtEveryBoundaryWithSnapshot(t *testing.T) {
 	}
 	if base == nil {
 		t.Fatal("no snapshot was written")
+	}
+	// The join is the point of this test, so the auction has to be in the TAIL:
+	// an uncross that only ever ran before the checkpoint is carried by the
+	// snapshot and proves nothing about the records replayed on top of it.
+	if countAuctionPrints(live.prints[wantPrints[snapAt+1]:]) == 0 {
+		t.Fatal("no auction print falls after the checkpoint, so the snapshot+tail join never replays one")
 	}
 
 	// Every boundary at or after the checkpoint: load the snapshot, apply only

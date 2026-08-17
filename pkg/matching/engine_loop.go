@@ -113,6 +113,17 @@ type CommandLog interface {
 	AppendCancelOnly() (int64, error)
 	AppendSetMark(price int64) (int64, error)
 	AppendBust(tradeID int64, reason string) (int64, error)
+
+	// AppendSetPhase records a trading-phase transition. It is the third command
+	// to be added here after being applied unrecorded for releases, and adding it
+	// broke every implementer of this interface — which was the choice, made on
+	// purpose. The alternative was a narrow optional PhaseLog that logCommand
+	// type-asserts, breaking nobody; it would also mean a CommandLog that does not
+	// implement it SILENTLY DROPS phase records, reintroducing the exact failure
+	// this method exists to eliminate as the mechanism of its own fix. Durability
+	// an implementer can decline by omission is not a guarantee, it is a default.
+	// See docs/JOURNAL-COMPLETENESS.md §4.2 and docs/COMPATIBILITY.md.
+	AppendSetPhase(phase EngineState) (int64, error)
 }
 
 // RunnerConfig configures a Runner.
@@ -371,25 +382,20 @@ func (r *Runner) logCommand(cmd command) {
 		seq, err = r.log.AppendSetMark(cmd.cancelID)
 	case cmdBust:
 		seq, err = r.log.AppendBust(cmd.cancelID, cmd.bustReason)
+	case cmdSetPhase:
+		seq, err = r.log.AppendSetPhase(cmd.phase)
 	default:
 		// Genuinely read-only commands: queries, the checkpoint, and ExpireDue,
 		// whose effects are cancels the engine derives from a clock replay cannot
 		// rewind. Nothing here changes state a recovery must reproduce.
 		//
-		// KNOWN DEFECT — cmdSetPhase reaches this branch and does not belong here.
-		// Runner.SetPhase is a frozen public mutating command: it runs the opening or
-		// closing uncross, prints the auction trades to the event stream, and sets
-		// e.state, which EngineSnapshot carries and the digest covers. A restart
-		// between checkpoints therefore recovers the PRE-transition phase with an
-		// un-uncrossed book and no auction prints in the log — the exact failure the
-		// CommandLog doc above says this interface exists to prevent, and the third
-		// instance of it after Reduce and Halt.
-		//
-		// Not reachable from cmd/obgw today (no wire message, no server call site),
-		// so no shipped gateway loses an auction; a library embedder driving sessions
-		// through Runner.SetPhase does. Left in place rather than silently patched
-		// because the fix is a log format change with a replay rule and a
-		// compatibility story: see docs/JOURNAL-COMPLETENESS.md.
+		// This comment has been false three times — for Reduce, for Halt and for
+		// SetPhase, each of which sat in this branch looking like it carried no book
+		// state. It is now checked rather than trusted: the table in
+		// command_alphabet_test.go names every cmdKind, a kind missing from it fails
+		// at the moment the constant is written, and a kind classified read-only has
+		// to leave EngineSnapshot.Digest() untouched to stay that way. See
+		// docs/JOURNAL-COMPLETENESS.md §4.4.
 		return
 	}
 	if err != nil {

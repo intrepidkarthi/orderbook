@@ -396,6 +396,7 @@ type countingLog struct {
 	replaces                                  int
 	controls                                  int // halt / resume / cancel-only / mark
 	busts                                     int
+	phases                                    int
 	seq                                       int64
 }
 
@@ -436,6 +437,8 @@ func (l *countingLog) AppendCancelOnly() (int64, error)   { l.controls++; return
 func (l *countingLog) AppendSetMark(int64) (int64, error) { l.controls++; return l.next() }
 
 func (l *countingLog) AppendBust(int64, string) (int64, error) { l.busts++; return l.next() }
+
+func (l *countingLog) AppendSetPhase(EngineState) (int64, error) { l.phases++; return l.next() }
 
 // TestReplaceHonoursMinRestingTime — a replace cancels displayed size, so the
 // anti-spoofing floor must apply to it too. A verb that escaped it would leave the

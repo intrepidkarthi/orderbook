@@ -324,10 +324,10 @@ The matcher should consume an ordered tape. It should not infer market priority 
 > exists in-process and is exported to no metric, no report and no message. *The
 > commit mode is venue-wide and invisible*: a process flag announced only to the
 > operator's log, so a client integrating against two venues cannot discover its own
-> recovery-point objective from the protocol. *`Runner.SetPhase` is a mutating command
-> that is not journalled* — see the note under "Crash tests", and
-> [`JOURNAL-COMPLETENESS.md`](JOURNAL-COMPLETENESS.md), which is the slice that closes
-> it.
+> recovery-point objective from the protocol. ~~*`Runner.SetPhase` is a mutating command
+> that is not journalled*~~ — **closed**: `wal.KindSetPhase` is journalled and replayed,
+> and the command alphabet is now guarded by construction. See
+> [`JOURNAL-COMPLETENESS.md`](JOURNAL-COMPLETENESS.md) §8 for what building it found.
 >
 > **Out of scope by design.** A deferred-ack commit pipeline — group commit that holds
 > the acknowledgement until the covering sync lands — is declined with a reason at
@@ -388,16 +388,19 @@ the trade tape; `:152` repeats it across the snapshot+tail join.
 - ❌ after primary sync, before replication
 - ❌ after follower apply, before follower sync — `examples/replication` never kills a follower between applying a record and syncing its own state; `Follower.Promote` writes a base snapshot and opens a fresh log, and no test crosses that seam.
 
-> **A gap in the tape, not in the test.** The boundary tapes are built from limit
-> orders and cancels only (`buildTape`, `pkg/wal/boundary_test.go`). No phase
-> transition is ever on one — which is exactly why nobody noticed that
+> **A gap in the tape, not in the test — now closed.** The boundary tapes *were* built
+> from limit orders and cancels only (`buildTape`, `pkg/wal/boundary_test.go`). No phase
+> transition was ever on one — which is exactly why nobody noticed that
 > `Runner.SetPhase` is a frozen public mutating command that runs an auction, changes
-> state the snapshot carries, and is **absent from `logCommand`'s switch**
-> (`pkg/matching/engine_loop.go:335`, falling into the `default: return` branch
-> whose comment claims it holds only read-only commands). The strongest property in
-> this repository is proven over a command alphabet that excludes the one command that
-> escapes the journal. [`JOURNAL-COMPLETENESS.md`](JOURNAL-COMPLETENESS.md) is the
-> slice that fixes both the hole and the alphabet.
+> state the snapshot carries, and **was absent from `logCommand`'s switch** (falling
+> into the `default: return` branch whose comment claims it holds only read-only
+> commands). The strongest property in this repository was proven over a command
+> alphabet that excluded the one command that escaped the journal.
+> **Both are now closed**: the transition is journalled as `wal.KindSetPhase` and
+> replayed by re-running the uncross, `buildTape` speaks phase transitions so the
+> 401-boundary sweep exercises auctions, and every `cmdKind` and `wal.EntryKind` is
+> enumerated by a guard. [`JOURNAL-COMPLETENESS.md`](JOURNAL-COMPLETENESS.md) §8
+> records the two places that document was wrong about its own guard.
 
 ### Acceptance criteria
 
@@ -1397,7 +1400,7 @@ being read.
 
 **The next slice, in order:**
 
-1. **Close the journal, and close the class.** `Runner.SetPhase` is a frozen public mutating command that runs an auction and is absent from `logCommand` — the third such escape after `Reduce` and `Halt`, each found by accident after shipping. Make the journal exhaustive *by construction*, so a fourth is a failing test rather than a post-mortem. Spec: [`JOURNAL-COMPLETENESS.md`](JOURNAL-COMPLETENESS.md). **This is the current slice.**
+1. ✅ **Close the journal, and close the class.** `Runner.SetPhase` was a frozen public mutating command that runs an auction and was absent from `logCommand` — the third such escape after `Reduce` and `Halt`, each found by accident after shipping. The journal is now exhaustive *by construction*: every `cmdKind` is classified journalled-or-read-only, a read-only classification must leave `EngineSnapshot.Digest()` untouched, and every `wal.EntryKind` must have a replay arm. Spec and outcome: [`JOURNAL-COMPLETENESS.md`](JOURNAL-COMPLETENESS.md) (§8 for what it found, including two holes in the guard the spec itself specified). **Done.**
 2. **Export the sequence trio.** WAL written, last applied, last synced, plus commit mode and replica lag, as gauges from `cmd/obgw` and `examples/replication`. M2 and M4 both block on it, and [`REPLICATION.md`](REPLICATION.md) §4 already promises a graph that does not exist.
 3. **Build the reference matcher and the random-tape differential harness** (M9), including the four missing per-command invariants. This is the prerequisite for M11's structural experiments: choosing between a radix tree and a dense grid with only hand-written scenarios as an oracle is how a wrong book ships.
 4. **Add an independent reconciliation consumer** (M7), which needs a durable execution-report journal first — today the outbound stream is an in-memory ring.

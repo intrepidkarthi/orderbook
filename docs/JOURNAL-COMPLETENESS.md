@@ -1,8 +1,10 @@
 # Journal Completeness — Making the Fourth Escape a Failing Test
 
-Status: **specified, not yet built** — slice 1 of the re-cut "Immediate next slice" in
+Status: **implemented** — slice 1 of the re-cut "Immediate next slice" in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md), written before the code as this
-repository does it ·
+repository does it. §8 records what building it found, including the two places this
+document was wrong about its own guard (§8.2, §8.3) and the prediction in §7 that did
+not come true (§8.1) ·
 Author: Karthikeyan NG · Last updated: 2026-08-17
 
 > **This is a live correctness defect, not a milestone item.** `Runner.SetPhase` is a
@@ -102,7 +104,10 @@ Checked at the time of writing by reading the code, not by quoting another docum
 
 5. **`wal.EntryKind` has no phase kind and `RestoreAfter` has no phase case.**
    The iota block ends at `KindBust` (`pkg/wal/wal.go:82-101`); `RestoreAfter`'s type
-   switch (`:1495-1566`) handles fourteen kinds and ignores anything else.
+   switch handles fifteen kinds and ignores anything else. *(Corrected after the fact:
+   this said "fourteen" before the code was written and the count missed `KindBust` —
+   see §8.6. Line references in this section have drifted too; `logCommand`'s switch
+   was at `:374`, not `:335`, by the time the fix landed.)*
 
 ## 3. What a missing phase record actually costs
 
@@ -332,6 +337,21 @@ and three tests over it:
    log is untouched — so the table cannot be gamed by classifying an awkward command as
    read-only to make test 2 pass.
 
+   > **This claim is false, and building it proved so (§8.2).** That test only catches
+   > a kind classified read-only which *still* reaches a `CommandLog` method — the one
+   > combination a gaming author would never write. Classifying `cmdSetPhase` read-only
+   > and dropping its `logCommand` case passes it. A fourth test does the job the
+   > paragraph above promises: **`TestReadOnlyCommandsChangeNoRecoverableState`**
+   > drives every read-only kind through a `Runner` and requires
+   > `EngineSnapshot.Digest()` to be unchanged, so the written reason is checked
+   > against the engine rather than taken on trust.
+
+   And a fifth, in `pkg/wal`, because the chain does not end at the log (§8.3):
+   **`TestEveryEntryKindReplays`** enumerates `entryKindCount` and requires every
+   `wal.EntryKind` to have an arm in `restoreEntry`. Journalled is not the same as
+   replayed, and a kind with a `Writer` method and no replay arm is a durable record
+   that recovery silently discards.
+
 The `readOnly` reasons are strings rather than a bare boolean deliberately. A future
 author reclassifying a command has to write down why, and a reviewer gets a sentence to
 disagree with instead of a flipped flag.
@@ -410,8 +430,8 @@ claiming a property the suite never checked.
 | 4 | Make `ParseEngineState` return `StateOpen` for an unknown name instead of erroring | `TestEngineStateNamesRoundTrip` |
 | 5 | Remove one entry from the classification table | `TestEveryCommandKindIsClassified` |
 | 6 | Add a new `cmdKind` before the sentinel and classify it nowhere | `TestEveryCommandKindIsClassified` |
-| 7 | Classify `cmdSetPhase` as `readOnly` to make test 2 pass | `TestReadOnlyCommandsWriteNothing` |
-| 8 | Apply the whole fix, then revert **only** the `buildTape` extension | Nothing fails — **and that is the point.** This run proves the alphabet fix is load-bearing rather than decorative: with it reverted, the suite goes green over code that was broken for three releases. Run it, record that it passes, and keep the extension |
+| 7 | Classify `cmdSetPhase` as `readOnly` to make test 2 pass | ~~`TestReadOnlyCommandsWriteNothing`~~ → **`TestReadOnlyCommandsChangeNoRecoverableState`**. The named test *passes* against this sabotage; see §8.2 |
+| 8 | Apply the whole fix, then revert **only** the `buildTape` extension | Nothing fails — **and that is the point.** This run proves the alphabet fix is load-bearing rather than decorative: with it reverted, the suite goes green over code that was broken for three releases. Run it, record that it passes, and keep the extension. *(Outcome: it now FAILS, because the extension came with two `t.Fatal` guards that defend it. The demonstration was run against `HEAD` instead, where it holds exactly — see §8.5)* |
 | 9 | Drop `KindSetPhase` on the replication wire | Drill D10 |
 | 10 | Restore the phase field on replay *without* re-running the uncross | `TestCrashAcrossAnAuction` — the crossed book and the missing prints must both be caught, not just the phase |
 
@@ -455,8 +475,188 @@ So that §8 is not graded on a curve.
 
 ## 8. What building it found
 
-*To be written after the code, in the manner of
-[`BOUNDED-RECOVERY.md`](BOUNDED-RECOVERY.md) §9 and
-[`LOG-ROTATION.md`](LOG-ROTATION.md) §12 — including whichever of §7's predictions
-turned out to be wrong, and whatever this document decided by omission and should not
-have.*
+Written after the code, in the manner of [`BOUNDED-RECOVERY.md`](BOUNDED-RECOVERY.md)
+§9 and [`LOG-ROTATION.md`](LOG-ROTATION.md) §12. Everything below was run, not
+reasoned about.
+
+### 8.1 The prediction this document was most worried about was wrong
+
+§7 leads with "the uncross may not be as deterministic as `phase.go` claims", and
+names the self-trade-prevention branch as the likeliest place for that to be true,
+because it stamps a wall-clock `UpdatedAt` on a victim order that may still be
+resting and therefore in the snapshot. `auctionTape` reaches that branch on purpose —
+the participant `"self"` crosses itself inside the pre-open — and
+`TestCrashAcrossAnAuction` compares a book digest **and** a trade tape at all 24
+boundaries of a two-auction session.
+
+It passed on the first run and has passed every run since. `Digest()`'s
+wall-clock normalisation does cover it, and sabotage row 3 is what makes that
+statement worth anything: with the writer changed to record `StateOpen` regardless of
+the target phase, the same test fails at boundary 1. The normaliser hides the
+timestamp and does not hide the phase.
+
+**The slice did not grow.** §7 predicted that if this went the other way "this slice
+grows a great deal"; it did not, and the honest reading is that
+`phase.go`'s determinism comment was correct for three releases while being
+unreachable on the path it described.
+
+### 8.2 §4.4's read-only guard did not do what §4.4 says it does
+
+This is the significant finding, and it is a hole in the *guard*, not in the fix.
+
+§4.4 claims `TestReadOnlyCommandsWriteNothing` "stops the table being gamed by
+classifying an awkward command as read-only to make test 2 pass". **It does not.** It
+only detects a kind that is classified read-only *and* still reaches a `CommandLog`
+method — the one combination an author gaming the table would never produce. Run
+sabotage row 7 exactly as specified — classify `cmdSetPhase` as
+`readOnly("just moves an enum; carries no book state")` and drop its `logCommand`
+case — and `TestReadOnlyCommandsWriteNothing` **passes**. So does the whole of the
+rest of the shape guard.
+
+That is the precise shape of all three escapes. `Reduce`, `Halt` and `SetPhase` were
+each a mutating command that reached no log and looked to its author like it carried
+no book state. A guard whose only defence against that is a prose reason field is a
+guard that would have missed all three.
+
+So the reason is now checked against the engine.
+`TestReadOnlyCommandsChangeNoRecoverableState` drives every read-only kind through a
+`Runner` and requires `EngineSnapshot.Digest()` to be byte-identical across it. The
+digest covers the book, the trading state, the mark and the sequence counters — it is
+the mechanical statement of "changes nothing recovery must reproduce", so a command
+that moves it is journalled or it is a defect, and no sentence can settle the
+question instead. All five kinds classified read-only today pass it, which is the
+first evidence any of those five reasons has ever had.
+
+Verified by running: a new `cmdSabotageMutator` whose dispatch arm calls
+`SetCancelOnly`, journalled nowhere, classified `readOnly("looked harmless to the
+author who added it")`, passes the entire `pkg/matching` suite as §4.4 specifies it
+and fails the digest check.
+
+**Row 7 of §6 names the wrong test.** It should read
+`TestReadOnlyCommandsChangeNoRecoverableState`.
+
+### 8.3 The guard chain is longer than §4.4 knew
+
+§4.4 guards `cmdKind → CommandLog method`. The actual chain a command travels is:
+
+```
+cmdKind  →  CommandLog method  →  wal.EntryKind  →  restoreEntry arm
+```
+
+**Journalled is not the same as replayed**, and only the first link was enumerated.
+A command wired end to end — a `cmdKind`, a table entry, a `CommandLog` method, a
+`logCommand` case, an `EntryKind`, a `Writer` method — but with no arm in
+`RestoreAfter` writes a durable record that recovery silently discards, and the guard
+reports the alphabet complete. Unlike `cmdKind` there was no `EntryKind` sentinel and
+no test asserting an arm exists.
+
+Closed the same way: `entryKindCount`, and `TestEveryEntryKindReplays`, which
+enumerates the block and requires `restoreEntry` to recognise each kind. That is what
+`restoreEntry`'s boolean return is for — an unrecognised kind must still be *skipped*
+(a newer build's record reaching an older reader has to be ignored, not guessed at),
+so "skipped" and "has no arm" are the same behaviour and needed telling apart.
+Sabotage row 2 now fails twice: once as a divergence, once as
+`EntryKind 16 has no arm in restoreEntry`.
+
+### 8.4 The guard failed by crashing instead of reporting
+
+As first written, two of the three tests indexed `commandClassification` without the
+comma-ok form. An unclassified kind therefore yielded a zero-value classification
+whose `sample` was nil, and the next line dereferenced it: `SIGSEGV`, the test binary
+dead, and the rest of `pkg/matching` never run. The message
+`TestEveryCommandKindIsClassified` exists to print — the one sentence telling an
+author what to do — was buried under a stack trace from a different test.
+
+Confirmed by running both ways: with a table entry removed, the comma-ok form reports
+`cmdKind 13 is not in commandClassification: decide whether it is journalled … or
+read-only`, and reverting to the bare index on the same tree panics. A guard that
+takes the package down with it costs more than it finds.
+
+### 8.5 Two of §5's and §6's own predictions did not survive contact
+
+**Sabotage row 8 no longer passes, and that is an improvement.** Row 8 asks for the
+whole fix with only the `buildTape` extension reverted, and predicts nothing fails.
+Two `t.Fatal` guards were added with the extension — the sweep must run an auction,
+and the snapshot sweep's auction must fall in the *tail* — so reverting it now fails
+outright with `the tape ran no auction, so this sweep is back to the alphabet
+docs/JOURNAL-COMPLETENESS.md §1 diagnosed`. The extension defends itself, which is
+better than being load-bearing on trust.
+
+The demonstration row 8 actually wanted still exists, and it was run against `HEAD`
+instead: with neither the durability fix nor the tape extension,
+`TestCrashAtEveryBoundary`, `TestCrashAtEveryBoundaryWithSnapshot` and
+`TestCrashRecoveryMatchesUninterrupted` **all pass** over code that loses an entire
+auction on restart. 401 boundaries, a book digest and a trade tape compared at every
+one, green. §1's diagnosis reproduced exactly.
+
+**The record is not the small one §5 predicted.** §5 guessed `KindSetPhase` would be
+"the smallest record the log writes apart from `KindHalt`". Measured:
+
+| record | bytes |
+|---|---:|
+| `KindHalt` / `KindResume` / `KindCancelOnly` | 33 |
+| `KindSetPhase` (`"OPEN"`) | 48 |
+| `KindSetPhase` (`"PRE_OPEN"`) | 52 |
+| `KindSetMark` | 52 |
+| `KindSetPhase` (`"CLOSING_AUCTION"`) | 59 |
+| `KindCancel` | 65 |
+
+A phase record is 15 to 26 bytes larger than a halt, and the longest phase name costs
+more than a mark price. **That is the price of §4.1's argument, and it is the right
+trade** — phase transitions are rare, and a segment an operator reads during an
+incident says `"CLOSING_AUCTION"` rather than `5` — but §4.1 argued the case on
+lifetime and legibility without ever pricing it, and the number belongs next to the
+argument.
+
+The other number §5 asked for: extending `buildTape` takes
+`TestCrashAtEveryBoundary` from ~0.34 s to ~0.90 s (2.7x, three runs each). Still
+comfortably "a test people will actually run". §7 warned someone would react to this
+by shrinking `n`; the guard in 8.5 above means shrinking the *alphabet* instead is now
+a failure, and if `n` ever has to move, §7's answer — a second dedicated tape, not a
+shorter main one — still stands.
+
+### 8.6 Where the code disagreed with this document
+
+- **§2 item 5 says `RestoreAfter`'s type switch "handles fourteen kinds".** It handled
+  **fifteen** at `HEAD` — the count missed `KindBust`. §2 item 1's "fifteen cases" for
+  `logCommand` was right.
+- **Line references drifted before the code was written.** §2 cites
+  `engine_loop.go:335` for `logCommand`'s switch; it was at `:374` by the time the fix
+  landed, and `RestoreAfter` at `:1495` rather than the cited range. Line numbers in a
+  spec age faster than the spec does.
+- **Deliverable 5's one test is two tests.** `TestEngineStateNamesRoundTrip` covers the
+  round trip over every declared state; refusing an unknown name is a separate
+  property with a separate failure mode, and it is
+  `TestParseEngineStateRefusesUnknownNames` that catches sabotage row 4. A third,
+  `TestEngineStateSentinelIsNotAState`, pins the enumeration itself, because a loop
+  written `s <= engineStateCount` would assert the sentinel is a valid phase and pass.
+- **§4.3's "an older reader ignores `KindSetPhase`" is now a tested behaviour**, not
+  an inference: `TestUnknownEntryKindIsSkippedNotApplied`.
+- **Drill D10's phase assertion is not the one that works.** Sabotage row 9 — the
+  phase dropped on the replication wire — leaves the follower in `StateOpen`, which is
+  both the zero value and the phase the drill expects, so `snap.State` matches and the
+  assertion stays silent. Only the digest comparison fails. The lesson is D7's,
+  restated: assert the digest, not the field, because the field can be right for the
+  wrong reason.
+- **§4.1's placement worry was not worth the space.** §7 wondered whether
+  `ParseEngineState` belongs in `pkg/wal` rather than on the frozen `matching`
+  surface. It stayed in `matching`, on the document's own counter-argument, and
+  nothing in the build pushed back.
+
+### 8.7 What this slice still does not do
+
+Everything in §4.5 stands. Two things §4.5 did not name:
+
+- **The guard covers the `Runner` queue, and `Runner.SetReplaying` is not on it.** It
+  is a public, frozen, mutating `Runner` method that writes `e.replaying` directly,
+  bypassing the queue and therefore `logCommand`, so it is structurally invisible to a
+  guard that enumerates `cmdKind`. It is legitimately unjournalled — recovery sets the
+  flag itself — but the guard's claim is "every command kind", not "every public
+  mutating method", and the difference deserved recording rather than discovering.
+- **The swept alphabet is wider, not complete.** `buildTape` now speaks submit, cancel
+  and setphase. Thirteen journalled kinds — stop, OCO, iceberg, pegged, trailing,
+  halt, resume, cancel-only, set-mark, bust, cancel-all, reduce, replace — still never
+  appear at any crash boundary, and neither do market orders, IOC/FOK, post-only or
+  GTD. Each has a hand-written recovery test, so this is not a live defect; it is the
+  same sentence as §1 with a smaller number, and the next escape can still hide behind
+  it.

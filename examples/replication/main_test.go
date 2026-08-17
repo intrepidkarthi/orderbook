@@ -645,3 +645,114 @@ func reconnect(t *testing.T, p *Primary, have int64) (first int64, records int, 
 		}
 	}
 }
+
+// TestDrillD10_AnAuctionReplicatesAndSurvivesPromotion — deliverable 8 of
+// docs/JOURNAL-COMPLETENESS.md, and the replicated half of the phase record.
+//
+// The recovery tests prove a phase transition survives a crash. This proves it
+// survives the WIRE, which is a different claim: the primary ships wal.Entry
+// values as JSON, so a phase that travelled as an unexported field, or as an
+// ordinal the follower decoded differently, would reach the follower as a
+// transition to StateOpen — the zero value — and nothing on the order path would
+// notice.
+//
+// It is a real test of the digest rather than of the enum, in D7's manner. A
+// follower that dropped the record entirely would not merely be in the wrong
+// phase: it would have MATCHED CONTINUOUSLY the orders the primary rested in
+// pre-open, so its book holds fills the primary never printed and its trade
+// counter has moved past the primary's. EngineSnapshot.Digest() covers the state,
+// the book and the counters together, which is what makes one comparison enough.
+//
+// The promotion half is the operator's question: a venue promoted out of an
+// auction must come up in the phase the dead primary was in, not in the phase its
+// zero value happens to be.
+func TestDrillD10_AnAuctionReplicatesAndSurvivesPromotion(t *testing.T) {
+	const before, after = 40, 30
+
+	// A pre-open that accumulates a deliberately crossed book, then the opening
+	// uncross. setPhase is passed as a closure because Runner.SetPhase and
+	// Engine.SetPhase return different trade types ([]*types.Trade and
+	// []types.Trade), so no interface covers both the way bustVenue does.
+	auction := func(t *testing.T, v venue, setPhase func(matching.EngineState)) {
+		t.Helper()
+		setPhase(matching.StatePreOpen)
+		v.Process(lim(t, "alice", types.SideBuy, 105, 6))
+		v.Process(lim(t, "bob", types.SideSell, 98, 6))
+		v.Process(lim(t, "carol", types.SideBuy, 103, 4))
+		v.Process(lim(t, "dave", types.SideSell, 99, 4))
+		setPhase(matching.StateOpen)
+	}
+	// Two transitions and four orders: every one of them is a journalled command
+	// occupying a log sequence of its own, which is the property under test.
+	const auctionCmds = 6
+
+	drive := func(t *testing.T, v venue, setPhase func(matching.EngineState)) {
+		t.Helper()
+		runTape(t, v, 1, before)
+		auction(t, v, setPhase)
+		runTape(t, v, before+1, before+after)
+	}
+
+	dir := t.TempDir()
+	p := newPrimary(t)
+	f, err := StartFollower("BTC-USD", p.Addr())
+	if err != nil {
+		p.Close()
+		t.Fatalf("StartFollower: %v", err)
+	}
+
+	drive(t, p.Runner, func(s matching.EngineState) { p.Runner.SetPhase(s) })
+
+	const total = before + auctionCmds + after
+	if err := f.WaitApplied(total, 10*time.Second); err != nil {
+		t.Fatalf("follower never caught up: %v", err)
+	}
+
+	// The control: a plain engine, no journal and no wire, fed the same commands.
+	control := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
+	drive(t, control, func(s matching.EngineState) { control.SetPhase(s) })
+	want := control.TakeSnapshot().Digest()
+
+	// The drill proves nothing if the auction printed nothing, so check the premise
+	// rather than assume it.
+	if control.State() != matching.StateOpen {
+		t.Fatalf("control venue is %s, want OPEN — the session never opened", control.State())
+	}
+	bid, _, okB := control.BestBid()
+	ask, _, okA := control.BestAsk()
+	if okB && okA && bid >= ask {
+		t.Fatalf("control book is crossed (bid %d, ask %d) — the uncross never ran", bid, ask)
+	}
+
+	got, err := f.Digest()
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
+	if got != want {
+		t.Errorf("follower diverged from the control across an auction:\n  follower %s\n  control  %s", got, want)
+	}
+	if snap, err := p.Runner.Checkpoint(); err != nil || snap.Digest() != want {
+		t.Errorf("primary and control disagree (err=%v) — the uncross is not deterministic", err)
+	}
+
+	// --- promotion ----------------------------------------------------------
+	p.Close() // the crash
+
+	promoted, err := f.Promote(filepath.Join(dir, "promoted.wal"), filepath.Join(dir, "promoted.snap"))
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	defer promoted.Close()
+
+	snap, err := promoted.Checkpoint()
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	if snap.State != matching.StateOpen {
+		t.Errorf("promoted venue is %s, want OPEN — a venue promoted out of an auction came up "+
+			"in a phase its dead primary was never in", snap.State)
+	}
+	if snap.Digest() != want {
+		t.Errorf("promoted book is not the replicated book:\n  promoted %s\n  control  %s", snap.Digest(), want)
+	}
+}

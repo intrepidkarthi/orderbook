@@ -165,6 +165,7 @@ func (l *recordingLog) AppendSetMark(price int64) (int64, error)             { r
 func (l *recordingLog) AppendBust(tradeID int64, reason string) (int64, error) {
 	return 0, nil
 }
+func (l *recordingLog) AppendSetPhase(phase EngineState) (int64, error) { return 0, nil }
 func (l *recordingLog) lastCancelID() int64 {
 	if len(l.cancels) == 0 {
 		return -1

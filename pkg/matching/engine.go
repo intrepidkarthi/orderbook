@@ -16,6 +16,8 @@
 package matching
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"time"
@@ -68,7 +70,25 @@ const (
 	// starts: pre-open begins with whatever survived the last session, a closing
 	// auction begins with a live, already-uncrossed book.
 	StateClosingAuction
+
+	// engineStateCount is a sentinel: keep it last, and unexported so it stays off
+	// the frozen surface. It exists so TestEngineStateNamesRoundTrip can ENUMERATE
+	// this block instead of restating it — a state added above without a String()
+	// case would otherwise render as "OPEN" (the default arm below) and be written
+	// into a command log under a name that means something else.
+	engineStateCount
 )
+
+// ErrUnknownEngineState reports a phase name that no declared EngineState carries.
+//
+// It is an error rather than a fallback on purpose. A log segment outlives the
+// build that wrote it — retention is measured in days and archives in years (see
+// docs/LOG-ROTATION.md §5) — so a name written by a newer build will reach an older
+// reader. "AUCTION_FREEZE" arriving at a reader that has never heard of it must be
+// refused loudly; the same transition written as the ordinal 6 would decode as a
+// valid-looking EngineState nobody ever defined, and recovery would carry on into
+// a phase that does not exist.
+var ErrUnknownEngineState = errors.New("matching: unknown engine state")
 
 // accumulating reports whether a phase takes orders without matching them, so the
 // book may cross and must be resolved by an uncross on the way out.
@@ -91,6 +111,41 @@ func (s EngineState) String() string {
 		return "CLOSED"
 	default:
 		return "OPEN"
+	}
+}
+
+// ParseEngineState is String's inverse, for the durable command log.
+//
+// A phase transition is journalled by NAME rather than by ordinal, which is
+// against the grain of this package — EngineState is a uint8 iota and
+// EngineSnapshot.State is already encoded as its number. The difference is
+// lifetime. A snapshot is rewritten every checkpoint, so the oldest ordinal on
+// disk is minutes old; a log segment is retained for as long as retention says and
+// may be archived for years. Reordering the block above is a change nobody would
+// think of as a format change, and it would silently reinterpret every archived
+// phase record. A name also fails loudly on a value the reader has never heard of,
+// where an ordinal fails quietly, and a log read by a human during an incident says
+// "PRE_OPEN" instead of 3.
+//
+// The cost is two mappings that can drift, and the only thing stopping that is
+// TestEngineStateNamesRoundTrip, which enumerates the block above rather than
+// listing it. See docs/JOURNAL-COMPLETENESS.md §4.1.
+func ParseEngineState(name string) (EngineState, error) {
+	switch name {
+	case "OPEN":
+		return StateOpen, nil
+	case "CANCEL_ONLY":
+		return StateCancelOnly, nil
+	case "HALTED":
+		return StateHalted, nil
+	case "PRE_OPEN":
+		return StatePreOpen, nil
+	case "CLOSED":
+		return StateClosed, nil
+	case "CLOSING_AUCTION":
+		return StateClosingAuction, nil
+	default:
+		return 0, fmt.Errorf("%w: %q", ErrUnknownEngineState, name)
 	}
 }
 

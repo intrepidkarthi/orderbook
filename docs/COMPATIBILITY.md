@@ -47,7 +47,14 @@ Concretely, on covered packages, these are breaking and require a major bump:
 - Removing a struct field, or changing its type.
 - **Adding a method to an exported interface.** This reads as an addition and is a
   break: every implementer outside this repository stops compiling. `CommandLog`
-  gained five methods in v0.21.0 and this is the case that taught the lesson.
+  gained five methods in v0.21.0 and this is the case that taught the lesson — and it
+  gained a sixteenth, `AppendSetPhase`, in the unreleased phase-journal work, where
+  the lesson was applied rather than re-learned. That break was taken **knowingly and
+  in preference to the compatible alternative**: an optional `PhaseLog` interface
+  would have broken nobody and would have let an implementer drop phase records by
+  omission, which is the durability hole the change existed to close. Recorded here
+  because it is the first time this rule has been consulted and then deliberately
+  paid: see [`JOURNAL-COMPLETENESS.md`](JOURNAL-COMPLETENESS.md) §4.2.
 - Tightening what a function accepts. `Shards` began refusing a second symbol
   without a manifest in v0.22.0 — no signature changed and existing callers broke.
 

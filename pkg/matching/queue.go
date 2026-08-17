@@ -28,6 +28,16 @@ const (
 	cmdSetPhase
 	cmdIndicative
 	cmdCheckpoint
+
+	// cmdKindCount is a sentinel: keep it last. It exists so the durability guard
+	// in command_alphabet_test.go can ENUMERATE this block rather than restate it.
+	// Three mutating commands — Reduce, Halt and SetPhase — were added here and
+	// never added to logCommand, each of them silently, each of them found only
+	// after a restart lost something. A kind added above this line without a
+	// classification is now a test failure at the moment the constant is written,
+	// which is the only point at which the author still remembers whether it
+	// changes state a recovery must reproduce. See docs/JOURNAL-COMPLETENESS.md §4.4.
+	cmdKindCount
 )
 
 // command is one unit of work for the matching goroutine. Exactly one payload

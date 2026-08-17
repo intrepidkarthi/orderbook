@@ -1,6 +1,6 @@
 # Replication — Proving the HA Seams
 
-Status: **implemented** — `examples/replication` + **twelve drills** in CI (D1–D9,
+Status: **implemented** — `examples/replication` + **thirteen drills** in CI (D1–D10,
 including a D3 and a D8 negative control); written as a spec before any code existed,
 and §8 records what building it actually found ·
 Author: Karthikeyan NG · Last updated: 2026-08-17
@@ -205,6 +205,15 @@ deliberately broken code before it counts:
   follower that dropped the record would have a byte-identical *book* and would
   disagree about what settled, forever and silently. What catches it is the bust
   registry being inside the digest.
+- **D10 — An auction replicates, and survives promotion.** The primary runs a
+  pre-open, accumulates a deliberately crossed book, and opens with an uncross; the
+  follower digest-matches an uninterrupted engine fed the same commands, and a venue
+  promoted afterwards comes up in the phase its dead primary was in. Added with the
+  phase record ([JOURNAL-COMPLETENESS.md](JOURNAL-COMPLETENESS.md) deliverable 8).
+  Like D7 it is a test of the digest rather than of the field, and for a sharper
+  reason: dropping the phase on the wire leaves the follower in `StateOpen`, which is
+  both the zero value and the phase the drill expects — so the state assertion stays
+  silent and only the digest fails (JOURNAL-COMPLETENESS §8.6).
 
 ## 7. Deliverables
 
@@ -215,11 +224,12 @@ deliberately broken code before it counts:
    in one sitting.
 3. ✅ The **failover runbook entry** in [RUNBOOKS.md](RUNBOOKS.md) — the §5
    procedure, replacing the "no failover procedure" gap line.
-4. ✅ **Twelve drills** in CI (`examples/replication/main_test.go`), each
+4. ✅ **Thirteen drills** in CI (`examples/replication/main_test.go`), each
    verified to fail against deliberately broken code. D1–D7 are §6's list; since then
    D8 added multi-symbol replication with a wrong-shard negative control, D9 added
    follower reconnect across a rotation and bootstrap from below the retained floor,
-   and D3 gained a negative control that refuses to promote a book with a known gap.
+   D10 added an auction that replicates and survives promotion, and D3 gained a
+   negative control that refuses to promote a book with a known gap.
 5. ✅ The PRODUCTION-READINESS edit: "High availability" is *seams proven —
    topology still yours*, and not one word further.
 

@@ -269,6 +269,7 @@ matching.CommandLog.AppendReduce(orderID, newQty int64, userID string) (int64, e
 matching.CommandLog.AppendReplace(orderID int64, userID string, replacement *types.Order) (int64, error) (interface method)
 matching.CommandLog.AppendResume() (int64, error) (interface method)
 matching.CommandLog.AppendSetMark(price int64) (int64, error) (interface method)
+matching.CommandLog.AppendSetPhase(phase EngineState) (int64, error) (interface method)
 matching.CommandLog.AppendStop(s *types.StopOrder) (int64, error) (interface method)
 matching.CommandLog.AppendSubmit(o *types.Order) (int64, error) (interface method)
 matching.CommandLog.AppendTrailing(ts *types.TrailingStop) (int64, error) (interface method)
@@ -328,6 +329,7 @@ matching.ErrQueueFull var
 matching.ErrResolverPanicked var
 matching.ErrShuttingDown var
 matching.ErrSymbolMoved var
+matching.ErrUnknownEngineState var
 matching.ErrUnknownTrade var
 matching.Event struct
 matching.Event.BustReason string
@@ -394,6 +396,7 @@ matching.OCOEntry struct
 matching.OCOEntry.PrimaryID int64
 matching.OCOEntry.StopID int64
 matching.OrderClass type
+matching.ParseEngineState(name string) (EngineState, error)
 matching.RestoreEngine(config Config, snap *EngineSnapshot) (*Engine, error)
 matching.Runner struct
 matching.RunnerConfig struct
@@ -1060,6 +1063,7 @@ wal.(*Writer).AppendReduce(orderID, newQty int64, userID string) (int64, error)
 wal.(*Writer).AppendReplace(orderID int64, userID string, replacement *types.Order) (int64, error)
 wal.(*Writer).AppendResume() (int64, error)
 wal.(*Writer).AppendSetMark(price int64) (int64, error)
+wal.(*Writer).AppendSetPhase(phase matching.EngineState) (int64, error)
 wal.(*Writer).AppendStop(s *types.StopOrder) (int64, error)
 wal.(*Writer).AppendSubmit(o *types.Order) (int64, error)
 wal.(*Writer).AppendTrailing(ts *types.TrailingStop) (int64, error)
@@ -1085,6 +1089,7 @@ wal.Entry.NewQty int64
 wal.Entry.Order *types.Order
 wal.Entry.PegOffset int64
 wal.Entry.PegRef string
+wal.Entry.Phase string
 wal.Entry.Seq int64
 wal.Entry.StopOrder *types.Order
 wal.Entry.StopPrice int64
@@ -1110,6 +1115,7 @@ wal.KindReduce const
 wal.KindReplace const
 wal.KindResume const
 wal.KindSetMark const
+wal.KindSetPhase const
 wal.KindStop const
 wal.KindSubmit const
 wal.KindTrailing const
