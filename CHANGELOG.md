@@ -127,22 +127,102 @@ versions may include breaking changes).
 
 ### Changed
 
-- **A journal written by an earlier build replays into a different book under this
-  one, and nothing on disk says so.** All three changes below alter what matching does
-  with the same input, so a log recorded before them and recovered after them produces
-  state that never existed on the venue that wrote it. Pro-rata is the widest: a taker
-  that used to rest across the spread is now cancelled, so every command after it
-  replays against a book that differs from the one the live venue had.
+- **A journal now declares which matcher wrote it, and recovery refuses rather than
+  replaying it into a different book.** The three changes below alter what matching
+  does with the same input, so a log recorded before them and recovered after them
+  produces state that never existed on the venue that wrote it. Pro-rata is the widest:
+  a taker that used to rest across the spread is now cancelled, so every command after
+  it replays against a book that differs from the one the live venue had. Until this
+  release nothing on disk said so — recovery replayed the log, started, and the book
+  was wrong in a way nothing downstream flagged. Spec, and the reasoning behind every
+  rule: [SEMANTICS-VERSION.md](docs/SEMANTICS-VERSION.md).
 
-  Neither `wal.Entry` nor `EngineSnapshot` carries an engine version, so recovery
-  cannot detect this and refuse — it will replay the log and start, and the book will
-  be wrong in a way nothing downstream flags. **Before upgrading, take a checkpoint and
-  archive the log it covers.** Recovering across the boundary means recovering from a
-  snapshot written by the old build, which is a book that build agreed with, rather
-  than replaying its commands through this one.
+  **`matching.SemanticsVersion` is 1**, and it is neither a release version nor a
+  format version. It identifies an equivalence class of BUILDS: two builds share a
+  version if and only if, for every command sequence and every configuration, they
+  produce the same trades, events, verdicts and book. A release version used as the
+  stamp would refuse journals that replay identically on every upgrade, and the
+  response to a check that cries wolf is a permanent override; a format version is
+  blind, because all three changes below are byte-identical on disk. §1.2 of the spec
+  is the registry, and every future row needs a number, a release and a link to the
+  changelog entries that justify it.
 
-  Stamping a version into both is the fix and is not done here; it is a format change
-  and belongs with the other one M3 still owes.
+  It is written in **both** places, for different jobs. Segment headers are now
+  **`OBWAL\x03`, 22 bytes**, with the semantics as a big-endian `uint32` at offset 14
+  and the header CRC extended to cover base *and* semantics as one twelve-byte field —
+  four bytes per segment, zero per record. `EngineSnapshot` gains an `omitempty`
+  `Semantics` field, which is a REPORT and never a gate: restoring a book an older
+  build actually had is the documented upgrade procedure, so gating on it would refuse
+  the procedure. `Digest()` normalises it away exactly as it does `WALSeq`.
+
+  **`wal.Recover` refuses if and only if it is about to APPLY a record from a segment
+  whose declared semantics is not this build's** — new sentinel `wal.ErrSemanticsMismatch`,
+  new `wal.RecoverWithOptions` and `wal.RecoverOptions.AcceptSemantics`, new
+  `-wal-accept-semantics` on `obgw`. A mismatched segment the snapshot already covers is
+  read, CRC-verified, skipped, reported and never refused: it contributes nothing to the
+  recovered book, so refusing on it is refusing on a file that could be deleted with no
+  effect. **A venue that checkpoints before upgrading therefore starts with no ceremony
+  at all**, which is what keeps the check credible — one that fires on the happy path is
+  one operators learn to switch off. The refusal falls on a venue that crashed across an
+  upgrade and on a replay from an archive. Sealed segments are gated from the directory
+  before a byte is read; the newest waits for the walk, because gating it optimistically
+  would refuse in the ordinary `SnapshotAhead` case a power loss produces.
+  `Open`, `ReadAll`, `Restore` and `RestoreAfter` never refuse, per
+  [BOUNDED-RECOVERY.md](docs/BOUNDED-RECOVERY.md) §9.1.
+
+  The override **names the versions it accepts** rather than being a boolean, and that
+  is the most important detail in it: `-wal-semantics-mismatch-ok` goes into a unit file
+  during one incident and stays for the life of the deployment, so the next mismatch —
+  a different mismatch, for a different reason — is accepted silently by a flag nobody
+  remembers. `-wal-accept-semantics 1` stops working the moment the number moves again.
+  It relaxes the semantics gate and nothing else: `ErrCorrupt`, `ErrLogGap` and the
+  retention floor are untouched.
+
+  **A pre-stamp log declares nothing, and nothing is not "compatible".** Treating
+  unknown as compatible would turn detection off for the entire installed base, and it
+  would be affirmatively FALSE right now, since a pre-stamp log is exactly the one that
+  does not have the three changes below. So an unstamped segment is refused when its
+  records would be replayed and accepted when they would not, and
+  `-wal-accept-semantics 0` is the deliberate override. `obgw` does not checkpoint on a
+  clean shutdown, so **the ordinary upgrade path meets this refusal once**; the
+  two-line procedure is RUNBOOKS' new "Upgrading across a semantics change". `Open`
+  seals a mismatched active segment before appending — migrating a legacy stem into the
+  set first, and replacing a record-free segment's header in place rather than rotating
+  into its own filename — so the condition is self-healing after one restart instead of
+  recurring on every crash until the segment fills.
+
+  **The number is not maintained by discipline.** `internal/semcheck` is
+  `internal/apicheck` applied to behaviour instead of to signatures: it drives a fixed
+  corpus — the differential and pro-rata tapes at pinned seeds, the recovery profile
+  with its uncrosses, a hand-written tier-2 script for stops, OCO, icebergs, pegs,
+  trailing stops, busts, marks, band breaches and expiry, and an admission-control
+  script — through the engine's PUBLIC API with a deterministic clock, and renders one
+  line per command: verdict, trades field by field, published events with payloads,
+  state, last trade price, best bid and ask, both id counters and the snapshot digest.
+  A body diff with an unchanged version fails and does not offer regeneration first;
+  **`SEMCHECK_UPDATE=1` refuses to write unless `matching.SemanticsVersion` is strictly
+  greater than the golden's**; and a bump with an identical body fails too, because a
+  version that fires when nothing changed is the useless version this design opens by
+  rejecting. `matching.eventKindCount` is added in the shape of `entryKindCount` so the
+  coverage guard enumerates the enum rather than a list, and `pkg/wal` asserts the
+  corpus reaches every `EntryKind`.
+
+  Fourteen sabotages were run against it. Reverting the pro-rata change is caught and
+  the diff names the pro-rata scenario's command 13; regenerating after it without a
+  bump is refused; bumping with no behaviour change is refused; a literal in place of
+  the constant fails; gating the whole set instead of the replay set fails; treating
+  unknown as compatible fails on all three pre-stamp shapes; deleting the `Open`-time
+  seal fails on the second crash; and putting `Semantics` back into `Digest()` makes the
+  no-change bump silently accepted, which is the circularity §2.4 exists to prevent.
+  One sabotage found a real gap and it was fixed rather than filed: a stop-trigger
+  comparison relaxed from `>=` to `>` was invisible, because no scenario sat a stop
+  exactly ON its trigger. Two now do.
+
+  What this deliberately does **not** cover: engine CONFIGURATION. Two builds at the
+  same semantics version with different `ProRata`, `SelfTradePrevention`, `MaxOrders`
+  or `PriceBand` replay the same log into different books and nothing anywhere notices,
+  before or after this change. That is arguably larger than the gap this closes; it is
+  a different design and it is named in §6 rather than implied to be handled.
 
 - **A `REJECTED` command's event batch may now carry further events, and a consumer
   must apply them.** `EventSink` consumers — `cmd/obgw`, `pkg/marketdata` and anything
