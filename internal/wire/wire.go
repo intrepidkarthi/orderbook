@@ -615,8 +615,18 @@ type Rejected struct {
 const RejectedLen = 1 + 1 + ClOrdIDLen + 2
 
 // Executed is a fill. LeavesQty is carried because the event stream is proven to
-// reconstruct per-order remaining quantity (see TestEventStreamReconstructsBook);
-// without that proof this field would be a guess and had to be omitted.
+// reconstruct per-order remaining quantity on GENERATED input — TestDifferentialTape
+// rebuilds a book from the stream alone and compares it against the engine's own
+// after every command of every tape; without that proof this field would be a guess
+// and had to be omitted.
+//
+// The citation used to name TestEventStreamReconstructsBook's scenario list alone,
+// and that had a hole exactly the shape this field cares about: a client whose
+// resting order self-trade-prevention DECREMENT shrank inside a rejected fill-or-kill
+// had a LeavesQty permanently too large, and one whose maker was cancelled had one
+// that should have been zero, because a rejected command dropped its whole event
+// batch. Those Replaced and Canceled events now reach the session layer.
+// docs/DIFFERENTIAL-FINDINGS.md §4.6.
 type Executed struct {
 	Version   uint8
 	ClOrdID   string

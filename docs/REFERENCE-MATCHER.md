@@ -255,13 +255,66 @@ specification text, and the model implements *this paragraph*:
 > `min(q * remaining_i / total, remaining_i)` using truncating integer division.
 > The shortfall `q - sum(provisional)` is then distributed one order at a time in
 > **arrival order**, each taking as much of the shortfall as its unallocated
-> remainder allows, until the shortfall is zero. Orders belonging to the taker (by
-> the self-match test) are excluded from `total` and receive nothing; a level with
-> no eligible liquidity ends the walk rather than skipping to the next level.
+> remainder allows, until the shortfall is zero.
 
-If that paragraph is wrong, both implementations are wrong together and the harness
-is silent. That is the honest limit of a differential test (§1.3), and the
-mitigation is that the paragraph is short, in a document, and reviewable — which
+**Self-trade prevention at a pro-rata level.** A second paragraph, added when the
+first one's last sentence turned out to be a defect (§10.1(c),
+[`DIFFERENTIAL-FINDINGS.md`](DIFFERENTIAL-FINDINGS.md) §5). It used to read
+"orders belonging to the taker are excluded from `total` and receive nothing; a
+level with no eligible liquidity ends the walk rather than skipping to the next
+level", and that skip left the taker's remainder resting **across the spread** —
+bid 100 / ask 99 on a continuous book, in all five STP modes, because `matchProRata`
+never consulted the mode at all. A venue configured `ALLOW` did not get the
+self-trade it had asked for and one configured `CANCEL_BOTH` cancelled neither
+order: pro-rata was silently overriding the venue's STP configuration. The
+replacement deletes a rule rather than adding one — self-trade prevention applies at
+a pro-rata level exactly as it applies under price-time priority, and the allocation
+rule has no opinion about who owns what:
+
+> At each price level the taker touches, resting orders are partitioned by the
+> self-match test into the taker's own and the rest — **unless the taker's mode is
+> `ALLOW`**, in which case there is no self-match to prevent and the taker's own
+> orders take part in the allocation exactly as any other order does, which is what
+> `ALLOW` already means under price-time priority. The taker is allocated pro-rata
+> across the rest, exactly as specified above. If that exhausts the taker, the walk
+> ends and self-trade prevention never fires — the taker never needed its own
+> liquidity. If the taker still needs quantity at that level and the only orders
+> left there are its own, self-trade prevention is applied to them **in arrival
+> order** under the taker's mode: `CANCEL_NEWEST` cancels the taker and ends the
+> walk; `CANCEL_OLDEST` removes the maker, emits its `Canceled`, and re-allocates
+> whatever remains at the level; `CANCEL_BOTH` does both and ends the walk;
+> `DECREMENT` shrinks both by their overlap, emits `Replaced` or `Canceled`, and
+> continues; and the level is then re-read, because both an allocation and a
+> prevention decision change what is resting there. A level is never skipped, and a
+> taker never rests at a price that crosses a resting order it could have been
+> prevented against.
+
+Two things in that paragraph are choices rather than consequences, so they are
+stated here rather than left to the code.
+
+**Eligible liquidity trades first; prevention fires when the taker's own order would
+be needed.** This is the position-free analogue of what price-time priority does.
+Under FIFO the taker trades with everything ahead of its own order and prevention
+fires when the walk *reaches* it; whether anything trades first depends on queue
+position. Pro-rata has no queue position, so "reaches it" has to be defined, and the
+only definition that does not invent an ordering is "the level's eligible liquidity
+is exhausted and the taker still wants more". The cost, stated: a `CANCEL_NEWEST`
+taker under pro-rata may print *more* than the same taker under FIFO would have, if
+its own order happens to sit at the front of the FIFO queue. That is a difference
+between two allocation policies, which is what an allocation policy is.
+`TestProRata_MixedLevelTradesEligibleBeforeSTPFires` is the only case that
+distinguishes this rule from applying prevention first, so it is written on a level
+holding both the taker's own order and a stranger's.
+
+**`ALLOW` is not demoted.** Under `ALLOW` the taker's own order is in the allocation
+from the start rather than being reached after the strangers, because `ALLOW` says
+the self-match test does not fire — and under FIFO it trades from its own place in
+the queue rather than from behind everyone else's. A mode string the engine does not
+recognise falls through to the same behaviour, in both allocation policies.
+
+If either paragraph is wrong, both implementations are wrong together and the
+harness is silent. That is the honest limit of a differential test (§1.3), and the
+mitigation is that the paragraphs are short, in a document, and reviewable — which
 `proRataAllocate` plus a caller is not.
 
 ### 2.4 What tier 1 defers, and why that split
@@ -537,17 +590,29 @@ must burn them too, and it means an operator counting trade ids and finding a ga
 has found a rejected FOK, not a lost print.
 
 **Trade ids gap while event sequence numbers do not.** The same rejected FOK
-produces *no* trade events at all: `emitResult` clears `e.pending` when the status
-is `Rejected` (`:752`), so the reversed prints never reach a consumer, and
-`stampAndPublish` numbers only the composed batch (`:776-784`). One counter has
-holes, the other does not, in the same command. Anyone reconciling the two streams
-needs that sentence.
+produces *no* trade events at all: `settleInto`'s fill-or-kill branch removes the
+events describing the prints it just reversed, and `stampAndPublish` numbers only
+the composed batch (`:776-784`). One counter has holes, the other does not, in the
+same command. Anyone reconciling the two streams needs that sentence.
 
-*(A fourth candidate is not on this list because its status is genuinely open:
-`recordLast` sets `LastTradePrice` from the final print before `settleInto`'s FOK
-branch reverses them (`:1670-1675`, `:972-982`), so a **rejected FOK appears to move
-the last trade price**. See §9 — the model must take a position, and if the engine's
-position is the wrong one, that is a defect found rather than a model bug.)*
+What that no longer implies, since
+[`DIFFERENTIAL-FINDINGS.md`](DIFFERENTIAL-FINDINGS.md) §4: **the rest of the batch
+is not dropped.** A rejection drops only the events describing state the engine
+actually undid, so a rejected command can publish `CANCELED`, `REPLACED`,
+`ACCEPTED` and `TRIGGERED` events after its `REJECTED` — they describe what happened
+to *other* orders, and none of it is being reversed. `emitResult` used to clear
+`e.pending` wholesale, which is what made an STP-cancelled maker vanish silently.
+
+**A rejected FOK leaves the last trade price where it found it.** This used to be a
+fourth rule on this list, marked genuinely open, and §9(a) predicted it as a defect
+before anything was run. It reproduced, and it is fixed:
+[`DIFFERENTIAL-FINDINGS.md`](DIFFERENTIAL-FINDINGS.md) §3 settles that
+`LastTradePrice` means the price of the last trade this venue **published**, so
+`settleInto` captures the pre-match value and its fill-or-kill branch restores it
+alongside `reverseTrade`. The model implements the same rule. The asymmetry with
+`tradeSeq` two paragraphs up is the decision rather than an oversight: an id is a
+**name** and a counter that goes backwards can give one name to two prints; a price
+is a **datum** and restoring it makes it correct again.
 
 ### 3.5 Snapshot and replay equivalence
 
@@ -980,6 +1045,11 @@ So that §10 is not graded on a curve.
   band. The model has to take a position; if the model's position is "a rejected
   order changes nothing" and the engine disagrees, the finding is the engine's.
 
+  **Reproduced, then fixed 2026-08-17** — and the model's position was the wrong
+  one too, which is §1.3 measured rather than warned about. See
+  [`DIFFERENTIAL-FINDINGS.md`](DIFFERENTIAL-FINDINGS.md) §3 for the decision and
+  §10.1(a) below for what it cost.
+
   **(b) An STP-cancelled maker can vanish from the book with no event announcing
   it.** `emitCancel(maker)` appends to `e.pending` (`:798-804`), and `emitResult`
   clears `e.pending` when the status is `Rejected` (`:752`). A fill-or-kill taker
@@ -991,6 +1061,13 @@ So that §10 is not graded on a curve.
   their **combination** is exactly what a generated tape reaches and a hand-written
   scenario list does not. If this reproduces, it is a live correctness defect and it
   gets its own fix, not a model workaround.
+
+  **Reproduced, then fixed 2026-08-17**, and it got its own fix rather than a model
+  workaround: the cancellation stands and the event survives the rejection. See
+  [`DIFFERENTIAL-FINDINGS.md`](DIFFERENTIAL-FINDINGS.md) §4. The prediction
+  understated it — the same dropped batch also swallowed an STP `DECREMENT`'s
+  `Canceled` and an OCO stop leg's, and the reconstruction claim on `EventKind` had
+  to be narrowed and re-proved on the generated path.
 
 - **Tier 1 may turn out not to be a clean cut.** The tier boundary assumes exotics
   compose with the matching core without changing it. `cascadeStops` runs *inside*
@@ -1033,6 +1110,15 @@ Written after the code, as §9 said it would be.
 
 ### 10.1 Three engine defects, two of them predicted
 
+> **All three fixed 2026-08-17.** Each was pinned here rather than repaired, because
+> each had more than one defensible answer;
+> [`DIFFERENTIAL-FINDINGS.md`](DIFFERENTIAL-FINDINGS.md) is the document that picked
+> between them and §11 of that document records what the fix measured. Each fix was
+> three-sided — engine, model, and the pinning test inverted — and (c) had a fourth
+> side, §2.3's prose. The three pinning tests keep their names and now assert the
+> opposite of them, which is the pin being redeemed rather than a test flipped to
+> make a change pass.
+
 **(a) A rejected fill-or-kill moves the last trade price.** §9 predicted it from
 reading `recordLast` (`engine.go:1670-1675`) against `settleInto`'s FOK branch
 (`:972-982`), and it reproduces in three commands. A maker rests 3 lots at 100; an
@@ -1068,9 +1154,24 @@ crossing, after which the touch was a crossing between two **unrelated** account
 which reads as an outright matching failure rather than an STP artefact. Pinned by
 `TestProRataSelfSkipCrossesTheBook`.
 
-None is fixed here. Each is a matching-semantics or event-stream change with
+None was fixed here. Each is a matching-semantics or event-stream change with
 consequences past the matcher, and this repository writes the spec before the code.
-Each test carries the sentence a fix has to come and change.
+Each test carried the sentence a fix had to come and change, and
+[`DIFFERENTIAL-FINDINGS.md`](DIFFERENTIAL-FINDINGS.md) is that spec. What the fix
+slice then measured, beyond what is written above:
+
+- **(a) also fires stops.** With a stop resting at trigger 100 and nothing ever
+  traded, the rejected fill-or-kill's phantom price fired it and really printed 2
+  lots at 100 between two accounts that had not sent the rejected order. Neither was
+  told, because (b) dropped the batch. The two defects had to ship together.
+- **(b) is four defects.** The pinned `CANCEL_OLDEST` instance, plus `CANCEL_BOTH`,
+  plus `DECREMENT` (which also mutates the *taker* of an order that ends REJECTED),
+  plus an OCO stop leg destroyed by a stranger's rejected order.
+- **(c) overrides the venue's STP configuration.** All five modes left bid 100 /
+  ask 99, because `matchProRata` never called `takerSTP` at all — so `ALLOW` did not
+  get the self-trade it asked for and `CANCEL_BOTH` cancelled neither order. On the
+  committed sweep the pro-rata profile was in a crossed state after **107** of its
+  700 commands; it is now 0.
 
 Two consequences for this document. §1.3's warning is exactly what (a) and (b) are:
 the model was written to reproduce the engine's position on both, so the differential

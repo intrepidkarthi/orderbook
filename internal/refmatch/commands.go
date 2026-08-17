@@ -62,7 +62,12 @@ func (m *Model) settle(o *order) (Status, Reject) {
 		return StatusRejected, RejectPostOnlyWouldCross
 	}
 
+	// Three marks taken before the walk, all of them for the fill-or-kill branch:
+	// where this walk's prints begin, where its events begin, and the last trade
+	// price the venue had PUBLISHED before it.
 	start := len(m.trades)
+	pendStart := len(m.pending)
+	lastBefore := m.last
 	if m.cfg.ProRata {
 		m.matchProRata(o)
 	} else {
@@ -96,6 +101,15 @@ func (m *Model) settle(o *order) (Status, Reject) {
 		if o.Remaining != 0 {
 			m.reverseFrom(start)
 			m.trades = m.trades[:start]
+			// The reversal is total, so the reference price goes back too: the last
+			// trade price is the price of the last print this venue PUBLISHED, and
+			// these reached no consumer, no result and no book. Unconditional
+			// because a walk that printed nothing did not move m.last either.
+			m.last = lastBefore
+			// The events describing the reversed prints go, and ONLY those. A maker
+			// this walk cancelled or shrank under self-trade prevention is NOT being
+			// put back, so the event saying so survives the rejection.
+			m.pending = dropReversedTrades(m.pending, pendStart)
 			o.Status = StatusRejected
 			return StatusRejected, RejectFOKCannotFill
 		}
@@ -104,8 +118,12 @@ func (m *Model) settle(o *order) (Status, Reject) {
 	default: // GTC
 		if o.active() && o.Remaining != 0 {
 			// The book-size cap is a verdict, not an admission control: an order
-			// that traded and then found no room is REJECTED, and its prints still
-			// stand even though the events announcing them are dropped.
+			// that traded and then found no room is REJECTED, and its prints stand —
+			// and so, since the fix for the dropped batch, do the events announcing
+			// them. (The engine cannot actually reach that state: a taker with a
+			// remainder has emptied at least one maker, so the resting count after
+			// it rests is never higher than before the command. The model can
+			// represent it, and the rule is written to be right there anyway.)
 			if m.count() >= m.cfg.MaxOrders {
 				o.Status = StatusRejected
 				return StatusRejected, RejectOrderBookFull
@@ -119,14 +137,20 @@ func (m *Model) settle(o *order) (Status, Reject) {
 // compose builds the event batch for a submitted order around the events matching
 // recorded, and returns the command's result.
 //
-// A rejection means nothing happened, so the events recorded during the walk are
-// DROPPED — which is why a rejected fill-or-kill announces no executions even
-// though it burned trade ids, and why a maker that self-trade-prevention removed
-// mid-walk can leave the book with no event saying so.
+// A rejection drops only the events describing state the venue actually UNDID, and
+// the only place that undoes anything is settle's fill-or-kill branch, which
+// removes its own reversed prints before returning here. So a rejected fill-or-kill
+// announces no executions even though it burned trade ids — and a maker that
+// self-trade prevention removed or shrank mid-walk is NOT put back, so the event
+// saying so is published after the REJECTED.
+//
+// This used to be `if status == StatusRejected { m.pending = nil }`, which was the
+// model's copy of the engine's own dropped batch, canonised here by construction
+// (docs/REFERENCE-MATCHER.md §2.2) and therefore invisible to the differential
+// comparison. docs/DIFFERENTIAL-FINDINGS.md §4 is the decision that removed both.
 func (m *Model) compose(o *order, status Status, reason Reject) Result {
 	var evs []Event
 	if status == StatusRejected {
-		m.pending = nil
 		evs = append(evs, Event{Kind: EvRejected, OrderID: o.ID, User: o.User, Reason: reason})
 	} else {
 		evs = append(evs, Event{Kind: EvAccepted, OrderID: o.ID, User: o.User})

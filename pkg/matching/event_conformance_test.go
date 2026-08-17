@@ -47,6 +47,16 @@ func (m *mirrorBook) OnEvents(evs []Event) {
 			if e.Order.Status == types.OrderStatusPendingTrigger {
 				continue
 			}
+			// An order announced at zero size is one that self-trade-prevention
+			// DECREMENT emptied inside its own command: both sides lost their
+			// overlap, nothing is left of it, and an order with nothing left cannot
+			// rest. Adding it would leave a zero-lot phantom in every
+			// reconstruction. Found by the generated-path check in runDiff, not by
+			// the scenario list below — fifo/seed=5 command 133 and
+			// capped-shard3/seed=7 command 118.
+			if e.Order.Quantity <= 0 {
+				continue
+			}
 			// Quantity is the as-submitted size; trades that follow reduce it.
 			// RemainingQty cannot be used here because emitResult runs after
 			// settleInto, so a marketable order is already terminal at this point.
@@ -270,6 +280,26 @@ func stpCases(t *testing.T) []conformanceCase {
 	return out
 }
 
+// stpConfig builds a DefaultConfig with one self-trade-prevention mode set.
+func stpConfig(mode SelfTradePrevention) func() Config {
+	return func() Config { c := DefaultConfig("X"); c.SelfTradePrevention = mode; return c }
+}
+
+// failingFOKAgainstOwnMaker rests makerQty for one account and then sends that same
+// account a fill-or-kill for takerQty it cannot fill, so the walk reaches the
+// account's own maker under the configured mode and is then rejected.
+func failingFOKAgainstOwnMaker(t *testing.T, e *Engine, makerQty, takerQty int64) {
+	t.Helper()
+	e.Process(cOrd(t, "same", types.SideSell, 100, makerQty))
+	fok, err := types.NewOrder("same", "X", types.SideBuy, types.OrderTypeLimit, 100, takerQty, types.TIFFillOrKill)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	if res := e.Process(fok); res.Status != types.OrderStatusRejected {
+		t.Fatalf("the fill-or-kill ended %s, want REJECTED — this scenario needs the rejected path", res.Status)
+	}
+}
+
 func extraCases(t *testing.T) []conformanceCase {
 	return []conformanceCase{
 		{name: "FOK that cannot fill unwinds cleanly", run: func(t *testing.T, e *Engine) {
@@ -288,6 +318,18 @@ func extraCases(t *testing.T) []conformanceCase {
 			}
 			e.Process(fok)
 		}},
+		// Fill-or-kill AND self-trade prevention in one order. This is the
+		// combination the list did not contain, and it is the combination a
+		// generated tape reaches: the taker removes or shrinks a maker mid-walk,
+		// then fails to fill and is rejected, and the batch announcing the removal
+		// used to be dropped along with the reversed prints. The book lost an order
+		// and the stream never said so. docs/DIFFERENTIAL-FINDINGS.md §4.
+		{name: "FOK that cannot fill x STP cancel-oldest", cfg: stpConfig(STPCancelOldest),
+			run: func(t *testing.T, e *Engine) { failingFOKAgainstOwnMaker(t, e, 3, 5) }},
+		{name: "FOK that cannot fill x STP cancel-both", cfg: stpConfig(STPCancelBoth),
+			run: func(t *testing.T, e *Engine) { failingFOKAgainstOwnMaker(t, e, 3, 5) }},
+		{name: "FOK that cannot fill x STP decrement", cfg: stpConfig(STPDecrement),
+			run: func(t *testing.T, e *Engine) { failingFOKAgainstOwnMaker(t, e, 3, 5) }},
 		{name: "stop cascade fired by another order's match", run: func(t *testing.T, e *Engine) {
 			seedWithLastPrice(t, e)
 			e.ProcessStop(stopOrder(t, "s", types.SideSell, 3, 97)) // rests; fires when price falls

@@ -37,6 +37,15 @@ type BustRecord struct {
 // after the market has moved, and each of those "undos" would be a second wrong
 // rather than a correction of the first.
 //
+// The rule behind that, which a failed fill-or-kill obeys from the other side:
+// A PUBLISHED PRINT IS PERMANENT, WHATEVER LATER HAPPENS TO IT; AN UNPUBLISHED ONE
+// NEVER EXISTED. A busted trade was published — subscribers saw it, stops fired on
+// it, the collar recentred on it — so rewinding it would falsify a number other
+// participants already acted on. A reversed fill-or-kill print reaches no sink, no
+// MatchResult, no book and no journal, so settleInto DOES put its LastTradePrice
+// back. Same rule, opposite outcomes. docs/TRADE-BUST.md §2 and
+// docs/DIFFERENTIAL-FINDINGS.md §3.5.
+//
 // Validation is identity-only. The engine knows how many trades it has printed, so
 // an id it never issued is ErrUnknownTrade — but it does not retain the trades
 // themselves (a venue's uptime multiplied by its print rate is not a thing to hold

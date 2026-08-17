@@ -7,14 +7,52 @@ import "github.com/intrepidkarthi/orderbook/pkg/types"
 // the L3 book; Rejected reports refused orders. Triggered and BookDelta are
 // reserved for future emission.
 //
-// The reconstruction claim is machine-checked: TestEventStreamReconstructsBook
-// replays the stream into a mirror book and asserts order-for-order and
-// lot-for-lot equality with the engine's own book across every order class —
-// limits, market and IOC remainders, FOK reversal, post-only, stops both resting
-// and cascade-fired, trailing stops, OCO in both directions, iceberg refill and
-// exhaustion, and all five self-trade-prevention modes. Do not weaken that test
-// to make a change pass; the claim on this line is only worth what the test
-// proves.
+// The reconstruction claim is machine-checked on GENERATED input, which is the
+// load-bearing half of this sentence. TestDifferentialTape replays the stream into
+// a mirror book and compares it against the engine's own book after every one of
+// the 2,240 commands of its 16 tapes; TestEventStreamReconstructsBook does the same
+// over a hand-written scenario list, one per order class — limits, market and IOC
+// remainders, FOK reversal both plain and crossed with self-trade prevention,
+// post-only, stops both resting and cascade-fired, trailing stops, OCO in both
+// directions, iceberg refill and exhaustion, and all five STP modes.
+//
+// The citation moved because the scenario list ALONE proved this claim true while it
+// was false. None of its ~25 scenarios combined fill-or-kill with self-trade
+// prevention, which is exactly the combination in which a rejected order's batch was
+// dropped and the book lost a maker with nothing on the stream to say so — an
+// exhaustive check over an incomplete input space reporting completeness, with the
+// report load-bearing (docs/JOURNAL-COMPLETENESS.md §1,
+// docs/DIFFERENTIAL-FINDINGS.md §4.6). The generated-path check is what would have
+// caught it without anyone predicting it.
+//
+// The claim is not unconditional and this comment will not say it is. It holds for
+// everything tier 1 reaches. It is NOT proven for a fill-or-kill that exhausts an
+// iceberg's reserve and then fails, which leaves the engine's own book holding an
+// order whose displayed size no stream can explain, because the engine is wrong
+// there rather than the stream (TestFailingFOKCorruptsAnIcebergsReserve pins it).
+//
+// It is also NOT proven for a stop fired by a cascade whose order is then rejected.
+// cascadeStops announces the order TRIGGERED and ACCEPTED, settleInto rejects it, and
+// that rejection reaches nobody: emitTerminalIfDone fires only on Cancelled and a
+// cascade-fired order never reaches emitResult. The stream says an order entered the
+// book and never says it left, so a reconstruction holds it forever. Same shape as the
+// self-trade-prevention case fixed in this release, in a path the generated tape cannot
+// reach because stops are tier 2. Pinned, not fixed, by
+// TestCascadeFiredStopRejectedLeavesAPhantom.
+//
+// And it holds for a consumer that ignores an Accepted whose quantity is zero, which
+// is a condition on the READER rather than an exclusion from the claim, and is the
+// easier of the two to miss. Self-trade prevention under DECREMENT can empty an order
+// inside the command that created it, and the venue announces it anyway because it was
+// accepted before it was emptied. Nothing further is ever published about that order.
+// The mirror in runDiff applies this rule, which is why the generated-path check
+// passes; a consumer that does not apply it holds a zero-lot phantom forever, and the
+// proof on these lines does not cover it. Stated for clients in
+// docs/PROTOCOL.md, and open as a question about whether the engine should announce
+// such an order at all in docs/DIFFERENTIAL-FINDINGS.md §11.3.
+//
+// Do not weaken either test to make a change pass; the claim on these lines is only
+// worth what they prove.
 type EventKind uint8
 
 const (
@@ -94,7 +132,8 @@ type Event struct {
 //
 // It was reserved for an aggregated L2 level change, and the engine is the wrong
 // place to produce one. L2 is a pure function of L3, and this stream is tested to
-// reconstruct the L3 book exactly (TestEventStreamReconstructsBook, 23 scenarios) —
+// reconstruct the L3 book exactly (TestDifferentialTape's per-command mirror check
+// on generated tapes, plus TestEventStreamReconstructsBook's scenario list) —
 // so a consumer that wants level deltas can derive them, and marketdata.NewL2Feed
 // does. Emitting them from the matching goroutine would add work to the hot path to
 // compute something a consumer can compute for itself, off it.
@@ -118,6 +157,13 @@ type Event struct {
 // OnEvents may be called more than once per submitted command — a guardrail trip
 // or a band-breach pause publishes a state change mid-match. Do not build a
 // consumer on a one-callback-per-command model.
+//
+// A REJECTED command's batch is not necessarily one event. A rejection drops only
+// the events describing state the engine actually undid — the reversed prints of a
+// failed fill-or-kill — and everything else that walk did stands and is published
+// after the Rejected: a maker cancelled or shrunk by self-trade prevention, an
+// iceberg slice refilled, an OCO leg cancelled. A consumer must apply them.
+// docs/DIFFERENTIAL-FINDINGS.md §4.
 type EventSink interface {
 	OnEvents(events []Event)
 }

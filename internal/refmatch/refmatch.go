@@ -340,13 +340,18 @@ func (m *Model) State() State { return m.state }
 // mode rather than merely drawing it.
 func (m *Model) STPDecisions() [6]int { return m.stpDecisions }
 
-// LastTradePrice is the price of the most recent print.
+// LastTradePrice is the price of the last trade this venue PUBLISHED.
 //
-// It is deliberately NOT unwound when a fill-or-kill order fails and its trades are
-// reversed: the reference price a venue quotes moved when the print happened, and
-// putting it back would be a second rule nobody wrote down. See §9(a) of
-// docs/REFERENCE-MATCHER.md — the model takes a position here, and if the engine's
-// position differs, one of them is a defect.
+// It IS unwound when a fill-or-kill order fails and its trades are reversed, and
+// that is the whole of the definition rather than a second rule: those prints
+// reached no consumer, no result, no book and no journal, so no price they named
+// was ever published. An IOC's partial fills are published and stand; a busted
+// print was published and stands.
+//
+// The model used to take the opposite position, canonising the engine's, which is
+// exactly the case docs/REFERENCE-MATCHER.md §1.3 warns about — two implementations
+// agreeing because they were written from the same wrong sentence.
+// docs/DIFFERENTIAL-FINDINGS.md §3 is the decision that changed both.
 func (m *Model) LastTradePrice() int64 { return m.last }
 
 // Book returns the whole resting book as a ranked L3 list: bids best-price-first
@@ -530,6 +535,21 @@ func (m *Model) flush() []Event {
 	return evs
 }
 
+// dropReversedTrades compacts pending in place from index from onward, keeping
+// every kind except EvTrade and keeping the survivors in order. It is the event
+// half of reverseFrom: the prints that were undone reach nobody, and everything
+// else the same walk recorded reaches everybody.
+func dropReversedTrades(pending []Event, from int) []Event {
+	kept := pending[:from]
+	for _, ev := range pending[from:] {
+		if ev.Kind == EvTrade {
+			continue
+		}
+		kept = append(kept, ev)
+	}
+	return kept
+}
+
 // --- matching ----------------------------------------------------------------
 
 // selfMatch reports whether taker and maker must not trade with each other: the
@@ -659,13 +679,21 @@ func (m *Model) matchFIFO(taker *order) {
 }
 
 // matchProRata allocates each price level in proportion to resting size instead of
-// by arrival order. Self orders are skipped rather than STP-cancelled.
+// by arrival order, and applies self-trade prevention at a level exactly as
+// matchFIFO applies it in the queue.
 //
-// The remainder rule is arbitrary — nothing in microstructure forces it, and a
-// different venue would round differently — so it is specified in prose at
-// docs/REFERENCE-MATCHER.md §2.3 and this implements that paragraph rather than
+// Both halves are arbitrary — nothing in microstructure forces the remainder
+// rounding, and "when does a pro-rata level count as having reached the taker's own
+// order?" has no queue position to answer it — so both are specified in prose at
+// docs/REFERENCE-MATCHER.md §2.3 and this implements THAT PARAGRAPH rather than
 // transcribing the engine's loop.
 func (m *Model) matchProRata(taker *order) {
+	// Only the four preventing modes partition a level. Allow says there is no
+	// self-match to prevent, so the taker's own orders are allocated exactly like
+	// anyone else's, which is what Allow does under price-time priority too.
+	mode := m.takerSTP(taker)
+	partition := mode == CancelNewest || mode == CancelOldest || mode == CancelBoth || mode == Decrement
+
 	for taker.Remaining != 0 {
 		var price int64
 		var opp Side
@@ -687,30 +715,97 @@ func (m *Model) matchProRata(taker *order) {
 			}
 		}
 
-		var eligible []*order
-		var total int64
-		for _, o := range m.ordersAt(opp, price) {
-			if m.selfMatch(taker, o) {
-				continue
+		// One price level, resolved completely before the walk moves on: the level
+		// is re-read after every allocation and after every prevention decision,
+		// because both change what is resting there. did is the termination guard —
+		// a level that yields nothing twice running ends the walk.
+		did := false
+		for taker.Remaining != 0 {
+			var eligible, own []*order
+			var total int64
+			for _, o := range m.ordersAt(opp, price) {
+				if partition && m.selfMatch(taker, o) {
+					own = append(own, o)
+					continue
+				}
+				eligible = append(eligible, o)
+				total += o.Remaining
 			}
-			eligible = append(eligible, o)
-			total += o.Remaining
-		}
-		// A level holding only the taker's own liquidity ends the walk rather than
-		// skipping to the next level.
-		if total == 0 {
-			return
-		}
 
-		q := min(taker.Remaining, total)
-		allocs := proRata(eligible, q)
-		for i, maker := range eligible {
-			if allocs[i] <= 0 {
+			if total > 0 {
+				q := min(taker.Remaining, total)
+				allocs := proRata(eligible, q)
+				for i, maker := range eligible {
+					if allocs[i] <= 0 {
+						continue
+					}
+					// Under Allow the taker's own order is in this set, and that is
+					// a self-trade-prevention decision being made — the one that
+					// says "trade". Counting it here keeps the per-mode coverage
+					// guard honest about pro-rata.
+					if m.selfMatch(taker, maker) {
+						m.stpDecisions[Allow]++
+					}
+					m.execute(taker, maker, price, allocs[i])
+					if maker.Remaining == 0 {
+						m.remove(maker.ID)
+					}
+				}
+				did = true
 				continue
 			}
-			m.execute(taker, maker, price, allocs[i])
-			if maker.Remaining == 0 {
+
+			// The level emptied under the walk: take the next price, unless nothing
+			// happened here at all, in which case there is no liquidity to take.
+			if len(own) == 0 {
+				if !did {
+					return
+				}
+				break
+			}
+			did = true
+
+			// Only the taker's own liquidity is left and the taker still wants
+			// quantity, so the self-match is real and the taker's mode decides,
+			// oldest first. A level is never skipped.
+			maker := own[0]
+			m.stpDecisions[mode]++
+			switch mode {
+			case CancelNewest:
+				taker.Status = StatusCancelled
+				return
+			case CancelOldest:
+				maker.Status = StatusCancelled
 				m.remove(maker.ID)
+				m.emit(EvCanceled, maker)
+			case CancelBoth:
+				taker.Status = StatusCancelled
+				maker.Status = StatusCancelled
+				m.remove(maker.ID)
+				m.emit(EvCanceled, maker)
+				return
+			case Decrement:
+				d := min(taker.Remaining, maker.Remaining)
+				taker.Qty -= d
+				taker.Remaining -= d
+				maker.Qty -= d
+				maker.Remaining -= d
+				if maker.Remaining == 0 {
+					m.remove(maker.ID)
+					m.emit(EvCanceled, maker)
+				} else {
+					m.emit(EvReplaced, maker)
+				}
+				if taker.Remaining == 0 {
+					taker.Status = StatusCancelled
+					return
+				}
+			default:
+				// Unreachable: own is only populated for the four modes above.
+				// Written out because falling off this switch would re-read the same
+				// level forever.
+				taker.Status = StatusCancelled
+				return
 			}
 		}
 	}
@@ -769,7 +864,8 @@ func (m *Model) wouldCross(o *order) bool {
 //
 // The trade sequence counter is NOT rewound. A counter that goes backwards is a
 // counter that can name two different prints with one id, so a rejected FOK burns
-// trade ids that no trade will ever carry.
+// trade ids that no trade will ever carry. The last trade PRICE is a different kind
+// of thing — a datum, not a name — and settle does put that back.
 func (m *Model) reverseFrom(start int) {
 	for i := start; i < len(m.trades); i++ {
 		tr := m.trades[i]

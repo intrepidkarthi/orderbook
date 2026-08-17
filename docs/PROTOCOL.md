@@ -384,9 +384,25 @@ DECREMENT shrinking a maker you did not touch. A client that assumes it only eve
 follows its own `Reduce` will drift on the second.
 
 **`LeavesQty` is trustworthy** because the engine's event stream is proven to
-reconstruct per-order remaining quantity — see `TestEventStreamReconstructsBook`.
-Without that proof the field would have been a guess, and once the golden vectors
-were committed it could never have been added.
+reconstruct per-order remaining quantity. The proof is no longer the scenario list in
+`TestEventStreamReconstructsBook` alone: a hand-written list proves only what someone
+thought to write down, and the combination it did not contain — a fill-or-kill that
+cannot fill crossed with self-trade prevention — was where the stream fell silent about
+a maker it had removed. The claim now rests on the per-command mirror check in
+`runDiff`, which reconstructs the book from the stream after every one of 2,240
+generated commands and compares it against the engine's own. Without that proof this
+field would have been a guess, and once the golden vectors were committed it could
+never have been added.
+
+**One rule a reconstructing consumer must follow**: ignore an `Accepted` whose quantity
+is zero. Self-trade prevention under `DECREMENT` can empty an order inside the command
+that created it — both sides lose their whole overlap — and the venue still announces
+it, because it was accepted before it was emptied. An order with nothing left cannot
+rest, so treating that announcement as a resting order leaves a zero-lot phantom in the
+reconstruction forever. Nothing further is published about it; there is no later
+cancellation to wait for. This is the only such rule, and it is stated here rather than
+left in the test that found it (fifo seed 5 command 133, capped-shard3 seed 7 command
+118).
 
 ### What `2` (unknown order) does and does not mean
 

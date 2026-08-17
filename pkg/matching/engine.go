@@ -741,15 +741,22 @@ func toMatchResult(order *types.Order, dst []types.Trade, status types.OrderStat
 // Accepted (or Rejected) for the order itself, then a Trade per fill it produced
 // (including fills from any stops it triggered). No-op without a sink, so the hot
 // path stays zero-overhead. The event batch reuses an engine-owned buffer.
+//
+// A REJECTED order's batch is not empty. The rule is that a rejection drops only
+// the events describing state the engine actually UNDID, and the only place that
+// undoes anything is settleInto's fill-or-kill branch, which removes its own
+// reversed trades from e.pending before returning. Everything else the walk did —
+// a maker cancelled or shrunk by self-trade prevention, an iceberg slice refilled,
+// an OCO leg cancelled — stands, so it is announced here, after the REJECTED.
+//
+// This used to clear e.pending wholesale on a rejection, under the sentence "a
+// rejection means nothing happened". That sentence was false: a fill-or-kill taker
+// under CANCEL_OLDEST removed a resting maker and the book lost an order with
+// nothing on the stream to say so, which a consumer rebuilding L3 keeps as a
+// phantom order forever. docs/DIFFERENTIAL-FINDINGS.md §4.
 func (e *Engine) emitResult(order *types.Order, trades []types.Trade, status types.OrderStatus, reason error) {
 	if e.sink == nil {
 		return
-	}
-	// A rejection means nothing happened: an FOK that could not fill has already
-	// had its trades reversed, so publishing them would announce executions that
-	// were undone.
-	if status == types.OrderStatusRejected {
-		e.pending = e.pending[:0]
 	}
 	buf := e.eventBuf[:0]
 	if status == types.OrderStatusRejected {
@@ -945,6 +952,16 @@ func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trad
 	}
 
 	start := len(dst)
+	// Two marks taken before the walk, both of them for the fill-or-kill branch
+	// below, and both captured HERE rather than in Match: cascadeStops calls
+	// settleInto again for every stop it fires (:1025), so a nested fill-or-kill has
+	// to restore the reference and compact the event batch of ITS OWN walk — the one
+	// the triggering trade started — not of the command that contained it.
+	//
+	// lastBefore is the last trade price this venue had PUBLISHED before the walk.
+	// pendStart is where this walk's events begin in e.pending.
+	lastBefore := e.book.LastTradePrice()
+	pendStart := len(e.pending)
 	dst, makerOrders := e.match(order, dst)
 
 	// Market orders never rest.
@@ -975,6 +992,23 @@ func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trad
 			for i := start; i < len(dst); i++ {
 				e.reverseTrade(dst[i], makerOrders)
 			}
+			// The reversal is only total once the reference price goes back too.
+			// LastTradePrice is the price of the last trade this venue PUBLISHED,
+			// and these prints reach no sink, no MatchResult, no book and no
+			// journal — so leaving the price where they put it would arm the
+			// collar and fire stops off a price that appears on no tape.
+			// docs/DIFFERENTIAL-FINDINGS.md §3. Guarded on having printed, so a
+			// fill-or-kill that never traded does not restamp the trade clock.
+			if len(dst) > start {
+				e.book.SetLastTradePrice(lastBefore)
+			}
+			// Drop the events describing what was just undone, and ONLY those. A
+			// rejection is not "nothing happened": this walk may have cancelled a
+			// maker under self-trade prevention, shrunk one, refilled an iceberg or
+			// cancelled an OCO leg, and none of that is being reversed. Those
+			// events survive the rejection and are published after it (emitResult).
+			// docs/DIFFERENTIAL-FINDINGS.md §4.
+			e.pending = dropReversedTrades(e.pending, pendStart)
 			order.Status = types.OrderStatusRejected
 			return dst[:start], types.OrderStatusRejected, types.ErrFOKCannotFill
 		}
@@ -1562,12 +1596,36 @@ func (e *Engine) wouldCross(order *types.Order) bool {
 }
 
 // matchProRata crosses taker against the book allocating each price level's
-// fills in proportion to resting size, rather than by time priority. Self orders
-// are skipped. Trades print at the maker's price and are appended to dst.
+// fills in proportion to resting size, rather than by time priority. Trades print
+// at the maker's price and are appended to dst.
+//
+// Self-trade prevention applies at a pro-rata level exactly as it applies under
+// price-time priority, and the allocation rule has no opinion about who owns what.
+// The level's eligible liquidity is allocated first; if the taker still wants
+// quantity when only its own orders are left there, the TAKER'S MODE decides, in
+// arrival order. docs/REFERENCE-MATCHER.md §2.3 carries the paragraph this
+// implements, and the model implements that paragraph rather than this loop.
+//
+// It used to SKIP the taker's own orders and end the walk when a level held
+// nothing else, which left the remainder resting ACROSS the spread — bid 100 /
+// ask 99 on a continuous book, in all five STP modes, so a venue configured ALLOW
+// did not get the self-trade it asked for and one configured CANCEL_BOTH cancelled
+// neither order. matchProRata never called takerSTP at all, which meant pro-rata
+// silently overrode the venue's self-trade-prevention configuration.
+// docs/DIFFERENTIAL-FINDINGS.md §5.
 func (e *Engine) matchProRata(taker *types.Order, dst []types.Trade) ([]types.Trade, map[int64]*types.Order) {
 	var makerOrders map[int64]*types.Order
 	trackMakers := taker.TimeInForce == types.TIFFillOrKill
 	start := len(dst)
+	// Only the four PREVENTING modes partition a level. ALLOW says there is no
+	// self-match to prevent, so the taker's own orders take part in the allocation
+	// exactly as anyone else's do — which is what ALLOW already does under
+	// price-time priority, where the switch falls through and trades. A mode string
+	// this engine does not know falls through there too, so it does the same here
+	// rather than being given a fifth meaning under one allocation policy.
+	mode := e.takerSTP(taker)
+	partition := mode == STPCancelNewest || mode == STPCancelOldest ||
+		mode == STPCancelBoth || mode == STPDecrement
 
 	for taker.RemainingQty != 0 {
 		var price int64
@@ -1575,61 +1633,124 @@ func (e *Engine) matchProRata(taker *types.Order, dst []types.Trade) ([]types.Tr
 		if taker.Side == types.SideBuy {
 			p, _, ok := e.book.BestAsk()
 			if !ok || (taker.Type == types.OrderTypeLimit && taker.Price < p) {
-				break
+				return e.recordLast(dst, start), makerOrders
 			}
 			price, oppSide = p, types.SideSell
 		} else {
 			p, _, ok := e.book.BestBid()
 			if !ok || (taker.Type == types.OrderTypeLimit && taker.Price > p) {
-				break
+				return e.recordLast(dst, start), makerOrders
 			}
 			price, oppSide = p, types.SideBuy
 		}
 
-		// Eligible resting orders at this level (excluding the taker's own).
-		eligible := make([]*types.Order, 0)
-		var total int64
-		for _, o := range e.book.GetOrdersAtPrice(oppSide, price) {
-			if e.isSelfMatch(taker, o) {
-				continue
-			}
-			eligible = append(eligible, o)
-			total += o.RemainingQty
-		}
-		if total == 0 {
-			break // only self liquidity here; stop
-		}
-
-		q := min(taker.RemainingQty, total)
-		allocs := proRataAllocate(eligible, q)
-		for i, maker := range eligible {
-			a := allocs[i]
-			if a <= 0 {
-				continue
-			}
-			dst = e.executeTrade(taker, maker, price, a, dst)
-			if trackMakers {
-				if makerOrders == nil {
-					makerOrders = make(map[int64]*types.Order)
+		// One price level, resolved completely before the walk moves on. The level
+		// is re-read after every allocation and after every self-trade-prevention
+		// decision, because both change what is resting there. `did` is the
+		// termination guard: a level that yields nothing twice running ends the walk
+		// rather than spinning on a price the book keeps offering.
+		did := false
+		for taker.RemainingQty != 0 {
+			eligible := make([]*types.Order, 0, 4)
+			var own []*types.Order
+			var total int64
+			for _, o := range e.book.GetOrdersAtPrice(oppSide, price) {
+				if partition && e.isSelfMatch(taker, o) {
+					own = append(own, o)
+					continue
 				}
-				makerOrders[maker.ID] = maker
+				eligible = append(eligible, o)
+				total += o.RemainingQty
 			}
-			if maker.IsFilled() {
-				_, _ = e.book.Remove(maker.ID)
-				if ib, ok := e.icebergOrders[maker.ID]; ok {
-					if ib.Refill() {
-						_ = e.book.Add(ib.Order)
-						e.emitAdd(ib.Order)
+
+			if total > 0 {
+				q := min(taker.RemainingQty, total)
+				allocs := proRataAllocate(eligible, q)
+				for i, maker := range eligible {
+					a := allocs[i]
+					if a <= 0 {
+						continue
+					}
+					dst = e.executeTrade(taker, maker, price, a, dst)
+					if trackMakers {
+						if makerOrders == nil {
+							makerOrders = make(map[int64]*types.Order)
+						}
+						makerOrders[maker.ID] = maker
+					}
+					if maker.IsFilled() {
+						_, _ = e.book.Remove(maker.ID)
+						if ib, ok := e.icebergOrders[maker.ID]; ok {
+							if ib.Refill() {
+								_ = e.book.Add(ib.Order)
+								e.emitAdd(ib.Order)
+							} else {
+								delete(e.icebergOrders, maker.ID)
+							}
+						}
+						e.cancelOCOCounterpart(maker.ID)
 					} else {
-						delete(e.icebergOrders, maker.ID)
+						e.book.UpdateOrderQuantity(maker.ID, a)
 					}
 				}
-				e.cancelOCOCounterpart(maker.ID)
-			} else {
-				e.book.UpdateOrderQuantity(maker.ID, a)
+				did = true
+				continue
+			}
+
+			// Nothing eligible and nothing of the taker's own: the level emptied
+			// under the walk. Go back out and take the next price — unless nothing
+			// happened here at all, in which case the book is offering a level with
+			// no liquidity in it and the walk is over.
+			if len(own) == 0 {
+				if !did {
+					return e.recordLast(dst, start), makerOrders
+				}
+				break
+			}
+			did = true
+
+			// Only the taker's own liquidity is left at this level and the taker
+			// still wants quantity, so the self-match is real and the mode decides.
+			maker := own[0]
+			switch mode {
+			case STPCancelNewest:
+				taker.Status = types.OrderStatusCancelled
+				return e.recordLast(dst, start), makerOrders
+			case STPCancelOldest:
+				_ = maker.Cancel()
+				_, _ = e.book.Remove(maker.ID)
+				e.emitCancel(maker)
+			case STPCancelBoth:
+				taker.Status = types.OrderStatusCancelled
+				_ = maker.Cancel()
+				_, _ = e.book.Remove(maker.ID)
+				e.emitCancel(maker)
+				return e.recordLast(dst, start), makerOrders
+			case STPDecrement:
+				// Both sides lose their overlap with no trade to explain it, so the
+				// smaller side goes to zero: either the maker leaves the level and
+				// the allocation runs again on what is behind it, or the taker is
+				// exhausted and the walk is over.
+				e.decrement(taker, maker)
+				if maker.RemainingQty == 0 {
+					_, _ = e.book.Remove(maker.ID)
+					e.emitCancel(maker)
+				} else {
+					e.emitReplaced(maker)
+				}
+				if taker.RemainingQty == 0 {
+					taker.Status = types.OrderStatusCancelled
+					return e.recordLast(dst, start), makerOrders
+				}
+			default:
+				// Unreachable: `own` is only ever populated for the four modes
+				// above. It is written out anyway because falling off the end of
+				// this switch would re-read the same level with the same state
+				// forever, and an unreachable branch is cheaper than a spin.
+				taker.Status = types.OrderStatusCancelled
+				return e.recordLast(dst, start), makerOrders
 			}
 		}
-		// If the level wasn't fully consumed, the taker is filled ⇒ loop ends.
 	}
 
 	return e.recordLast(dst, start), makerOrders
@@ -1667,6 +1788,25 @@ func proRataAllocate(orders []*types.Order, q int64) []int64 {
 
 // recordLast sets the last trade price from the final trade appended since start
 // (if any) and returns dst unchanged.
+//
+// LastTradePrice is the price of the last trade this venue PUBLISHED. That is the
+// definition every consumer of it wants — the collar's reference when no mark is
+// set (outsideBand), the stop and trailing-stop trigger reference (cascadeStops,
+// submitStopInto, ProcessTrailingStop), the band-tick depth window, the "last" a
+// market-data subscriber prints, and the mid fallback pkg/study, pkg/sim and
+// pkg/backtest use. So:
+//
+//   - an IOC that partially fills moves it and KEEPS it: those fills carry trade
+//     ids, reach the sink and appear in the result. They were published.
+//   - a fill-or-kill that cannot fill does NOT move it: settleInto's failure
+//     branch puts it back, because nothing about those prints was published.
+//   - a BUST does not rewind it (bust.go): that print WAS published, and the
+//     market has already acted on it.
+//
+// The asymmetry with tradeSeq, which a rejected fill-or-kill still burns, is
+// deliberate and belongs on this line so nobody tidies one into the other: an id
+// is a NAME, and a counter that goes backwards can give one name to two different
+// prints; a price is a DATUM, and restoring it makes it correct again.
 func (e *Engine) recordLast(dst []types.Trade, start int) []types.Trade {
 	if len(dst) > start {
 		e.book.SetLastTradePrice(dst[len(dst)-1].Price)
@@ -1794,6 +1934,25 @@ func (e *Engine) reverseTrade(tr types.Trade, makerOrders map[int64]*types.Order
 		// Was fully consumed and removed: put it back (Add uses RemainingQty).
 		_ = e.book.Add(maker)
 	}
+}
+
+// dropReversedTrades compacts pending in place from index from onward, keeping
+// every event kind except EventTrade and keeping the survivors in order.
+//
+// It is the other half of reverseTrade: the trades a failed fill-or-kill unwound
+// must reach nobody, and everything else the same walk recorded must reach
+// everybody. Nothing before from is touched — that batch belongs to a caller
+// further out (cascadeStops settling a stop inside another command's walk), and
+// its prints stand.
+func dropReversedTrades(pending []Event, from int) []Event {
+	kept := pending[:from]
+	for _, ev := range pending[from:] {
+		if ev.Kind == EventTrade {
+			continue
+		}
+		kept = append(kept, ev)
+	}
+	return kept
 }
 
 // Reduce shrinks a resting order in place, keeping its queue position, and

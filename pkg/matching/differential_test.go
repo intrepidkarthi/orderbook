@@ -73,13 +73,16 @@ type diffProfile struct {
 	// classification in differential_config_test.go.
 	engine func() Config
 	model  refmatch.Config
-	// crossingIsExpected, when non-empty, is the written reason this profile may
-	// legitimately leave the book crossed, and it costs a sentence rather than a
-	// flipped boolean for the same reason the command alphabet's read-only verdict
-	// does. Where it is set, checkInvariants' crossed-book assertion is replaced by
-	// the NARROWER one that still holds (crossedBySelfOnly) — never dropped.
-	crossingIsExpected string
 }
+
+// The pro-rata profile used to carry a crossingIsExpected field: a written reason
+// the profile could legitimately leave the book crossed, under which runDiff swapped
+// checkInvariants' crossed-book assertion for a narrower one. It is gone, and its
+// deletion is the point rather than a tidy-up. The narrowing was correct while
+// pro-rata skipped a taker's own liquidity and rested the remainder across the
+// spread; docs/DIFFERENTIAL-FINDINGS.md §5 deleted the skip, so every profile now
+// runs the same full-strength invariant suite. A narrowing left in place after its
+// reason is gone is a hole.
 
 // diffProfiles is the committed sweep. It is a fixed set of seeds rather than a
 // fuzz campaign so it runs inside `go test ./...` without anyone thinking about it;
@@ -115,12 +118,6 @@ func diffProfiles() []diffProfile {
 				return c
 			},
 			model: refmatch.Config{Symbol: diffSymbol, STP: refmatch.CancelNewest, MaxOrders: 100_000, ProRata: true, ShardIndex: 7},
-			crossingIsExpected: "pro-rata SKIPS a taker's own liquidity instead of STP-cancelling the taker " +
-				"(matchProRata, engine.go:1593), so a taker whose only counterparty at the touch is its own " +
-				"resting order falls out of the walk and RESTS ACROSS THE SPREAD. This harness found it on its " +
-				"first pro-rata seed and TestProRataSelfSkipCrossesTheBook pins the two-command reproduction. " +
-				"It is an engine defect, not a model workaround, and fixing it is a matching-semantics change " +
-				"that belongs in its own slice — see docs/REFERENCE-MATCHER.md §10.",
 		},
 		{
 			// A book-size cap small enough to be REACHED, on shard 3. MaxOrders
@@ -290,6 +287,20 @@ type engineSide struct {
 	e   *Engine
 	rec *eventRecorder
 	cfg Config
+	// mirror rebuilds an L3 book from nothing but the event stream — the same
+	// mirrorBook TestEventStreamReconstructsBook drives, attached to the GENERATED
+	// tape instead of to a scenario list.
+	//
+	// It is here because the claim on EventKind's doc comment ("Accepted / Trade /
+	// Canceled / Replaced reconstruct the L3 book") was FALSE while being proved
+	// true, over ~25 hand-written scenarios none of which combined fill-or-kill with
+	// self-trade prevention. That is an exhaustive check over an incomplete input
+	// space reporting completeness, with the report load-bearing —
+	// docs/JOURNAL-COMPLETENESS.md §1 in a second place. This assertion is what
+	// would have caught defect B without anyone predicting it, and it is deliberately
+	// NOT a consequence of the model comparison: the model canonised the engine's
+	// dropped batch, so the two agreed and both were wrong.
+	mirror *mirrorBook
 	// ids maps a tape POSITION to the order id that position was given. A command
 	// that names a position which produced no order gets id 0, which is an id the
 	// engine never issues, so both sides answer "not found".
@@ -298,8 +309,27 @@ type engineSide struct {
 
 func newEngineSide(cfg Config) *engineSide {
 	rec := &eventRecorder{}
-	cfg.EventSink = rec
-	return &engineSide{e: NewEngine(cfg), rec: rec, cfg: cfg, ids: map[int]int64{}}
+	mirror := newMirror()
+	cfg.EventSink = MultiSink{rec, mirror}
+	return &engineSide{e: NewEngine(cfg), rec: rec, mirror: mirror, cfg: cfg, ids: map[int]int64{}}
+}
+
+// mirrorMatches compares the book rebuilt from the event stream against the
+// engine's own, returning the empty string when they agree.
+func (s *engineSide) mirrorMatches() string {
+	if s.mirror == nil {
+		return "" // a side restored from a snapshot; its stream starts mid-book
+	}
+	if len(s.mirror.gaps) > 0 {
+		return fmt.Sprintf("the event stream is not self-describing: %v", s.mirror.gaps)
+	}
+	got, want := s.mirror.resting(), engineResting(s.e)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		return fmt.Sprintf("a book rebuilt from the event stream alone differs from the engine's own — "+
+			"every consumer built on the stream is wrong in the same way\n  from the stream: %v\n"+
+			"  engine book:     %v", got, want)
+	}
+	return ""
 }
 
 func (s *engineSide) apply(c tape.Cmd) (refmatch.Verdict, []refmatch.Trade, error) {
@@ -610,10 +640,6 @@ type diffFailure struct {
 func runDiff(p diffProfile, cmds []tape.Cmd, full bool, tb testingTB) *diffFailure {
 	eng := newEngineSide(p.engine())
 	mod := newModelSide(p.model)
-	// crossSeen latches once the pro-rata self-skip has left the book crossed; see
-	// crossState for why the assertion is full strength up to that point and not
-	// after it.
-	crossSeen := false
 	// The two per-command assertions the roadmap listed as absent from the generated
 	// path. They are cheap, they are cumulative across the tape, and they are the
 	// kind of property a differential comparison does NOT give for free: two
@@ -648,16 +674,14 @@ func runDiff(p diffProfile, cmds []tape.Cmd, full bool, tb testingTB) *diffFailu
 			// is diagnosable, "resting order 7's rank is 3 and should be 2" from the
 			// same underlying cause is not.
 			if tb != nil {
-				if p.crossingIsExpected == "" {
-					checkInvariants(tb, eng.e, nil)
-				} else if crossed, selfPair := crossState(eng.e); crossed {
-					if selfPair {
-						crossSeen = true
-					} else if !crossSeen {
-						return &diffFailure{index: i, cmd: c, note: "book crossed between unrelated " +
-							"accounts with no prior self-skip crossing\nprofile exemption: " + p.crossingIsExpected}
-					}
-				}
+				checkInvariants(tb, eng.e, nil)
+			}
+			// The event stream must rebuild the engine's own L3 book, checked after
+			// every command of every tape rather than on a hand-written scenario
+			// list. See engineSide.mirror for why this assertion is here and not
+			// only in TestEventStreamReconstructsBook.
+			if note := eng.mirrorMatches(); note != "" {
+				return &diffFailure{index: i, cmd: c, note: note}
 			}
 			// "No duplicate order id." An id is a customer-visible name that appears
 			// in execution reports, drop copies, cancels and busts; two orders
@@ -720,43 +744,30 @@ func runDiff(p diffProfile, cmds []tape.Cmd, full bool, tb testingTB) *diffFailu
 	return nil
 }
 
-// crossState reports whether the book is crossed and, if so, whether the two orders
-// at the touch are the pair pro-rata's self-skip declined to trade.
+// TestProRataSelfSkipCrossesTheBook used to pin the defect this harness found on
+// its first pro-rata seed, at the smallest size that reproduces it. It now asserts
+// the opposite, and the name is kept so the pin is visibly the thing that was
+// redeemed.
 //
-// The distinction is what lets the pro-rata profile keep a crossed-book assertion
-// with teeth instead of dropping one. Until the first self-skip crossing appears the
-// assertion is full strength; after it the book is legitimately (which is to say,
-// defectively) crossed and the composition of the touch drifts as orders around it
-// come and go, so continuing to assert on it would only re-report the same finding.
+// Two commands. One account rests a sell at 99, then buys 5 at 100. matchProRata
+// excluded the taker's own orders from the level's eligible set, found nothing left,
+// and ENDED THE WALK — so the remainder rested across the spread and every L1 and L2
+// consumer saw bid 100 / ask 99 on a continuous book. It did that in all five STP
+// modes, because matchProRata never called takerSTP at all: a venue configured ALLOW
+// did not get the self-trade it had asked for and one configured CANCEL_BOTH
+// cancelled neither order. Pro-rata was silently overriding the venue's self-trade
+// -prevention configuration, which is a larger statement than "pro-rata crosses the
+// book".
 //
-// That drift is itself part of the finding, and it is worse than the two-command
-// reproduction suggests: on the pro-rata sweep at seed 25 the crossed state survived
-// long enough for the skipped order to leave, after which the touch was a crossing
-// between two UNRELATED accounts — which is what a consumer would read as an
-// outright matching failure rather than a self-trade-prevention artefact.
-func crossState(e *Engine) (crossed, selfPair bool) {
-	bid := e.Book().PeekBestBidOrder()
-	ask := e.Book().PeekBestAskOrder()
-	if bid == nil || ask == nil || bid.Price < ask.Price {
-		return false, false
-	}
-	sameUser := bid.UserID == ask.UserID
-	sameGroup := bid.TradeGroupID != 0 && bid.TradeGroupID == ask.TradeGroupID
-	return true, sameUser || sameGroup
-}
-
-// TestProRataSelfSkipCrossesTheBook pins the defect this harness found on its first
-// pro-rata seed, at the smallest size that reproduces it.
+// The decision (docs/DIFFERENTIAL-FINDINGS.md §5) DELETES a rule rather than adding
+// one: self-trade prevention applies at a pro-rata level exactly as it applies under
+// price-time priority, and the allocation rule has no opinion about who owns what.
+// Under the default CANCEL_NEWEST the taker is cancelled, which is what the same two
+// commands have always done under FIFO. The specification paragraph the model
+// implements is docs/REFERENCE-MATCHER.md §2.3.
 //
-// Two commands. One account rests a sell, then buys through it. Under price-time
-// priority self-trade prevention cancels the taker and the book stays sane; under
-// pro-rata the taker's own liquidity is SKIPPED, the walk ends with nothing eligible
-// at the touch, and the remainder rests across the spread. Every L1 and L2 consumer
-// then sees a negative spread on a continuous book.
-//
-// It is asserted rather than exempted so that a future fix has to come here and
-// change a test that says what it is changing. When the fix lands, this test
-// inverts and the crossingIsExpected reason on the pro-rata profile is deleted.
+// The crossingIsExpected exemption on the pro-rata differential profile is deleted
+// with it, so checkInvariants now runs at full strength on every profile.
 func TestProRataSelfSkipCrossesTheBook(t *testing.T) {
 	cfg := DefaultConfig("PR")
 	cfg.ProRata = true
@@ -773,27 +784,206 @@ func TestProRataSelfSkipCrossesTheBook(t *testing.T) {
 	}
 	res := e.Process(buy)
 
-	if res.Status != types.OrderStatusNew {
-		t.Fatalf("the self-crossing buy ended %s; this test is pinned to the RESTING outcome", res.Status)
+	if res.Status != types.OrderStatusCancelled {
+		t.Fatalf("the self-crossing buy ended %s, want CANCELLED: the default mode is CANCEL_NEWEST and "+
+			"the taker is the newest. If it RESTED, matchProRata is skipping the level again and the "+
+			"book below is crossed. docs/DIFFERENTIAL-FINDINGS.md §5.", res.Status)
 	}
 	bid, _, okBid := e.BestBid()
 	ask, _, okAsk := e.BestAsk()
-	if !okBid || !okAsk || bid < ask {
-		t.Fatalf("the book is no longer crossed (bid %d ok=%t, ask %d ok=%t) — pro-rata self-skip "+
-			"looks fixed. Delete crossingIsExpected from the pro-rata differential profile and invert "+
-			"this test.", bid, okBid, ask, okAsk)
+	if okBid && okAsk && bid >= ask {
+		t.Fatalf("the book is crossed: bid %d / ask %d on a continuous book", bid, ask)
 	}
-	// Under price-time priority the same two commands leave nothing crossed, which
-	// is what makes this a pro-rata defect rather than a venue-wide rule.
+	if okBid {
+		t.Fatalf("the cancelled taker rested anyway (bid %d)", bid)
+	}
+	if !okAsk || ask != 99 {
+		t.Fatalf("the maker should be untouched at 99, got %d (present %t)", ask, okAsk)
+	}
+	// Price-time priority answers the same two commands identically, which is the
+	// whole of the decision: one self-match rule, not two.
 	fifo := NewEngine(DefaultConfig("PR"))
 	s2, _ := types.NewOrder("u0", "PR", types.SideSell, types.OrderTypeLimit, 99, 5, types.TIFGoodTillCancel)
 	fifo.Process(s2)
 	b2, _ := types.NewOrder("u0", "PR", types.SideBuy, types.OrderTypeLimit, 100, 5, types.TIFGoodTillCancel)
-	fifo.Process(b2)
-	if fb, _, ok := fifo.BestBid(); ok {
-		if fa, _, ok2 := fifo.BestAsk(); ok2 && fb >= fa {
-			t.Fatalf("price-time priority also crosses here (bid %d >= ask %d); the finding is wider than pro-rata", fb, fa)
-		}
+	fres := fifo.Process(b2)
+	if fres.Status != res.Status {
+		t.Fatalf("pro-rata answered %s and price-time priority answered %s; the allocation policy is "+
+			"deciding the self-match again", res.Status, fres.Status)
+	}
+}
+
+// TestProRata_STPModeDecides is the five-mode table from
+// docs/DIFFERENTIAL-FINDINGS.md §5.1's measurement, inverted.
+//
+// Before the fix every one of the five produced bid 100 / ask 99, zero trades and
+// two resting orders, because matchProRata never consulted the mode. Now each mode
+// gets the outcome docs/REFERENCE-MATCHER.md §2.3 names for it, and all five leave
+// the book uncrossed — which is the assertion that matters most, since a crossed
+// continuous book is the first row of that document's invariant table.
+func TestProRata_STPModeDecides(t *testing.T) {
+	cases := []struct {
+		mode      SelfTradePrevention
+		status    types.OrderStatus
+		trades    int
+		resting   int
+		makerGone bool
+	}{
+		// The taker is the newest, so it goes and the maker is untouched.
+		{mode: STPCancelNewest, status: types.OrderStatusCancelled, trades: 0, resting: 1},
+		// The maker goes, the level re-allocates, nothing is left to trade with, and
+		// the taker rests on the now-empty other side.
+		{mode: STPCancelOldest, status: types.OrderStatusNew, trades: 0, resting: 1, makerGone: true},
+		// Both named, both cancelled.
+		{mode: STPCancelBoth, status: types.OrderStatusCancelled, trades: 0, resting: 0, makerGone: true},
+		// Equal sizes, so the overlap empties both with no trade to explain it.
+		{mode: STPDecrement, status: types.OrderStatusCancelled, trades: 0, resting: 0, makerGone: true},
+		// The account asked to be allowed to trade with itself, and now it is.
+		{mode: STPAllow, status: types.OrderStatusFilled, trades: 1, resting: 0, makerGone: true},
+	}
+	for _, c := range cases {
+		t.Run(string(c.mode), func(t *testing.T) {
+			cfg := DefaultConfig("PR")
+			cfg.ProRata = true
+			cfg.SelfTradePrevention = c.mode
+			e := NewEngine(cfg)
+
+			sell, err := types.NewOrder("u0", "PR", types.SideSell, types.OrderTypeLimit, 99, 5, types.TIFGoodTillCancel)
+			if err != nil {
+				t.Fatalf("NewOrder: %v", err)
+			}
+			e.Process(sell)
+			buy, err := types.NewOrder("u0", "PR", types.SideBuy, types.OrderTypeLimit, 100, 5, types.TIFGoodTillCancel)
+			if err != nil {
+				t.Fatalf("NewOrder: %v", err)
+			}
+			res := e.Process(buy)
+
+			if res.Status != c.status {
+				t.Errorf("status %s, want %s", res.Status, c.status)
+			}
+			if len(res.Trades) != c.trades {
+				t.Errorf("%d trades, want %d", len(res.Trades), c.trades)
+			}
+			if e.OrderCount() != c.resting {
+				t.Errorf("%d resting orders, want %d", e.OrderCount(), c.resting)
+			}
+			if _, gone := e.Book().Get(sell.ID); gone == c.makerGone {
+				t.Errorf("maker present = %t, want %t", gone, !c.makerGone)
+			}
+			bid, _, okBid := e.BestBid()
+			ask, _, okAsk := e.BestAsk()
+			if okBid && okAsk && bid >= ask {
+				t.Fatalf("mode %s leaves the book crossed: bid %d / ask %d. Every one of the five used "+
+					"to. docs/DIFFERENTIAL-FINDINGS.md §5.1.", c.mode, bid, ask)
+			}
+		})
+	}
+}
+
+// TestProRata_ReachesUnrelatedLiquidityUnderCancelOldest is the second half of
+// §5.1's measurement: the skip did not only cross the book, it DECLINED AN
+// UNRELATED ACCOUNT'S LIQUIDITY on the way.
+//
+// u0 rests sell 5 @ 99, u1 rests sell 5 @ 100, u0 buys 5 @ 100. Before the fix:
+// zero trades, three resting orders, book crossed at 100/99 — u1 was offering
+// exactly what u0 was bidding, at a price u0 named, and no trade happened, because
+// the walk ended at the touch instead of resolving it.
+//
+// It is deliberately written under CANCEL_OLDEST and not the default. Under
+// CANCEL_NEWEST the taker is cancelled at 99 and the trade with u1 correctly still
+// does not happen, so the default would have made this test assert the wrong thing.
+func TestProRata_ReachesUnrelatedLiquidityUnderCancelOldest(t *testing.T) {
+	cfg := DefaultConfig("PR")
+	cfg.ProRata = true
+	cfg.SelfTradePrevention = STPCancelOldest
+	e := NewEngine(cfg)
+
+	mine, err := types.NewOrder("u0", "PR", types.SideSell, types.OrderTypeLimit, 99, 5, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	e.Process(mine)
+	theirs, err := types.NewOrder("u1", "PR", types.SideSell, types.OrderTypeLimit, 100, 5, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	e.Process(theirs)
+
+	buy, err := types.NewOrder("u0", "PR", types.SideBuy, types.OrderTypeLimit, 100, 5, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	res := e.Process(buy)
+
+	if len(res.Trades) != 1 {
+		t.Fatalf("%d trades, want 1: the taker's own order at 99 is removed under CANCEL_OLDEST and the "+
+			"walk goes on to u1's offer at 100. docs/DIFFERENTIAL-FINDINGS.md §5.1.", len(res.Trades))
+	}
+	tr := res.Trades[0]
+	if tr.Price != 100 || tr.Quantity != 5 || tr.SellerUserID != "u1" {
+		t.Fatalf("the print is %d @ %d against %s, want 5 @ 100 against u1", tr.Quantity, tr.Price, tr.SellerUserID)
+	}
+	if res.Status != types.OrderStatusFilled {
+		t.Fatalf("the taker ended %s, want FILLED", res.Status)
+	}
+	if e.OrderCount() != 0 {
+		t.Fatalf("%d orders still resting, want 0", e.OrderCount())
+	}
+}
+
+// TestProRata_MixedLevelTradesEligibleBeforeSTPFires holds the one ordering choice
+// docs/REFERENCE-MATCHER.md §2.3 makes that is a choice rather than a consequence:
+// the level's ELIGIBLE liquidity is allocated first, and self-trade prevention fires
+// only when the taker's own order would actually be needed.
+//
+// Under price-time priority "when the walk reaches it" is answered by queue
+// position. Pro-rata has none, so the only definition that does not invent an
+// ordering is "the level's eligible liquidity is exhausted and the taker still wants
+// more". A level holding BOTH the taker's own order and a stranger's, under
+// CANCEL_NEWEST, is the only case that tells that rule apart from applying
+// prevention first: allocate-first prints the stranger's lots and then cancels the
+// taker, prevention-first prints nothing at all.
+func TestProRata_MixedLevelTradesEligibleBeforeSTPFires(t *testing.T) {
+	cfg := DefaultConfig("PR")
+	cfg.ProRata = true
+	cfg.SelfTradePrevention = STPCancelNewest
+	e := NewEngine(cfg)
+
+	mine, err := types.NewOrder("u0", "PR", types.SideSell, types.OrderTypeLimit, 100, 4, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	e.Process(mine)
+	theirs, err := types.NewOrder("u1", "PR", types.SideSell, types.OrderTypeLimit, 100, 3, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	e.Process(theirs)
+
+	buy, err := types.NewOrder("u0", "PR", types.SideBuy, types.OrderTypeLimit, 100, 6, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	res := e.Process(buy)
+
+	if len(res.Trades) != 1 {
+		t.Fatalf("%d trades, want 1. Zero means self-trade prevention was applied BEFORE the level's "+
+			"eligible liquidity was allocated, which refuses a stranger's offer the taker had already "+
+			"named a price for. docs/REFERENCE-MATCHER.md §2.3.", len(res.Trades))
+	}
+	if tr := res.Trades[0]; tr.Quantity != 3 || tr.SellerUserID != "u1" {
+		t.Fatalf("the print is %d lots against %s, want 3 against u1", tr.Quantity, tr.SellerUserID)
+	}
+	if res.Status != types.OrderStatusCancelled {
+		t.Fatalf("the taker ended %s, want CANCELLED: it still wanted 3 lots and the only liquidity "+
+			"left at the level was its own", res.Status)
+	}
+	if _, ok := e.Book().Get(mine.ID); !ok {
+		t.Fatalf("the taker's own resting order was consumed under CANCEL_NEWEST")
+	}
+	if bid, _, ok := e.BestBid(); ok {
+		t.Fatalf("the cancelled taker rested at %d", bid)
 	}
 }
 
