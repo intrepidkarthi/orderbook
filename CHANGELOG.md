@@ -7,7 +7,196 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- **The write-ahead log rotates into segments, and a prefix of them can be deleted.**
+  This is the piece that makes restart cost a number an operator chooses rather than a
+  property of how long the venue has been up. Design, the decision that makes it work,
+  and every place the code disagreed with its own spec (§12):
+  [LOG-ROTATION.md](docs/LOG-ROTATION.md).
+
+  A `-wal` path now names a SET: the stem plus `<stem>.<16 zero-padded digits>`
+  siblings, the digits being the first sequence that file holds. Each name is
+  cross-checked against an 18-byte header inside the file (`OBWAL\x02`, the base
+  sequence, a CRC over it), and a disagreement refuses to start the venue naming both
+  numbers — a renamed, copied or restored segment cannot quietly put records into the
+  wrong sequence space.
+
+  **The decision the whole slice turns on is that a segment DECLARES its base rather
+  than having one inferred from its records.** The covered-prefix skip added in the
+  previous entry treats a record's position in the file as its sequence and verifies
+  that assumption, falling back to a full re-read when it does not hold. A rotated
+  segment starts at position 1 carrying a sequence far above 1, so a naive
+  segmentation makes that fallback fire on every rotated log: correct book, two full
+  passes instead of one, every restart slower than it was before the skip existed, and
+  the only trace one log line. With a declared base the arithmetic is
+  `seq = base + ordinal - 1`, which for an unrotated log is character-for-character
+  what it was. `TestADeclaredSegmentDoesNotFallBack` asserts `FellBack == false` on a
+  properly rotated set; reverting the arithmetic fails it and three others.
+
+  | total history | retention off | with a 4 MiB budget |
+  |---|---:|---:|
+  | 60,000 records (11 MiB) | 18.1 ms, 10.7 MiB read | **5.95 ms, 3.7 MiB read** |
+  | 600,000 records (110 MiB) | 84.1 ms, 106 MiB read | **6.28 ms, 4.1 MiB read** |
+  | 6,000,000 records (1.1 GiB) | **2.21 s**, 1,068 MiB read | **5.66 ms, 3.3 MiB read** |
+
+  A hundred times the history, the same restart (`BenchmarkRestartWithRetention`, on
+  the churn fixture so the book term is out of it). The "retention off" column is what
+  every earlier release did and what a venue that does not set a budget still gets.
+
+  **Deletion is off by default.** `-wal-retain` unset means keep everything — today's
+  behaviour with better file names — and the venue says so at startup. Rotation is on
+  (`-wal-segment-bytes`, 128 MiB). A segment is deleted only when it is sealed, when a
+  snapshot **read back from disk and verified** covers its LAST sequence rather than
+  its first, when `-wal-retain-segments` (4) sealed segments remain newer than it, when
+  every older one is already gone, and — if `-wal-archive` is set — when a
+  byte-identical copy is durable elsewhere. Deletion is oldest-first, so a crash
+  part-way through leaves a shorter prefix, which is a valid set.
+
+  **Recovery refuses a set with a hole in it**, and that refusal is the tripwire every
+  retention bug trips: `wal: log gap: snapshot covers through sequence 412000 but the
+  oldest retained segment ... starts at 610422`. A missing middle segment, an overlap,
+  a sealed segment truncated below its recorded span, and a snapshot below the
+  retention floor are all refusals naming both sequences, because each one otherwise
+  recovers into a plausible book that is missing commands with every remaining record
+  verifying perfectly. A WAL path that is a directory is now `ErrNotALog`, where it
+  used to recover as a clean empty log and start an empty venue in silence.
+
+  **`Open` no longer appends behind a torn tail.** It seals that segment as it stands
+  and starts the next one at `lastSeq + 1`, which closes
+  [BOUNDED-RECOVERY.md](docs/BOUNDED-RECOVERY.md) §6.1 — crash mid-write, first restart
+  succeeds, second restart refuses — without truncating anything. The fragment stays on
+  disk.
+
+  **A full disk is defined behaviour.** It used to be worse than undefined: ENOSPC
+  surfaces at the flush inside the 20 ms group commit, whose whole error handling was
+  to log and continue, so a full disk gave a venue that kept accepting orders, kept
+  acknowledging them, kept matching them and stopped journalling, with `/readyz` still
+  green. Now `-wal-min-free` (2 GiB) warns and runs retention immediately,
+  `-wal-min-free-stop` (256 MiB) puts every book into cancel-only so participants can
+  get flat, and a sync that fails halts the book, latches until a restart and fails
+  readiness. New gauges: `orderbook_wal_bytes`, `orderbook_wal_segments`,
+  `orderbook_wal_disk_free_bytes`.
+
+  **A rotation costs 12.4 ms on the appending goroutine** (mean, measured on the
+  appends that rotated; 21.2 ms worst) — two fsyncs, a `link`, an `unlink` and a
+  directory fsync on APFS. At the 128 MiB default that is every four minutes at
+  2,500 msg/s. At 1 MiB it is every two seconds and the mean cost per append triples,
+  which makes small segments a test fixture rather than a configuration.
+  `BenchmarkRotationAppendTail` publishes it rather than calling it negligible.
+
+  **`-wal-retain` is a budget, not a bound.** `-wal-retain-segments` is checked after
+  it and wins, so the retained set never falls below
+  `(-wal-retain-segments + 1) x -wal-segment-bytes` — **640 MiB at the shipped defaults
+  of 4 and 128 MiB**, whatever byte number is set. The sizing advice was published as
+  though the floor were not there; a 500 MiB budget against the defaults yields 640 MiB
+  and about 1.3 s, not 1.0 s. The arithmetic is now stated wherever the advice is, and
+  `cmd/obgw` logs which term stopped a retention cycle when it changes, so an operator
+  watching a disk fill under a configured retention learns why nothing is being
+  deleted. `TestTheByteBudgetIsFlooredByMinSegments` pins it.
+
+  **`wal.Open` is not an integrity check, and Rule 9 used to claim it was.** It reads
+  only the newest segment, so a set with a missing middle segment, an overlap or a
+  CRC-damaged sealed segment opens cleanly and is refused by `Recover` and `ReadAll`.
+  Contiguity needs the previous segment's last record sequence, which only comes from
+  reading its records — so the claim was never implementable, and it was asserted as
+  fact in a godoc rather than argued for. Corrected in the rule, the godoc, and
+  `examples/replication`, which opens without recovering. `cmd/obgw` is unaffected: it
+  calls `Recover` first on the same path.
+
+  Four defects an adversarial review of the finished code found, all silent, none
+  reachable by any test that existed (§12.12, §12.13):
+  **rotating a pre-checksum v1 log** framed the rotation-triggering record without a
+  CRC and wrote it into a segment declaring every record checksummed, leaving the set
+  permanently unreadable from that point while `Open` kept succeeding;
+  **an existing zero-byte file at the `-wal` path** took CRC-framed records at offset 0
+  behind no magic, which every reader then classified as a headerless v1 log —
+  `ReadAll` returning nothing with a nil error, and each restart rewriting sequence 1;
+  **archiving into the log's own directory** reported every segment archived and
+  deleted every one of them, because the archive target was the segment and the
+  idempotency check agreed it was already there; and **a set whose stem was missing**
+  — the one downgrade shape §2.5 exists to prevent, reachable by a kill or an ENOSPC
+  inside the first rotation's migration — was never repaired, surviving 46 further
+  rotations. Also: the active segment's file descriptor kept the `.tmp` name it was
+  built through, so every ENOSPC on a live segment named a file that does not exist;
+  retention was skipped on a full disk, which is the only time it is the last mechanism
+  left; and the low-water warning said "running retention now" against the default
+  configuration, in which retention deletes nothing.
+
+  New API: `wal.OpenWith`, `wal.Options`, `wal.Retain`, `wal.Stat`, `wal.ReadAfter`,
+  `wal.ArchivedSegments`, `wal.FreeBytes`, `wal.CheckArchiveDir`, `wal.ErrLogGap`,
+  `wal.ErrNotALog`, `wal.ErrBelowFloor`, `wal.ErrArchiveIsTheLog`, `Writer.Failed`,
+  `Writer.Rotations`, `Writer.ActiveSegment`,
+  and three fields on `wal.RecoverReport`. `wal.Open`, `wal.ReadAll`, `wal.Recover`
+  and `wal.RestoreAfter` keep their signatures and their behaviour on a log that has
+  never rotated. The frozen API surface is updated accordingly.
+
+### Fixed
+
+- **A checkpoint taken after a restart and before the first command stamped the
+  snapshot with log sequence 0, over a complete book.** `matching.NewRunnerFor` builds
+  a Runner over a recovered engine and had no way to be told where in the log that
+  engine already stood, so `lastApplied` — the number every checkpoint writes into the
+  snapshot as `WALSeq`, and the number the NEXT recovery replays from — started at zero
+  however the engine came to exist. `matching.RunnerConfig.LastApplied` now carries the
+  position, and `cmd/obgw` seeds it from the recovery report with
+  `max(SnapshotSeq, LogLastSeq)`.
+
+  The window is one checkpoint tick with no command in it, which at the shipped
+  30-second `-checkpoint` cadence is any restart into a quiet market: out of hours,
+  before the open, a maintenance window, a venue restarted and watched for a minute
+  before the flow is pointed back at it.
+
+  What it cost depends on the configuration, and neither answer is good. Without
+  `-wal-retain` it is **silent**: the next recovery re-applies the whole log on top of
+  a snapshot that already contains it, and the only thing standing between that and a
+  doubled book is the duplicate-client-order-id ring — which is bounded (4,096 keys in
+  `cmd/obgw`, and zero by default in `pkg/matching`) and, more to the point, does not
+  cover an order that carries no client order id at all. The wire accepts one. Fifty
+  such orders in over TCP, a restart, one quiet checkpoint, another restart, and the
+  book holds a hundred. With `-wal-retain` set it is **fatal**: the retention floor climbs past the
+  sequences the zeroed stamp claims not to cover, and the venue refuses every
+  subsequent start with `wal: log gap: snapshot covers through sequence 0 but the
+  oldest retained segment ... starts at 385`, naming segments that have already been
+  deleted, with `-wal-archive` off unless set.
+
+  The defect predates segmentation and retention and reproduces at `ffd9a96`. The
+  retention floor check is what made it visible rather than what caused it.
+  `RUNBOOKS.md` gains "A snapshot stamped sequence 0", and the first step of "A gap
+  between the snapshot and the log" now sends an operator there instead of to a
+  fail-over. Three tests pin it, the two in `cmd/obgw` end to end through a real
+  restart: the stamp, the count of records the following recovery re-applies, and that
+  a venue running retention still starts after a quiet checkpoint tick.
+
 ### Changed
+
+- **A halted or cancel-only venue now refuses new orders with `ReasonHalted`
+  (wire 10), where it used to say `ReasonOther` (wire 1).** `orderentry.ReasonFor` had
+  no case for `types.ErrTradingHalted` or `types.ErrNewOrdersHalted`, so a reason code
+  that was defined, documented, frozen in the wire numbering and handled by
+  `cmd/obsoak` was never actually sent by anything. Found while asserting the
+  disk-full behaviour above, whose design declines to invent a `ReasonDiskFull`
+  precisely on the argument that clients already receive `ReasonHalted` — an argument
+  worth nothing while it was false. No wire constant changed and no test asserted the
+  old value. Every other mapping is unchanged, including `matching.ErrShuttingDown` to
+  `ReasonShuttingDown` (wire 10 was added beside wire 15, not over it), and the whole
+  mapping is now pinned by a table with one row per sentinel — the failure mode here is
+  a case going missing, which a test per case cannot catch.
+
+- **`ReadAll` returns what is still on disk.** Its signature, its ordering and its
+  errors are unchanged, and it is unchanged in every respect for a log that has never
+  had a segment deleted. Once retention has fired, the first entry's `Seq` is the
+  retention floor rather than 1 — the runbook and the godoc now say so, and the floor
+  is legible from `ls` without tooling.
+
+- **`RUNBOOKS.md` §"A corrupt snapshot" now branches on the retention floor.** The old
+  procedure — delete the snapshot, restart, replay from the beginning — is still
+  exactly right for a venue whose floor is 1, which is every venue running the default
+  configuration. Above 1 it destroys the book, because the snapshot is the only base
+  the retained log can be joined to. A venue running retention without archival has a
+  recovery point objective equal to its newest snapshot, and that sentence is now in
+  `PRODUCTION-READINESS.md` rather than waiting to be discovered in an incident. Two
+  new sections: "A gap between the snapshot and the log" and "The disk filled up".
 
 - **A restart no longer parses the part of the log its snapshot already covers.**
   `wal.Recover` walks every record in the file and verifies every CRC, and decodes and
@@ -38,10 +227,12 @@ versions may include breaking changes).
   corrupted a record behind a snapshot. `TestCorruptionInTheCoveredPrefixStillRefuses`
   now does, and it fails against a seek-based skip.
 
-  **Restart time is reduced, not bounded.** The file still never shrinks (~44 GiB a day
-  at 2,500 msg/s) and reading it is still O(total log). Rotation is what removes that,
-  and it is not built. Design, sabotage runs and the three places the code disagreed
-  with its own spec: [BOUNDED-RECOVERY.md](docs/BOUNDED-RECOVERY.md).
+  **Restart time is reduced, not bounded, by this change on its own.** The file it
+  measures never shrinks (~44 GiB a day at 2,500 msg/s) and reading it is O(total log).
+  Rotation and retention are what remove that, and they are the entry above — in the
+  same release, and still off by default. Design, sabotage runs and the three places
+  the code disagreed with its own spec:
+  [BOUNDED-RECOVERY.md](docs/BOUNDED-RECOVERY.md).
 
   `wal.Open` was paying for a *second* full parse of the log, inside `lastSeq`, to
   learn one number. It now walks the frames and decodes one record, and still refuses a
