@@ -65,10 +65,15 @@ type Runner struct {
 	quit   chan struct{} // the shutdown fence; closed by Close
 	once   sync.Once     // Close is idempotent
 	log    CommandLog
-	// lastApplied is the log sequence of the last command actually applied. It is
-	// only ever touched by the matching goroutine, which is what makes a
-	// checkpoint's WALSeq trustworthy: appended-but-unapplied commands are on disk
-	// and must still be replayed.
+	// lastApplied is the log sequence of the last command actually applied. After
+	// the matching goroutine starts it is touched by nothing else, which is what
+	// makes a checkpoint's WALSeq trustworthy: appended-but-unapplied commands are
+	// on disk and must still be replayed.
+	//
+	// It is SEEDED once, in NewRunnerFor, before that goroutine exists. A recovered
+	// engine has already applied part of the log, and a Runner that starts at zero
+	// over one of those will checkpoint a complete book as covering nothing. See
+	// RunnerConfig.LastApplied.
 	lastApplied int64
 }
 
@@ -124,6 +129,33 @@ type RunnerConfig struct {
 	// Replaying starts the engine in replay mode and suppresses logging, so a
 	// bootstrap replay does not re-append the log it is reading.
 	Replaying bool
+	// LastApplied is the log sequence the engine handed to NewRunnerFor has
+	// already applied — for a recovered engine, the last record folded into it by
+	// the snapshot and the replayed tail together. Zero, the default, means "this
+	// engine stands at the beginning of the log", which is correct for a fresh
+	// engine and for a promoted follower opening a brand-new log.
+	//
+	// It exists because a Runner's checkpoint stamps this number into the snapshot
+	// as WALSeq, and WALSeq is what the NEXT recovery replays from. A recovered
+	// engine handed to a Runner that thinks it stands at zero produces, on the
+	// first checkpoint taken before any command arrives, a snapshot holding the
+	// complete book stamped "covers nothing". The following restart applies the
+	// whole log on top of a snapshot that already contains it.
+	//
+	// The window is one checkpoint tick with no command in it, which at an
+	// ordinary 30-second cadence is any restart into a quiet market. Nothing
+	// downstream reports it. The duplicate-client-order-id ring absorbs the
+	// re-applied submits, but only while the ids since the snapshot fit inside it,
+	// only if a ring was configured at all — the zero value here is none — and only
+	// for orders that CARRY a client order id, since an order without one is never
+	// deduped and is simply booked twice. With log retention on it is not silent but
+	// fatal: the retained floor climbs past the sequences the zeroed stamp claims
+	// not to cover and recovery refuses to start at all.
+	//
+	// Callers recovering through pkg/wal want max(RecoverReport.SnapshotSeq,
+	// RecoverReport.LogLastSeq): the snapshot's position, or the last record
+	// replayed on top of it, whichever is further along.
+	LastApplied int64
 }
 
 // NewRunner builds a Runner over a fresh Engine and starts its matching
@@ -139,6 +171,11 @@ func NewRunner(cfg RunnerConfig) *Runner {
 //
 // The engine must not be driven from anywhere else afterwards — the Runner's
 // goroutine now owns it.
+//
+// A recovered engine also arrives with a POSITION in the log, and cfg.LastApplied
+// is where it is stated. Rebuilding the book and leaving that at zero is not a
+// smaller version of recovery, it is a checkpoint that lies about what it covers;
+// see RunnerConfig.LastApplied.
 func NewRunnerFor(eng *Engine, cfg RunnerConfig) *Runner {
 	if cfg.QueueSize <= 0 {
 		cfg.QueueSize = 1024
@@ -152,6 +189,9 @@ func NewRunnerFor(eng *Engine, cfg RunnerConfig) *Runner {
 		done:   make(chan struct{}),
 		quit:   make(chan struct{}),
 		log:    cfg.Log,
+		// Set before the matching goroutine starts, which is the only moment anything
+		// but that goroutine may touch it.
+		lastApplied: cfg.LastApplied,
 	}
 	if cfg.Replaying {
 		r.engine.SetReplaying(true)

@@ -219,8 +219,15 @@ type Config struct {
 	// ErrDuplicateClientOrderID — near-term protection against a replayed or
 	// duplicated NewOrder double-booking (the FIX PossDup class). Orders with an
 	// empty ClientOrderID are never deduped. Bounded memory (a ring of the most
-	// recent keys); full session idempotency is a gateway concern. Bypassed on
-	// replay.
+	// recent keys); full session idempotency is a gateway concern.
+	//
+	// It is NOT bypassed on replay, deliberately — see recordClientOrderID, which
+	// runs during replay so that an order accepted before a crash is still a
+	// duplicate after it. That also means the ring is no defence against replaying a
+	// log onto a snapshot that already contains it: past the ring's capacity each key
+	// is evicted before the replay reaches it again, so every order re-books rather
+	// than just the excess. RUNBOOKS.md, "A snapshot stamped sequence 0", is where
+	// that matters to an operator.
 	DedupClientOrderIDs int
 	// MaxForceTradeQty caps the quantity of a single ForceTrade call (liquidation
 	// / ADL print); a larger forced trade is rejected with ErrForceTradeTooLarge,
