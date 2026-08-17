@@ -105,7 +105,11 @@ anything.
    v0.20.0: a guarantee stated against the wrong reference point. A bust registry
    parked on this seam would be lost the same way, silently, and only after a crash.
 
-6. **Neither edge of the protocol can name a trade.** `wire.Executed`
+6. **Neither edge of the protocol can name a trade.** ⚠️ **Historical — read the
+   indented paragraph below before quoting this item.** A status pass in 2026-08 cited
+   this bullet as the current state of the wire and reported M8 as blocked on it. It is
+   a problem statement from before the work, and the paragraph that closes it is eight
+   lines further down. `wire.Executed`
    (`internal/wire/wire.go:575`) carries ClOrdID, price, quantity, leaves and
    aggressor — no trade id. `wire.MDTrade` (`internal/wire/wire.go:200`) carries
    price, quantity and aggressor — no trade id. `marketdata.Update` for `UpdateTrade`
@@ -114,8 +118,13 @@ anything.
    trade-bust" claim fails here first, before any of the interesting semantics.
 
    *Closed after this spec was written:* wire **v3** gives both payloads a `TradeID`
-   and adds `Busted` / `MDBust`. This paragraph is left as it was because §3 records
-   what was true when the design was made, and the gap is why the design has §4.5.
+   and adds `Busted` (`U`) / `MDBust` (`u`); the wire is now at **v4**, and
+   `cmd/obgw/bust_e2e_test.go:21` busts a trade across both edges over real sockets
+   with two counterparties and a market-data subscriber all agreeing on the id. §5
+   rows 4 and 5 are marked done. This paragraph is left as it was because §3 records
+   what was true when the design was made, and the gap is why the design has §4.5 —
+   but a reader after the state of the code should check `internal/wire/wire.go`, not
+   this section. A spec's §"why this exists" is an artefact of its own date.
 
 ## 4. The design
 

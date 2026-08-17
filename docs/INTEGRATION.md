@@ -97,26 +97,40 @@ A production matching path is a staged pipeline. Parallelism is applied *around*
 the matching core, never *inside* it — the hot loop touches nothing but the book.
 
 ```
- producers        ┌───────────┐   ┌────────────┐   ┌──────────────┐   ┌───────────┐
- (gateways)  ───▶ │  Gateway  ├──▶│ Sequencer  ├──▶│   Matcher    ├──▶│ Publisher │
-                  │  N gorout.│   │ 1 MPSC queue│   │ 1 gorout./sym│   │ fan-out   │
-                  └───────────┘   └────────────┘   └──────────────┘   └───────────┘
-   decode / auth /                 assign seq +      Engine owns the    drain events,
-   pre-trade risk /                append to WAL     book, matches      publish snap +
-   → int64 ticks                   (before matching) with no locks      deltas to subs
+ producers        ┌───────────┐   ┌─────────────┐   ┌──────────────────────┐   ┌───────────┐
+ (gateways)  ───▶ │  Gateway  ├──▶│    Queue    ├──▶│ Sequence + WAL + Match│──▶│ Publisher │
+                  │  N gorout.│   │ 1 MPSC chan │   │   1 gorout./symbol    │   │ fan-out   │
+                  └───────────┘   └─────────────┘   └──────────────────────┘   └───────────┘
+   decode / auth /                 orders arrivals    assign seq, append to      drain events,
+   pre-trade risk /                — assigns NO       WAL, then apply — all      publish snap +
+   → int64 ticks                   sequence          three on the same gorout.   deltas to subs
 ```
+
+> **There is no separate sequencer stage, and this diagram used to draw one.** The
+> queue orders arrivals and stamps nothing; the sequence is assigned *inside* the
+> matching goroutine at `pkg/matching/engine_loop.go:247`, one statement before the
+> command is applied (`logCommand`, then `dispatch`). Write-ahead ordering is real and
+> pinned by `TestRunnerLogIsWriteAhead` — the record is on disk before the engine sees
+> the command — but "before matching" and "before the queue" are different claims, and
+> only the first is true. The consequence, stated plainly because it is a genuine
+> limitation rather than a drawing error: **the venue's total order is Go channel
+> arrival order among N connection goroutines.** That is deterministic once fixed, and
+> replays identically forever, but it is not an arrival-time-ordered sequencer and
+> nothing records when a command reached the socket. Closing that is
+> [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) M1.
 
 Mapped onto this library:
 
 | Stage | Your code | This library |
 |-------|-----------|--------------|
 | **Gateway** | protocol decode, auth, pre-trade risk, `Instrument` conversion | `types.Instrument`, `types.NewOrder` |
-| **Sequencer** | assign a monotonic seq, append to your WAL | `matching.Runner`'s command queue |
+| **Queue** | choose your ordering policy across producers *before* this point if arrival fairness matters to you | `matching.Runner`'s command queue — preserves enqueue order, assigns no sequence |
+| **Sequence + WAL** | supply a `CommandLog` | `matching.CommandLog` / `pkg/wal.Writer`; the `Seq` is assigned here, on the matching goroutine, write-ahead of the apply |
 | **Matcher** | — | `matching.Engine` (single writer) |
 | **Publisher** | fan out to subscribers off the hot path | `Engine.Snapshot` / `Book().SnapshotL3` + your own event pump |
 
 Everything in "Your code" is an integration seam you own; the library is the
-Sequencer+Matcher core plus the snapshot primitives.
+queue, the journal, the matcher and the snapshot primitives.
 
 ---
 

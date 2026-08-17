@@ -375,6 +375,21 @@ func (r *Runner) logCommand(cmd command) {
 		// Genuinely read-only commands: queries, the checkpoint, and ExpireDue,
 		// whose effects are cancels the engine derives from a clock replay cannot
 		// rewind. Nothing here changes state a recovery must reproduce.
+		//
+		// KNOWN DEFECT — cmdSetPhase reaches this branch and does not belong here.
+		// Runner.SetPhase is a frozen public mutating command: it runs the opening or
+		// closing uncross, prints the auction trades to the event stream, and sets
+		// e.state, which EngineSnapshot carries and the digest covers. A restart
+		// between checkpoints therefore recovers the PRE-transition phase with an
+		// un-uncrossed book and no auction prints in the log — the exact failure the
+		// CommandLog doc above says this interface exists to prevent, and the third
+		// instance of it after Reduce and Halt.
+		//
+		// Not reachable from cmd/obgw today (no wire message, no server call site),
+		// so no shipped gateway loses an auction; a library embedder driving sessions
+		// through Runner.SetPhase does. Left in place rather than silently patched
+		// because the fix is a log format change with a replay rule and a
+		// compatibility story: see docs/JOURNAL-COMPLETENESS.md.
 		return
 	}
 	if err != nil {

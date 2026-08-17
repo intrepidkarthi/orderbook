@@ -18,9 +18,9 @@ supported surface, and the codec is deliberately unexported.
 | **Dependencies** | None. A 2-byte length and a 1-byte type. |
 | **Transport security** | **None.** Assumes a trusted network or a TLS wrapper below. |
 | **Credentials** | A shared secret, over TLS when the venue is given a certificate and in the clear when it is not. The wire carries the secret either way; what protects it is the transport. |
-| **Instruments** | One per gateway |
+| **Instruments** | A set per gateway (`-symbols`); one book per instrument, fanned out per book |
 | **Stability** | Frozen by `internal/wire/testdata/*.hex`; changing a layout means bumping `Version` |
-| **Current version** | 2 |
+| **Current version** | 4 |
 
 Framing is borrowed rather than invented so the session rules — heartbeats,
 sequenced replay, login and logout — are somebody else's well-tested design.
@@ -48,7 +48,11 @@ Also absent, deliberately:
   client.
 - **The privileged flag** — it is a liquidation capability. Client-settable, it
   would bypass every pre-trade cap.
-- **Symbol on a cancel** — the gateway serves one instrument.
+- **Symbol on a cancel** — a `ClOrdID` is unique venue-wide, across every book, so it
+  already names exactly one order and a symbol would be redundant at best and
+  contradictory at worst. (This used to say "the gateway serves one instrument". The
+  conclusion survived multi-symbol; the reason did not. See
+  [MULTI-SYMBOL.md](MULTI-SYMBOL.md) §"Client order ids are venue-wide".)
 
 ---
 
@@ -164,7 +168,7 @@ of your own orders.
 | MsgType | 1 | `E` |
 | Version | 1 | |
 | ClOrdID | 20 | your identifier, unique within your session |
-| Symbol | 16 | must match the gateway's instrument |
+| Symbol | 16 | must name one of the gateway's instruments (`-symbols`) |
 | Side | 1 | `B` buy, `S` sell |
 | Type | 1 | `L` limit, `M` market |
 | TIF | 1 | `G` GTC, `I` IOC, `F` FOK, `D` DAY |
@@ -344,7 +348,9 @@ Two caveats worth knowing before you enable it:
   not "if the venue closes".
 
 **Query** — MsgType `Q` (1) + Version (1). Carries nothing: the account is the
-session's and the gateway serves one instrument.
+session's, and the reply covers **every book the venue serves** in one pass rather
+than one instrument at a time. A client reconciling after a reconnect asks once and
+gets its whole open state.
 
 ### Outbound
 

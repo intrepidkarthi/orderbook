@@ -1,8 +1,18 @@
 # Benchmarks
 
-Performance of the core library, measured with Go's benchmark tooling. These are
-tracked as regression targets (docs/SPEC.md §7), not marketing — the harness is
-in-repo so anyone can reproduce them.
+Performance of the core library, measured with Go's benchmark tooling. Not marketing —
+the harness is in-repo so anyone can reproduce them.
+
+> **These are not tracked as regression targets, and this page used to say they were.**
+> `.github/workflows/bench.yml` runs `go test -bench` and pipes the output into the run
+> summary. There is no stored baseline, no `benchstat` comparison, and no condition that
+> can fail a build. The only performance facts in this repository that a test can fail
+> on are the three allocation ratios in `pkg/orderbook/alloc_test.go`
+> (`TestCancelIsAllocationFree`, `TestCancelReplaceIsAllocationFree`,
+> `TestAddAloneDoesAllocate`) — which is why those three are asserted as *ratios against
+> a measured baseline* rather than as absolute numbers. Building the missing half — a
+> committed tape, a recorded machine configuration and a comparison that can fail — is
+> [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) M10.
 
 ## Reproduce
 

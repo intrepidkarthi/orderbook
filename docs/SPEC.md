@@ -248,8 +248,12 @@ Each records the choice, the rationale, and the alternative we deferred.
   Each level is a **FIFO queue** → price–time priority.
 - **Why:** best bid/ask is read constantly; it must be O(1). New price levels are
   comparatively rare.
-- **Deferred:** heap / balanced BST / skip-list / radix-bucketed ladders — noted
-  as benchmark alternatives.
+- **Deferred, and *not attempted*:** heap / balanced BST / skip-list /
+  radix-bucketed ladders. Stated this way deliberately — an earlier wording called
+  them "benchmark alternatives", which entitles a reader to assume a comparison
+  exists. None was ever built, and no alternative is kept behind an interface for
+  A/B measurement. See [PERFORMANCE-ROADMAP.md](PERFORMANCE-ROADMAP.md) M11,
+  experiments 2 and 3.
 
 ### 6.3 Concurrency — **single writer per book** (lock-free hot path)
 - One matching goroutine owns each book with **no lock on the hot path** (the
@@ -322,7 +326,17 @@ out-of-sample data and trading costs?):
 
 ---
 
-## 10. Milestones (each = one or more small commits)
+## 10. Milestones (each = one or more small commits) — **historical**
+
+> **This is not the project's plan. [PERFORMANCE-ROADMAP.md](PERFORMANCE-ROADMAP.md)
+> is.** The table below is the original pre-WAL research plan, kept because it records
+> the order the library was actually built in and because several sections above refer
+> to it. Every milestone in it is delivered. Its `M0`–`M11` numbering is **unrelated**
+> to the roadmap's `M0`–`M15`, which is a production-readiness plan for a system that
+> did not exist when this was written — so "M3" means two entirely different things in
+> the two documents. Two milestone lists in `docs/` with different content and
+> colliding identifiers is precisely how a status pass goes wrong; this note is the
+> guard rail.
 
 | # | Milestone |
 |---|---|

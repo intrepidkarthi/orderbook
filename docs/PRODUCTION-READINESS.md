@@ -128,8 +128,12 @@ What they still do not cover, and this is the gap that matters for a production 
   orphans ([SOAK.md §1e](SOAK.md)). That rules out the leaks that appear in four
   hours and says nothing about the ones that appear in a week. A trading day is six
   to eight hours and a deployment is months.
-- **Hundreds of connections are still untested.** The soak runs use 25. The gateway's
-  goroutine-per-connection model is fine in principle and unproven past a few dozen.
+- **Hundreds of connections are still untested.** The sustained soak runs use 8 or 25.
+  A deliberate connection-count sweep has since gone to 80 at 5,000/s — 8× the
+  connections for 17% more CPU, which retired an earlier and wrong "connection wall"
+  conclusion ([SOAK.md](SOAK.md) §"Connection scaling"). So *a few dozen* is now
+  measured; *hundreds* is still the open question, and the goroutine-per-connection
+  model is fine in principle and unproven past 80.
 - **There is no capacity plan, and the first attempt at one was wrong.** The rates
   originally published here did not reproduce four hours later on the same machine and
   the same code — 7,000/s clean became 3,500/s clean — because the measurement never
@@ -266,11 +270,13 @@ what a primary-backup topology needs, and they now have the thing this project's
 record says to demand before believing a seam: a consumer.
 [REPLICATION.md](REPLICATION.md) specifies it and `examples/replication` is it — a
 primary shipping its log over TCP, a follower that bootstraps from a snapshot taken
-mid-stream and never stops replaying, and promotion into a live venue. Six drills run
-on every CI pass: books digest-equal to an uninterrupted control, mid-stream
-bootstrap, promotion preserving exactly the applied prefix, the incarnation fence
-refusing a dead primary's cursor, refusals replaying as refusals, and a slow follower
-shed without the matcher waiting.
+mid-stream and never stops replaying, and promotion into a live venue. Twelve drills
+run on every CI pass: books digest-equal to an uninterrupted control, mid-stream
+bootstrap, promotion preserving exactly the applied prefix, promotion of a gapped book
+*refused*, the incarnation fence refusing a dead primary's cursor, refusals replaying
+as refusals, a slow follower shed without the matcher waiting, a bust replicating,
+multi-symbol replication with a wrong-shard negative control, and follower reconnect
+both across a segment rotation and from below the retained floor.
 
 Building the consumer promptly found the fifth phantom — the log-tail hook's first
 shape handed subscribers a pointer into state the matcher keeps mutating, a data race
@@ -456,9 +462,20 @@ that memory to your bust window.
 
 ### Regulatory — partial
 
-An audit trail exists in `pkg/gateway`, and market-abuse surveillance covers spoofing,
-layering, order-to-trade ratios, marking the close, ramping, pinging and cross-book
-patterns, each mapped to a real enforcement case in [THREAT-MODEL.md](THREAT-MODEL.md).
+Market-abuse surveillance covers spoofing, layering, order-to-trade ratios, marking the
+close, ramping, pinging and cross-book patterns, each mapped to a real enforcement case
+in [THREAT-MODEL.md](THREAT-MODEL.md).
+
+> **Correction (2026-08-17): there is no audit trail in `pkg/gateway`.** This paragraph
+> used to open by claiming one. `pkg/gateway` is a per-account rate gate, an asymmetric
+> speed bump and ungated cancels — grepping the package for "audit" returns nothing.
+> What the venue actually has that could serve as one is the WAL (an ordered, CRC-checked
+> command journal, with retention and archival) and the `EventSink` seam that
+> `examples/gateway` demonstrates a CAT-style consumer against. Neither is a security or
+> access audit log, and neither is running. This is the same class of phantom-seam claim
+> this document records against itself under §"Observability — partial" (the `Metrics`
+> seam that never existed), and it is recorded here rather than quietly deleted for the
+> same reason: it is now the sixth.
 
 Absent: CAT/MiFID reporting formats, clock-synchronisation attestation, formal record
 retention, and anything jurisdiction-specific.

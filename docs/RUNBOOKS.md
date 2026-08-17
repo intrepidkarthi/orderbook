@@ -545,9 +545,21 @@ curl -s localhost:9100/metrics | grep -E 'rejections_total|queue_depth|queue_cap
 ```
 
 `orderbook_rejections_total` is labelled by reason, and the reason tells you where to
-look. `queue_full` is the venue behind its clients. A duplicate client id or an
-unknown order is the client's model diverging from the book. A price-band rejection
-is the venue working as configured.
+look. A duplicate client id or an unknown order is the client's model diverging from
+the book. A price-band rejection is the venue working as configured.
+
+> **Do not grep for `queue_full` — that label cannot appear, and this runbook used to
+> tell you to.** A queue-full refusal is made at the gateway *before* the engine
+> (`cmd/obgw/server.go:1181-1187`): it is turned straight into a wire reject and never
+> becomes a `matching.EventRejected`, and every reason label is derived from that event
+> (`pkg/observability/metrics.go:97-100`). The same is true of the rate-gate refusal.
+> **Nothing anywhere counts a shed**, which is a real observability gap
+> ([`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) M14, "queue-full events"), not
+> just a wrong label. Until it is closed, the ceiling case is visible two other ways:
+> **depth approaching capacity** (below), and the engine error string an at-capacity
+> venue returns, which is pinned against this runbook by
+> `TestDrillTheCeilingRejectionNamesItself` (`cmd/obgw/drills_test.go:355`) precisely
+> so this page and the code cannot drift again.
 
 **Depth approaching capacity is the number to alert on**, not depth being non-zero —
 by the time the queue is full, clients are already being refused.

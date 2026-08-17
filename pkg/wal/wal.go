@@ -191,10 +191,28 @@ var ErrCorrupt = errors.New("wal: corrupt record")
 // crcTable is Castagnoli, which has hardware support on amd64 and arm64.
 var crcTable = crc32.MakeTable(crc32.Castagnoli)
 
-// Writer is an append-only, durable command log. It is safe for concurrent use,
-// but write it write-ahead — append (and Sync) before the engine applies the
-// command — so a crash never loses an acknowledged order. Batch Sync (group
-// commit) to amortise the fsync across many appends.
+// Writer is an append-only command log. It is safe for concurrent use, and it must
+// be written write-ahead: append before the engine applies the command, so the log
+// can never be missing something the engine has already done.
+//
+// Durability is a SEPARATE promise from write-ahead ordering, and conflating the two
+// is a mistake this comment used to make. Append puts bytes in a bufio.Writer; only
+// Sync makes them survive a crash. Whether a Sync happens before the engine applies
+// the command is the CALLER'S policy, not this type's:
+//
+//   - matching.Runner's default path calls Append and does not call Sync, so an
+//     acknowledged order can be lost in the window before the next group commit.
+//     That window is the venue's recovery-point objective and it is meant to be
+//     stated to clients, not assumed away — see docs/REPLICATION.md §4.
+//   - cmd/obgw's -sync-every-command decorator (cmd/obgw/synclog.go) calls Sync
+//     inside each Append, which is what actually earns "a crash never loses an
+//     acknowledged order". TestSyncEveryCommandIsDurableBeforeApply proves it with a
+//     second file descriptor; its "group commit leaves it buffered" subtest proves
+//     the default does not, by seeing zero records through that same descriptor.
+//
+// This sentence claimed the strong guarantee unconditionally for four releases while
+// the default path did not provide it. Batch Sync (group commit) to amortise the
+// fsync across many appends, and know which of the two you are running.
 type Writer struct {
 	mu  sync.Mutex
 	f   *os.File

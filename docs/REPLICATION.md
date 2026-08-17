@@ -1,8 +1,9 @@
 # Replication — Proving the HA Seams
 
-Status: **implemented** — `examples/replication` + drills D1–D7 in CI; written as a
-spec before any code existed, and §8 records what building it actually found ·
-Author: Karthikeyan NG · Last updated: 2026-08-03
+Status: **implemented** — `examples/replication` + **twelve drills** in CI (D1–D9,
+including a D3 and a D8 negative control); written as a spec before any code existed,
+and §8 records what building it actually found ·
+Author: Karthikeyan NG · Last updated: 2026-08-17
 
 Companion documents:
 - [`PRODUCTION-READINESS.md`](PRODUCTION-READINESS.md) — where "high availability:
@@ -128,8 +129,18 @@ The procedure (the runbook entry this spec commits to writing):
 1. Confirm the primary is actually gone, and record the follower's applied
    sequence.
 2. Stop the tail. The follower finishes applying what it holds, leaves replay mode
-   (`SetReplaying(false)`), and opens its own WAL — whose first record notes the
-   sequence it resumed from.
+   (`SetReplaying(false)`), and opens its own WAL.
+
+   > **Correction (2026-08-17): the resume point is not recorded anywhere on disk.**
+   > This step used to claim the new log's "first record notes the sequence it resumed
+   > from". It does not. `Follower.Promote` (`examples/replication/follower.go:206-215`)
+   > sets `snap.WALSeq = 0` — with a comment explaining that the old primary's log
+   > positions are meaningless in the new incarnation, which is true — then calls
+   > `wal.Open` and appends nothing. So a promoted venue's log starts at sequence 1 with
+   > no on-disk statement of what it continued from, and an operator reconstructing a
+   > failover has to get that number from the pre-promotion snapshot instead. Recording
+   > it is [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) M1's "sequence continuation
+   > after promotion", still open.
 3. **Mint a new incarnation.** This is the fence, and the machinery already exists:
    `orderentry.Registry` sequence numbers are scoped to one incarnation, and a
    client resuming with a stale cursor is refused rather than served different
@@ -204,8 +215,11 @@ deliberately broken code before it counts:
    in one sitting.
 3. ✅ The **failover runbook entry** in [RUNBOOKS.md](RUNBOOKS.md) — the §5
    procedure, replacing the "no failover procedure" gap line.
-4. ✅ **Drills D1–D7** in CI (`examples/replication/main_test.go`), each
-   verified to fail against deliberately broken code.
+4. ✅ **Twelve drills** in CI (`examples/replication/main_test.go`), each
+   verified to fail against deliberately broken code. D1–D7 are §6's list; since then
+   D8 added multi-symbol replication with a wrong-shard negative control, D9 added
+   follower reconnect across a rotation and bootstrap from below the retained floor,
+   and D3 gained a negative control that refuses to promote a book with a known gap.
 5. ✅ The PRODUCTION-READINESS edit: "High availability" is *seams proven —
    topology still yours*, and not one word further.
 
