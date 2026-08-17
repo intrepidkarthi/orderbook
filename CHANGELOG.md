@@ -9,6 +9,218 @@ versions may include breaking changes).
 
 ### Added
 
+- **A reference matcher, and a random-tape differential harness that compares it against
+  the engine after every command.** This is milestone M9's central ask, which the last
+  roadmap survey found did not exist in any form. Spec, and the record of what building
+  it found: [REFERENCE-MATCHER.md](docs/REFERENCE-MATCHER.md).
+
+  `internal/refmatch` is a limit order book written to be READ: two sorted slices
+  scanned linearly, cancel by linear search, depth by a fold. No index, no pool, no
+  id-to-node map. It is slow on purpose and must never be optimised — a model with an
+  index has the engine's bug class. It imports the standard library and nothing else,
+  and `TestReferenceMatcherImportsNothing` parses the files to keep it that way.
+  `pkg/types` is the tempting exception and it is refused: `types.Order.Fill` is where
+  "filled + remaining == quantity" is maintained, and an invariant both sides get from
+  the same seven lines is an invariant nothing is checking.
+
+  Equivalence is a single comparable `Observation` produced by both sides and compared
+  **whole** with `reflect.DeepEqual` — not field by field, because a field-list
+  comparator is where a future field silently stops being checked. It carries the
+  verdict as a mapped enum (error strings are not a contract), the command's trades
+  field by field, the resting book as a **ranked** L3 list, the L2 aggregate
+  **asymmetrically** (the engine's maintained `TotalQty` and `count` against the
+  model's summed L3), order and trade ids exactly including the shard field, the event
+  stream as an ordered list, and the state, last trade price and both next-id counters.
+  Exactly three things may differ, each with what still constrains it.
+
+  **Twenty-one deliberate engine mutations are all caught, and every shrunk
+  reproduction is 1 to 4 commands** — a LIFO price level, a maker/taker price
+  inversion, a partial fill leaving the wrong remainder, an off-by-one in a level
+  aggregate, a reduce that re-queues, an IOC that rests, `nextID` moved below the
+  admission checks, and fourteen more. The failure message prints the shrunk tape as a
+  pasteable `[]tape.Cmd` literal alongside the seed, the profile, the divergence class
+  and a field diff.
+
+  The harness's own guards were then sabotaged twelve ways, and the two that did not
+  behave as specified are written down rather than quietly fixed
+  ([REFERENCE-MATCHER.md](docs/REFERENCE-MATCHER.md) §10.3). Deleting the L2
+  comparison makes two mutations pass against a broken engine; comparing the book as a
+  set makes a third pass. One seed catches 8 of 18 mutations, the sweep catches 18 of
+  18, and that number is the argument for the sweep's size.
+
+- **`internal/tape`: one command generator for the whole repository, and a shrinker.**
+  `buildTape`, `tapeCmd`, `tapePhases` and `lcg` have moved out of `pkg/wal`'s tests,
+  and `pkg/wal` is now a consumer. Two generators means two alphabets, means one of
+  them is extended and the other is not, means the sweep that claims to be the stronger
+  test exercises less than the one it should dominate.
+
+  The command format is **deletion-closed**: a command names an earlier order by the
+  POSITION of the submit that created it, not by an index into the ids collected so
+  far. Deleting a submit therefore leaves later commands naming a position that
+  produced no order — a well-formed command with a predictable rejection — instead of
+  silently retargeting every later cancel onto a different order, which is what would
+  make a shrinker lose the failure it is shrinking.
+
+- **`FuzzDifferential`, a committed seed corpus, and a nightly time-bounded `-fuzz`
+  job.** The committed sweep in `go test ./...` stays a fixed handful of seeds, because
+  a test people will actually run beats a nightly job they will not.
+
+- **`orderbook.PriceLevel.Count`** exposes a level's maintained order count, and
+  `GetBidLevels`/`GetAskLevels` now carry it on the copies they return. It is the
+  maintained count and not a walk of the list, which is the point: comparing it against
+  an independent count is what catches the two drifting apart.
+
+- **`TestIceberg_RefillGoesToTheBackOfTheQueue`.** A refilled iceberg slice is new
+  liquidity and joins its price level behind everything already resting there.
+  `engine.go` stated the rule in a comment at the refill site and nothing asserted it.
+  It matters because it is a fairness rule with money attached: an order that kept its
+  place through every refill would take priority it never queued for, which is the
+  advantage displaying liquidity is supposed to buy.
+
+- **`TestSnapshotRestoreEqualsUninterruptedExecution`.** Restores a snapshot at three
+  fork points per tape and drives the **remainder** of the tape through the restored
+  engine, comparing every observation against the model. Nothing in the repository
+  previously restored a snapshot and then kept trading against it.
+
+- **`TestRecoveryTapeSpeaksTheTierOneAlphabet`** and **`TestOrderAttributesAreGenerated`**,
+  two guards against the alphabet silently narrowing again, both asserting reached
+  rather than drawn wherever an outcome is observable. **`TestDifferentialTapeIsPinned`**
+  protects the recorded mutation evidence from a generator change that re-rolls the
+  tapes while every test still passes — which one draft of `ExoticDamp` would have done.
+
+### Fixed
+
+- Nothing. Three engine defects were found and **none is fixed in this slice** — each
+  is a matching-semantics or event-stream change with consequences past the matcher,
+  and this repository specs before it codes. All three are pinned by named regression
+  tests that say what a fix has to change:
+
+  - **A rejected fill-or-kill still moves `LastTradePrice`.** `match` records the last
+    price before `settleInto` unwinds the prints, and nothing puts it back. Since the
+    last trade price is the price collar's reference when no mark is set, an order that
+    never traded can move the band that admits the next one.
+    `TestRejectedFOKStillMovesTheLastTradePrice`.
+  - **A self-trade-prevented maker can leave the book with no event announcing it.** A
+    fill-or-kill taker under CANCEL_OLDEST removes a resting maker mid-walk, fails to
+    fill, and is rejected; the rejection drops the pending events, and the reversal
+    restores only makers that actually traded. The book loses an order and the only
+    thing published is the taker's REJECTED. That contradicts the event stream's
+    documented reconstruction claim, which holds for every hand-written scenario and
+    not for this combination. `TestSTPCancelledMakerVanishesWithNoEvent`.
+  - **Pro-rata can leave the book crossed.** Pro-rata SKIPS a taker's own liquidity
+    instead of STP-cancelling the taker, so a taker whose only counterparty at the
+    touch is its own resting order falls out of the walk and rests across the spread.
+    Two commands reproduce it, and the crossed state persists — on one sweep seed the
+    skipped order left and the touch became a crossing between two unrelated accounts.
+    `TestProRataSelfSkipCrossesTheBook`.
+
+### Changed
+
+- **The crash-boundary sweeps now drive a wider alphabet**, from the shared generator:
+  reduce, replace, cancel-all, halt and cancel-only at every boundary, none of which
+  the old tape could reach. The trade is measured and recorded rather than assumed — on
+  the same 400-command tape, continuous prints fell from 202 to 117 and peak resting
+  depth from 72 to 45, while auction prints rose from 11 to 16 and the runtime fell
+  from 0.77 s to 0.70 s. `TestCrashAtEveryBoundary` now asserts **floors** on all three
+  numbers instead of "greater than zero", so the next alphabet change has to argue a
+  number down.
+
+  Widening it also revealed the failure mode this project keeps meeting from the other
+  direction: with halts and cancel-alls drawable everywhere, commands landing inside a
+  pre-open or closing auction refused the very orders the uncross was going to clear,
+  and the sweep went to **zero auction prints while every assertion still passed**. The
+  generator now draws submits and nothing else inside an accumulating phase.
+
+  **And it was still not the tier-1 alphabet, which adversarial review caught.** The
+  widening above is on the command-*kind* axis. On the order-*payload* axis the
+  recovery profile set `Exotic: false`, so all 287 submits on the 400-command sweep
+  were plain GTC limits — no market orders, IOC, FOK, post-only, per-order STP, trade
+  groups or privileged orders — while the profile's own comment called it "deliberately
+  a SUPERSET of Differential" and the spec said the tape "now speaks the tier-1
+  alphabet". So the replay oracle never carried a rejected FOK's reversed prints or an
+  STP-cancelled maker across a crash boundary: the two paths the spec named **in
+  advance** as defect-bearing, and the two this slice then confirmed as live defects.
+  Every assertion passed throughout, because they count prints, auction prints and
+  depth, none of which move if every submit is a plain limit. That is an exhaustive
+  check over an incomplete alphabet reporting completeness, in the sweep written to
+  apply that lesson.
+
+  Fixed rather than reworded. `walOrder` now carries the whole tier-1 payload onto the
+  journal, and the alphabet is asserted **by outcome** — a rejection reason a consumer
+  was actually told — wherever an outcome is observable. The depth cost is a real trade
+  and is recorded as numbers: at the differential draw rate the sweep fell to 52 prints
+  and 25 peak depth, because market orders, IOC and FOK never rest and the three
+  cancelling STP modes remove liquidity that already has. `Profile.ExoticDamp` divides
+  the exotic draw *rate* — a density knob, never an on/off one, since an on/off one is
+  what caused this — and at damp 4 the sweep holds 110 prints, 17 auction prints and
+  peak depth 32, clearing every existing floor with no number argued down.
+
+### Fixed — holes in the oracle, found by adversarial review
+
+Three of these are worse than a missing feature, because a hole in an oracle looks
+like coverage. Each was confirmed by running the mutation, not by argument, and each
+is written up in [REFERENCE-MATCHER.md](docs/REFERENCE-MATCHER.md) §10.5.
+
+- **Snapshot-restore was a digest round-trip, not a restore comparison.**
+  `restoreMatchesLive` did `restore(snap).Digest() == snap.Digest()`, which can only
+  see state `EngineSnapshot` itself carries and is structurally blind to everything
+  `LoadSnapshot` *rebuilds*. `PriceLevel.TotalQty` is exactly that: adding one line to
+  `LoadSnapshot` that double-counts each restored order into its level ships a venue
+  serving **double** the true L2 depth at every price — live best bid 7, restored best
+  bid 14 — and `go test ./... -count=1` exited **0 across all 23 packages**. The spec
+  had argued this was impossible by definition. It now compares the restored engine's
+  visible book against the model, and the mutation fails at the first command of every
+  seed.
+
+- **The compared "event stream" carried no trade payload.** It was an ordered list of
+  (kind, order id, user, reason), so the price and quantity a consumer reads off a fill
+  were unchecked. Attaching a corrupted trade to every published fill (price + 7,
+  quantity doubled) left the whole of `pkg/matching` green; only gateway and marketdata
+  tests reading the payload downstream noticed. The harness's own trade comparison
+  comes from `MatchResult.Trades`, a different source, so the two could disagree
+  indefinitely.
+
+- **The nightly fuzz campaign ran a weaker oracle than the committed sweep.**
+  `FuzzDifferential` passed `full=false`, dropping the invariant check, the
+  snapshot-restore comparison, the duplicate-order-id check and the trade-quantity
+  balance check — the last two being the checks two recorded mutations are credited to
+  by name. Thirty minutes of fuzzing could not see what a 0.25-second test saw.
+
+- **An untested property read as covered.** The spec credited the ranked L3 comparison
+  with catching "an iceberg refill that lands in the wrong place". It cannot: icebergs
+  are tier 2, so the generator never emits one. A mutation re-adding the refilled slice
+  at the head of its level passed all 23 packages, with the hidden order taking free
+  queue priority. The sentence is corrected and the property now has a test.
+
+- **Smaller, same shape.** `TestSameSeedSameObservations` collected two streams of
+  *engine* observations and threw the model's away, so nondeterminism in the model
+  would have surfaced as an unexplained intermittent divergence. The STP guard counted
+  modes *drawn* rather than modes that actually decided a match. Nothing asserted that
+  trade groups or privileged orders were generated at all — the two attributes that
+  decide whether self-trade prevention fires across accounts or is bypassed. The
+  failure message mixed the shrunk tape's command index with the original tape's
+  length, printing "first at command 2 of 140" when the real first divergence was at
+  118. `modelOrder` cast the tape's STP byte numerically while the engine side used a
+  refusing switch, the one place the harness broke its own no-catch-all rule.
+
+### Known limitation
+
+- **The model's independence is mechanical, not derivational.** No shared code, no
+  shared types, no shared arithmetic — enforced by a `go/parser` guard with teeth. But
+  the model was written *alongside* `engine.go` rather than from the specification, and
+  the evidence is in the files: several comment lines are byte-identical across the two
+  implementations, and the decision sequences match. Any rule the engine author got
+  wrong and the model author reproduced is invisible — the harness reports agreement.
+  That is not hypothetical: the model deliberately canonises the engine's position on
+  two of the three findings above, which is why both are pinned by hand-written tests
+  instead, and why those tests now name the model edit a fix must make in the same
+  commit. Measured, not assumed: correcting either defect in the engine alone turns
+  `TestDifferentialTape` red across three profiles and four seeds. Closing this
+  properly needs a second model written from the spec by someone who has not read
+  `engine.go`. [REFERENCE-MATCHER.md](docs/REFERENCE-MATCHER.md) §2.2.
+
+### Added
+
 - **The write-ahead log rotates into segments, and a prefix of them can be deleted.**
   This is the piece that makes restart cost a number an operator chooses rather than a
   property of how long the venue has been up. Design, the decision that makes it work,
