@@ -133,6 +133,56 @@ versions may include breaking changes).
 
 ### Fixed
 
+- **A trading-phase transition was applied and never written to the command log, so a
+  venue that ran an opening or closing auction and crashed before its next checkpoint
+  came back in the wrong phase with an un-uncrossed book.** `Runner.SetPhase` reached
+  `logCommand`'s `default` branch — the branch whose comment claimed to hold only
+  read-only commands — for three releases. Design, blast radius and the ten sabotage
+  runs that had to fail before it counted:
+  [JOURNAL-COMPLETENESS.md](docs/JOURNAL-COMPLETENESS.md).
+
+  **The damage did not stop at the enum, which is why this is a Fixed and not a
+  footnote.** A lost `SetPhase(StatePreOpen)` makes replay MATCH orders the live venue
+  rested, so the recovered tape holds trades that never happened and — because trade
+  ids come from a monotonic counter — every later id names a different trade than it
+  did before the crash. A lost `SetPhase(StateOpen)` skips the uncross, so the venue
+  reopens onto a bid resting above an ask and the auction's prints are missing from a
+  tape subscribers already received. And because the price collar falls back to
+  `LastTradePrice`, a skipped uncross leaves every later admission decision measured
+  against a stale reference: an order the live venue **accepted and acknowledged** is
+  refused on replay and is absent from the recovered book.
+
+  `wal.KindSetPhase` is appended to the end of the `EntryKind` block, never inserted,
+  so no existing record is renumbered. The phase travels as a **name** (`"PRE_OPEN"`)
+  rather than an ordinal: a snapshot is rewritten every checkpoint but a log segment
+  may be archived for years, so reordering the `EngineState` block — a change nobody
+  would think of as a format change — would otherwise silently reinterpret every
+  archived phase record, and an unknown ordinal decodes as a valid-looking state
+  nobody defined where an unknown name can be refused. Replay **re-runs the uncross**
+  rather than restoring the state field, because restoring the field alone leaves the
+  crossed book unresolved and the prints missing. `Entry.Phase` is `omitempty`, so
+  every pre-existing record encodes byte-identically and old logs replay exactly as
+  before.
+
+  **The third escape of this exact kind**, after `Reduce` (an order came back at its
+  original size) and `Halt` (a deliberately halted venue came back Open). So the other
+  half of the work is a guard over the SHAPE: every `cmdKind` must now be classified
+  either as journalled — naming the `CommandLog` method it must reach — or read-only
+  with a written reason, and a kind classified read-only must leave
+  `EngineSnapshot.Digest()` untouched when driven through a `Runner`. A prose reason is
+  no longer enough to hide a mutating command, which is precisely how all three
+  escaped. A second guard enumerates `wal.EntryKind` and requires every kind to have a
+  replay arm, because journalled is not the same as replayed.
+
+  **Why no test caught it, which mattered more than the bug.**
+  `TestCrashAtEveryBoundary` crashes at all 401 boundaries of a 400-command tape and
+  compares a book digest *and* the trade tape at every one — and its tape contained
+  only limit orders and cancels, so the most exhaustive property in the project was
+  proven over an alphabet that excluded the one command that escaped the journal. An
+  exhaustive check over an incomplete alphabet reports completeness. The tape now
+  contains phase transitions, and both sweeps fail outright if the auction ever
+  disappears from it again.
+
 - **A checkpoint taken after a restart and before the first command stamped the
   snapshot with log sequence 0, over a complete book.** `matching.NewRunnerFor` builds
   a Runner over a recovered engine and had no way to be told where in the log that
@@ -169,6 +219,30 @@ versions may include breaking changes).
   a venue running retention still starts after a quiet checkpoint tick.
 
 ### Changed
+
+- **BREAKING: `matching.CommandLog` gained a sixteenth method,
+  `AppendSetPhase(phase EngineState) (int64, error)`.** Every implementer outside this
+  repository stops compiling until it is added.
+  [COMPATIBILITY.md](docs/COMPATIBILITY.md) names this exact case — "`CommandLog`
+  gained five methods in v0.21.0 and this is the case that taught the lesson" — so the
+  price was already written down and is being paid rather than avoided. Four
+  implementers inside this repository needed the method: the gateway's `syncingLog`
+  and three test fakes.
+
+  **The narrow optional interface was considered and rejected, and the reasoning is
+  the point.** A `PhaseLog` that `logCommand` type-asserts would break nobody — and
+  would mean a `CommandLog` that does not implement it **silently drops phase
+  records**, which is the precise failure the fix above exists to eliminate,
+  reintroduced as the mechanism of its own fix. Durability an implementer can decline
+  by omission is not a guarantee, it is a default. Where the compatibility promise and
+  the durability promise collide, the durability promise wins and the compatibility
+  promise's job is to make the collision visible.
+
+  Also added, all non-breaking: `matching.ParseEngineState` and
+  `matching.ErrUnknownEngineState` (`String`'s inverse, for decoding a phase name off
+  the log — an unknown name is an error, never a fallback to `StateOpen`),
+  `wal.KindSetPhase`, `wal.Entry.Phase` and `wal.(*Writer).AppendSetPhase`. The frozen
+  API surface is updated accordingly: six additions, no removals.
 
 - **A halted or cancel-only venue now refuses new orders with `ReasonHalted`
   (wire 10), where it used to say `ReasonOther` (wire 1).** `orderentry.ReasonFor` had
