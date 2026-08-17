@@ -1,12 +1,14 @@
 package wal
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/intrepidkarthi/orderbook/pkg/matching"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
 
@@ -48,6 +50,13 @@ func writeLog(t *testing.T, path string, n int) {
 
 // TestNewLogCarriesHeaderAndChecksums — the format marker has to be on disk, or a
 // reader cannot tell a checksummed log from a v1 one.
+//
+// The marker a fresh log carries is now the full segment header rather than the bare
+// six-byte Magic, and the assertion got stronger rather than weaker: the header
+// declares the base sequence and the MATCHING SEMANTICS its records were produced
+// under, and both are covered by a CRC. A log that says nothing about which matcher
+// wrote it is the condition docs/SEMANTICS-VERSION.md exists to end, so a build that
+// went back to writing six bytes here would be reintroducing it.
 func TestNewLogCarriesHeaderAndChecksums(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wal.log")
 	writeLog(t, path, 5)
@@ -56,8 +65,14 @@ func TestNewLogCarriesHeaderAndChecksums(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if len(raw) < len(Magic) || string(raw[:len(Magic)]) != Magic {
-		t.Fatalf("log does not begin with the magic header; first bytes %q", raw[:min(len(raw), 8)])
+	if len(raw) < SegHeaderBytesV3 || string(raw[:len(SegMagicV3)]) != SegMagicV3 {
+		t.Fatalf("log does not begin with the segment header; first bytes %q", raw[:min(len(raw), 8)])
+	}
+	if got := int(binary.BigEndian.Uint64(raw[len(SegMagicV3) : len(SegMagicV3)+8])); got != 1 {
+		t.Errorf("a fresh log declares base sequence %d, want 1", got)
+	}
+	if got := int(binary.BigEndian.Uint32(raw[len(SegMagicV3)+8 : len(SegMagicV3)+12])); got != matching.SemanticsVersion {
+		t.Errorf("a fresh log declares semantics %d, want %d", got, matching.SemanticsVersion)
 	}
 
 	entries, err := ReadAll(path)
@@ -87,7 +102,7 @@ func TestAlteredRecordIsRefused(t *testing.T) {
 	// Flip a byte inside the third record's payload. Find a digit well past the
 	// header so the mutation lands in JSON rather than in framing.
 	idx := -1
-	for i := len(Magic) + 40; i < len(raw)-1; i++ {
+	for i := recordsBegin(t, raw) + 40; i < len(raw)-1; i++ {
 		if raw[i] >= '1' && raw[i] <= '8' {
 			idx = i
 			break
@@ -124,7 +139,7 @@ func TestCorruptLengthPrefixIsRefusedWithoutAllocating(t *testing.T) {
 	}
 	// The first record's length prefix sits immediately after the header. Claim
 	// nearly 4 GiB.
-	binary.BigEndian.PutUint32(raw[len(Magic):len(Magic)+4], 0xFFFFFFF0)
+	binary.BigEndian.PutUint32(raw[recordsBegin(t, raw):recordsBegin(t, raw)+4], 0xFFFFFFF0)
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -148,7 +163,7 @@ func TestZeroLengthRecordIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	binary.BigEndian.PutUint32(raw[len(Magic):len(Magic)+4], 0)
+	binary.BigEndian.PutUint32(raw[recordsBegin(t, raw):recordsBegin(t, raw)+4], 0)
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -202,7 +217,7 @@ func TestLegacyLogStillRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	body := raw[len(Magic):]
+	body := raw[recordsBegin(t, raw):]
 	var legacy []byte
 	for len(body) > 0 {
 		n := binary.BigEndian.Uint32(body[0:4])
@@ -222,14 +237,24 @@ func TestLegacyLogStillRecovers(t *testing.T) {
 		t.Fatalf("read %d entries from the v1 log, want 4", len(entries))
 	}
 
-	// Appending must keep the file's own framing, not switch mid-file to a format
+	// Appending must keep the v1 file's own framing, not switch mid-file to a format
 	// no reader could then parse.
+	//
+	// This half used to assert that by checking !w.Checksummed() after Open, which was
+	// a PROXY for the property. The proxy stopped matching when Open learned to seal a
+	// segment declaring somebody else's matching semantics (docs/SEMANTICS-VERSION.md
+	// Rule 17): a v1 file declares none, so it is migrated into the set and the append
+	// goes to a new segment beside it. The property is preserved and improved —
+	// framing still never changes mid-file, and now it CANNOT — so the assertions
+	// below are strictly stronger than the one they replace. The v1 bytes are asserted
+	// BYTE-IDENTICAL across the append, which the old test could not say at all.
+	before := readFile(t, path)
 	w, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open legacy: %v", err)
 	}
-	if w.Checksummed() {
-		t.Error("appending to a v1 log switched framing mid-file")
+	if !w.Checksummed() {
+		t.Error("the appended-to segment is not checksummed; sealing the v1 file is what gets checksums onto it")
 	}
 	o, err := types.NewOrder("u", "X", types.SideBuy, types.OrderTypeLimit, 500, 1, types.TIFGoodTillCancel)
 	if err != nil {
@@ -241,6 +266,18 @@ func TestLegacyLogStillRecovers(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+
+	// The v1 file itself is untouched — every byte of it, in place. It moved into the
+	// set as segment 1, which is where the first rotation would have put it anyway.
+	migrated := filepath.Join(dir, "legacy.log.0000000000000001")
+	if after := readFile(t, migrated); !bytes.Equal(before, after) {
+		t.Errorf("the v1 segment changed under an append: %d bytes before, %d after", len(before), len(after))
+	}
+	// And the appended record is NOT in it.
+	if v1Entries := framesIn(t, migrated, false); len(v1Entries) != 4 {
+		t.Errorf("the v1 segment holds %d records after the append, want the 4 it started with", len(v1Entries))
+	}
+
 	entries, err = ReadAll(path)
 	if err != nil {
 		t.Fatalf("ReadAll after append: %v", err)
@@ -251,6 +288,31 @@ func TestLegacyLogStillRecovers(t *testing.T) {
 	if entries[4].Seq != 5 {
 		t.Errorf("appended entry has seq %d, want 5", entries[4].Seq)
 	}
+}
+
+// framesIn counts the complete records in a file, walking its framing directly so it
+// cannot be fooled by a reader that has learned to skip something.
+func framesIn(tb testing.TB, path string, checksummed bool) []int {
+	tb.Helper()
+	raw := readFile(tb, path)
+	off := 0
+	if checksummed {
+		off = recordsBegin(tb, raw)
+	}
+	var out []int
+	frame := 4
+	if checksummed {
+		frame = 8
+	}
+	for off+frame <= len(raw) {
+		n := int(binary.BigEndian.Uint32(raw[off : off+4]))
+		if n <= 0 || off+frame+n > len(raw) {
+			break
+		}
+		out = append(out, off)
+		off += frame + n
+	}
+	return out
 }
 
 // TestRecoverSurfacesCorruption — the error has to reach the caller. A venue must
@@ -264,7 +326,7 @@ func TestRecoverSurfacesCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	binary.BigEndian.PutUint32(raw[len(Magic):len(Magic)+4], 0xFFFFFFF0)
+	binary.BigEndian.PutUint32(raw[recordsBegin(t, raw):recordsBegin(t, raw)+4], 0xFFFFFFF0)
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}

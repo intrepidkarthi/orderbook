@@ -97,6 +97,31 @@ upgrade is a coordinated one.
 Current: **v4**. History is in [PROTOCOL.md](PROTOCOL.md), which records what each
 bump bought and why it could not be avoided.
 
+## The matching semantics version
+
+There is a third version in this repository and it answers a question neither of the
+other two does. Confusing it with either has a named failure mode, so the three are set
+out together:
+
+| | Answers | Changes when | Lives in |
+|---|---|---|---|
+| **Release version** (`v0.25.0`) | which build is this | every release | git tags, `CHANGELOG.md` |
+| **Wire / format version** (`v4`, `OBWAL\x03`, `OBSNAP\x01`) | can this reader parse these bytes | the byte layout changes | payload headers, file headers |
+| **Semantics version** (`matching.SemanticsVersion`) | will these bytes replay into the book that was actually served | matching **behaviour** changes | log segment headers, snapshots |
+
+A release version used as the stamp would refuse journals that replay identically, on
+every upgrade, forever — and the response to a check that cries wolf is a permanent
+override. A format version is blind in the other direction: a behaviour change is
+usually byte-identical on disk.
+
+It is an integer, it only increases, and it is **not** part of the API promise in the
+sense the other symbols here are — the constant is frozen surface, but its VALUE is
+expected to move, and moving it is a compatibility event for *journals* rather than for
+*code*. `internal/semcheck` is what makes it move: it freezes the engine's observable
+outcomes over a fixed corpus, exactly as `internal/apicheck` freezes the exported
+surface, and refuses to regenerate its golden unless the constant has been raised. See
+[SEMANTICS-VERSION.md](SEMANTICS-VERSION.md).
+
 ## Metrics
 
 Metric names and label sets are part of the operational contract even though they are
@@ -118,6 +143,10 @@ block silently renumbers every value after it.
 ```sh
 go test ./internal/apicheck/                    # fails if the surface moved
 APICHECK_UPDATE=1 go test ./internal/apicheck/  # regenerate, then read the diff
+
+go test ./internal/semcheck/                    # fails if matching BEHAVIOUR moved
+SEMCHECK_UPDATE=1 go test ./internal/semcheck/  # regenerate — refused unless
+                                                # matching.SemanticsVersion was raised
 ```
 
 The regeneration step is the point. The check cannot stop a breaking change and does
@@ -125,3 +154,10 @@ not try — it makes one impossible to ship without a human looking at a diff th
 `REMOVED or CHANGED — this breaks code that compiles today`. It is the same device
 `internal/wire` uses for the protocol, for the same reason: a promise nobody can
 check is a promise that erodes one defensible commit at a time.
+
+`semcheck` adds one turn of the screw that `apicheck` does not have and does not need:
+regeneration is REFUSED unless `matching.SemanticsVersion` has been raised, and a raise
+with no observable change is refused too. The path of least resistance for somebody who
+has changed behaviour is to regenerate, so regeneration is where the bump is demanded;
+there is no sequence of commands that yields a green tree with changed matching
+behaviour and an unchanged number.

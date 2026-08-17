@@ -35,19 +35,54 @@ import (
 // this file exists to avoid.
 
 const (
-	// SegMagic identifies a segment and carries its version. A segment's RECORDS are
-	// byte-identical to what an OBWAL\x01 file would hold at the same point in the
-	// stream — only the file's first 18 bytes are new.
+	// SegMagic identifies a segment written before matching semantics were stamped,
+	// and the SET MARKER at the stem, which is still written in this form. A
+	// segment's RECORDS are byte-identical to what an OBWAL\x01 file would hold at
+	// the same point in the stream — only the file's first 18 bytes are new.
+	//
+	// It is READ and no longer written for record-bearing segments; SegMagicV3 is
+	// what Writer produces. Both names are frozen exported surface
+	// (docs/COMPATIBILITY.md: renaming anything exported is breaking), so the pair
+	// ends up mildly awkward and that is the cost of the promise.
 	SegMagic = "OBWAL\x02"
 
-	// SegHeaderBytes is the whole of a segment header: SegMagic, the base sequence as
-	// a big-endian int64, and a CRC-32C over those eight bytes.
+	// SegHeaderBytes is the whole of a SegMagic segment header: SegMagic, the base
+	// sequence as a big-endian int64, and a CRC-32C over those eight bytes. It is
+	// also the whole of the set marker, which keeps this shape forever — see
+	// writeMarker.
 	//
 	// The CRC covers the base and nothing else, and four bytes is cheap for what it
 	// buys: an undetected bit flip in a base sequence shifts a whole segment's
 	// sequence space, which either double-applies or silently drops a run of
 	// commands. It is the one number the entire design rests on, so it checks itself.
 	SegHeaderBytes = len(SegMagic) + 8 + 4
+
+	// SegMagicV3 identifies a segment that DECLARES THE MATCHING SEMANTICS its
+	// records were produced under. It is what this build writes.
+	//
+	// The magic is bumped rather than the header extended in place, and the reason is
+	// which failure an operator meets on a downgrade. A build that knows only
+	// SegMagic would read the four extra bytes at offset 18 as a record length
+	// prefix: a semantics of 1 is 00 00 00 01, a declared length of 1, which passes
+	// the MaxRecordBytes bound and fails its CRC — so the old build says "wal:
+	// corrupt record" and sends an operator to check SMART data for what is a
+	// version mismatch. With the magic bumped it takes the path
+	// docs/LOG-ROTATION.md §2.5 already built: six bytes that are not OBWAL\x01 are
+	// treated as a headerless v1 log, "OBWA" is read as a length prefix of
+	// 1,329,747,777, and it refuses with the exact message the runbook already
+	// explains means a version mismatch and not a disk.
+	SegMagicV3 = "OBWAL\x03"
+
+	// SegHeaderBytesV3 is the whole of a SegMagicV3 header: the magic, the base
+	// sequence as a big-endian int64, the semantics version as a big-endian uint32,
+	// and a CRC-32C over the TWELVE bytes of base-and-semantics together.
+	//
+	// The CRC covers the semantics for the same reason it covers the base, and the
+	// direction that matters is the quiet one: an undetected bit flip that turns some
+	// other build's number into this build's lets a mismatched log through the gate
+	// silently. It is the number the gate rests on, so it checks itself, and it costs
+	// nothing to fold into a CRC that was already there.
+	SegHeaderBytesV3 = len(SegMagicV3) + 8 + 4 + 4
 
 	// segDigits is the width of the zero-padded decimal suffix. Sixteen digits is
 	// 10^16 records, about 126,000 years at 2,500 messages/s; a base that needs a
@@ -84,9 +119,14 @@ var ErrNotALog = errors.New("wal: not a log")
 type segKind uint8
 
 const (
-	// kindDeclared is a segment written by this build: an 18-byte header declaring
-	// its base, then checksummed records.
+	// kindDeclared is a segment written before semantics were stamped: an 18-byte
+	// header declaring its base, then checksummed records. It declares no semantics,
+	// which is not the same as declaring zero — see segment.semantics.
 	kindDeclared segKind = iota
+	// kindDeclaredV3 is a segment written by this build: a 22-byte header declaring
+	// its base AND the matching semantics its records were produced under, then
+	// checksummed records byte-identical to every earlier format's.
+	kindDeclaredV3
 	// kindHeadered is an OBWAL\x01 file — the single-file format that preceded
 	// rotation. Implicit base 1, checksummed records.
 	kindHeadered
@@ -104,6 +144,12 @@ type segment struct {
 	name string // base name, which is what an error message shows an operator
 	base int64  // the Seq of its first record
 	kind segKind
+	// semantics is the matching.SemanticsVersion this segment's records were
+	// produced under, and ZERO means UNKNOWN rather than "version zero". Only a
+	// kindDeclaredV3 segment can carry a non-zero one; every earlier shape declares
+	// nothing, and nothing is not compatible with anything. See
+	// docs/SEMANTICS-VERSION.md §4.
+	semantics int
 	// named reports that the base came from the file's 16-digit suffix as well as
 	// from its header. A legacy stem carries no suffix and declares base 1 by being
 	// the only file there is.
@@ -118,6 +164,8 @@ func (s segment) headerBytes() int64 {
 	switch s.kind {
 	case kindDeclared, kindMarker:
 		return int64(SegHeaderBytes)
+	case kindDeclaredV3:
+		return int64(SegHeaderBytesV3)
 	case kindHeadered:
 		return int64(len(Magic))
 	default:
@@ -160,7 +208,8 @@ func segBaseFromName(stemName, name string) (int64, bool) {
 	return base, true
 }
 
-// segHeader renders the 18 bytes that open a segment.
+// segHeader renders the 18 bytes that open a SegMagic segment. It is what
+// writeMarker still writes; record-bearing segments take segHeaderV3.
 func segHeader(base int64) []byte {
 	b := make([]byte, 0, SegHeaderBytes)
 	b = append(b, SegMagic...)
@@ -168,48 +217,94 @@ func segHeader(base int64) []byte {
 	return binary.BigEndian.AppendUint32(b, crc32.Checksum(b[len(SegMagic):], crcTable))
 }
 
-// readSegHeader classifies an open file by its first bytes and, for a declared
-// segment, returns the base it declares.
+// segHeaderV3 renders the 22 bytes that open a segment written by this build: the
+// magic, the base, the semantics the records were produced under, and one CRC over
+// the twelve bytes of the two numbers together.
 //
-// A file whose first six bytes are SegMagic and whose remaining twelve are missing
-// is corrupt rather than "some other format": the rotation protocol in
+// sem is passed in rather than read from matching.SemanticsVersion here so a test
+// can construct a segment declaring somebody else's semantics without byte surgery.
+// The production caller is materialiseSegment, and it passes the constant.
+func segHeaderV3(base int64, sem int) []byte {
+	b := make([]byte, 0, SegHeaderBytesV3)
+	b = append(b, SegMagicV3...)
+	b = binary.BigEndian.AppendUint64(b, uint64(base))
+	b = binary.BigEndian.AppendUint32(b, uint32(sem))
+	return binary.BigEndian.AppendUint32(b, crc32.Checksum(b[len(SegMagicV3):], crcTable))
+}
+
+// readSegHeader classifies an open file by its first bytes and, for a declared
+// segment, returns the base and the semantics it declares.
+//
+// A file whose first six bytes are a segment magic and whose remaining header bytes
+// are missing is corrupt rather than "some other format": the rotation protocol in
 // docs/LOG-ROTATION.md §3.2 materialises a segment by writing and fsyncing a
 // complete header into a temp file and only then linking it into place, so
 // "segment exists, header does not" is a state no crash can produce. Finding one
 // means something else wrote it.
-func readSegHeader(f *os.File) (kind segKind, base int64, err error) {
-	var buf [SegHeaderBytes]byte
+//
+// A returned semantics of zero means the file declares none. It is NOT version zero
+// and it is not equal to any version, including another file that also declares
+// none — see the gate in Recover and docs/SEMANTICS-VERSION.md §4.
+func readSegHeader(f *os.File) (kind segKind, base int64, sem int, err error) {
+	var buf [SegHeaderBytesV3]byte
 	n, err := io.ReadFull(f, buf[:])
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return 0, 0, err
+		return 0, 0, 0, err
+	}
+	name := filepath.Base(f.Name())
+	// The two declared shapes share everything but their length and the extra field,
+	// so the base check, the CRC and the marker rule are written once.
+	checkDeclared := func(magic string, hdrLen int) (int64, int, error) {
+		if n < hdrLen {
+			return 0, 0, fmt.Errorf("%w: %s declares a segment header and holds only %d of its %d bytes",
+				ErrCorrupt, name, n, hdrLen)
+		}
+		covered := buf[len(magic) : hdrLen-4]
+		want := binary.BigEndian.Uint32(buf[hdrLen-4 : hdrLen])
+		if got := crc32.Checksum(covered, crcTable); got != want {
+			return 0, 0, fmt.Errorf("%w: %s segment header checksum %08x, want %08x — the base sequence cannot be trusted",
+				ErrCorrupt, name, got, want)
+		}
+		b := int64(binary.BigEndian.Uint64(buf[len(magic) : len(magic)+8]))
+		var s int
+		if len(covered) > 8 {
+			s = int(binary.BigEndian.Uint32(buf[len(magic)+8 : len(magic)+12]))
+		}
+		return b, s, nil
 	}
 	switch {
+	case n >= len(SegMagicV3) && string(buf[:len(SegMagicV3)]) == SegMagicV3:
+		base, sem, err := checkDeclared(SegMagicV3, SegHeaderBytesV3)
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		// A V3 header never carries the marker base: the marker keeps the SegMagic
+		// shape forever (docs/SEMANTICS-VERSION.md Rule 7), so base 0 here is a file
+		// something else wrote.
+		if base < 1 {
+			return 0, 0, 0, fmt.Errorf("%w: %s declares base sequence %d", ErrCorrupt, name, base)
+		}
+		return kindDeclaredV3, base, sem, nil
 	case n >= len(SegMagic) && string(buf[:len(SegMagic)]) == SegMagic:
-		if n < SegHeaderBytes {
-			return 0, 0, fmt.Errorf("%w: %s declares a segment header and holds only %d of its %d bytes",
-				ErrCorrupt, filepath.Base(f.Name()), n, SegHeaderBytes)
+		base, _, err := checkDeclared(SegMagic, SegHeaderBytes)
+		if err != nil {
+			return 0, 0, 0, err
 		}
-		want := binary.BigEndian.Uint32(buf[len(SegMagic)+8:])
-		if got := crc32.Checksum(buf[len(SegMagic):len(SegMagic)+8], crcTable); got != want {
-			return 0, 0, fmt.Errorf("%w: %s segment header checksum %08x, want %08x — the base sequence cannot be trusted",
-				ErrCorrupt, filepath.Base(f.Name()), got, want)
-		}
-		base = int64(binary.BigEndian.Uint64(buf[len(SegMagic) : len(SegMagic)+8]))
 		if base == markerBase {
-			return kindMarker, 0, nil
+			return kindMarker, 0, 0, nil
 		}
 		if base < 0 {
-			return 0, 0, fmt.Errorf("%w: %s declares base sequence %d", ErrCorrupt, filepath.Base(f.Name()), base)
+			return 0, 0, 0, fmt.Errorf("%w: %s declares base sequence %d", ErrCorrupt, name, base)
 		}
-		return kindDeclared, base, nil
+		return kindDeclared, base, 0, nil
 	case n >= len(Magic) && string(buf[:len(Magic)]) == Magic:
-		return kindHeadered, 1, nil
+		return kindHeadered, 1, 0, nil
 	case n == 0:
 		// An empty file. Treated as the current format, exactly as hasHeader did:
 		// there is nothing there to be a v1 log.
-		return kindHeadered, 1, nil
+		return kindHeadered, 1, 0, nil
 	default:
-		return kindLegacy, 1, nil
+		return kindLegacy, 1, 0, nil
 	}
 }
 
@@ -237,11 +332,11 @@ func classify(path, name string, named bool, nameBase int64) (segment, error) {
 		return s, fmt.Errorf("%w: %s is not a regular file", ErrNotALog, path)
 	}
 	s.size = st.Size()
-	kind, base, err := readSegHeader(f)
+	kind, base, sem, err := readSegHeader(f)
 	if err != nil {
 		return s, err
 	}
-	s.kind, s.base = kind, base
+	s.kind, s.base, s.semantics = kind, base, sem
 
 	// The name and the header are written by one process in one operation, so they
 	// can only disagree if the file was renamed, copied, restored from a backup, or
@@ -251,7 +346,7 @@ func classify(path, name string, named bool, nameBase int64) (segment, error) {
 	// refuses and names both numbers.
 	if named {
 		switch kind {
-		case kindDeclared:
+		case kindDeclared, kindDeclaredV3:
 			if base != nameBase {
 				return s, fmt.Errorf("%w: %s declares base sequence %d in its header and %d in its name — "+
 					"the file was renamed, copied or restored, and neither number can be trusted over the other",

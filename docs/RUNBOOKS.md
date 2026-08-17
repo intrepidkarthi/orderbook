@@ -132,6 +132,80 @@ binary's version before you check SMART data.
 
 ---
 
+## Upgrading across a semantics change
+
+**Signal.** The venue refuses to start:
+
+```
+wal: matching semantics mismatch: this build matches at semantics 2; records this
+recovery would replay were written at semantics 1.
+
+  segment  BTC-USD.wal.0000000000610422   semantics 1
+           sequences 610,422..741,003, of which 130,581 would be replayed
+           (the snapshot covers through 610,421)
+```
+
+**What the code has done.** Nothing is corrupt and nothing is missing. Every record
+verifies, the set is contiguous, the snapshot is above the floor. What moved is a
+*meaning*: the build you are starting matches differently from the build that wrote
+those records, so replaying them would produce a book the venue that wrote them never
+served — and every command after the first divergence compounds it.
+
+The number is `matching.SemanticsVersion`, and it changes only when matching behaviour
+changes; it is not a release version. [SEMANTICS-VERSION.md](SEMANTICS-VERSION.md) §1.2
+is the registry of what each value means, and the changelog entries it names are what
+actually changed. `no declared semantics` means a log written before the stamp existed
+— every log on every disk before this feature shipped. It is not treated as compatible,
+because it is not: the release that introduced the stamp also changed three matching
+behaviours, so a pre-stamp log is exactly the one that does not have them.
+
+The gate is on the records recovery would **apply**, not on the files it can see. A
+mismatched segment the snapshot already covers is read, verified, skipped and reported,
+and the venue starts normally — so a venue that followed the procedure below never meets
+this at all.
+
+**What to do — the safe route, in order.**
+
+1. **Put the previous build back and start it once.** It will recover the log it wrote.
+2. **Force a checkpoint** (`POST /admin/checkpoint`, or wait one `-checkpoint`
+   interval), then **stop it cleanly**.
+3. **Archive the log the checkpoint covers**, then start the new build. Recovery now
+   begins from a snapshot the old build agreed with and has nothing left to replay, so
+   the new rules apply only to commands that arrive under them.
+
+**If the previous build is not available.** Read the refusal, decide that replaying
+those commands under this build's rules is acceptable, and say so explicitly:
+
+```
+-wal-accept-semantics 1
+```
+
+It names the versions it accepts and nothing else. It does not relax `wal: corrupt
+record`, `wal: log gap`, the retention floor, or any structural check. **Remove it after
+the next checkpoint lands.** It is deliberately not a boolean: a boolean survives the
+next bump and stops being a decision, where a version goes stale and forces the decision
+to be made again. `obgw` logs a line naming the flag at every start while it is set, and
+`RecoverReport.SemanticsAccepted` is the field to alert on.
+
+**What it costs when you override.** The recovered book is what *this* build's rules
+produce from those commands. It is internally consistent and it is not necessarily what
+participants were told. Reconcile against the market-data tape and against
+participants' own records before resuming, exactly as for a gap.
+
+**What makes it worse.** Putting the flag in the unit file. The next mismatch — a
+different mismatch, for a different reason — is then accepted silently by a flag nobody
+remembers adding, and the venue serves a wrong book with no signal anywhere. If you find
+yourself needing it on every restart, the log has an unreplayed pre-stamp tail: take one
+checkpoint under the new build and it goes away permanently.
+
+**The related message that is not this.** An OLDER build pointed at a log this one
+wrote refuses with `wal: corrupt record: ... record 1 declares 1329747777 bytes` — the
+downgrade path in "A corrupt log record", not media damage. No version stamp can protect
+against builds written before the stamp; the protection begins at the release that
+introduced it and runs forward only.
+
+---
+
 ## A gap between the snapshot and the log
 
 **Signal.** The venue refuses to start:

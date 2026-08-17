@@ -58,6 +58,14 @@ we can say yes:
   change is intended, regenerate it, read the diff, and say what breaks in the
   changelog — [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) has the rule and the
   list of things that are breaking even though they look additive.
+- **Do not change what matching DOES by accident.** The engine's observable outcomes
+  over a fixed corpus are frozen in `internal/semcheck/testdata/semantics.txt`, and a
+  test fails when they move. If the change is intended, raise
+  `matching.SemanticsVersion` — the golden refuses to regenerate otherwise — add its
+  row to [docs/SEMANTICS-VERSION.md](docs/SEMANTICS-VERSION.md) §1.2, and say what
+  changed in the changelog. That number is stamped into every log segment and every
+  snapshot, and recovery refuses a journal another matcher wrote, so getting it wrong
+  is a venue starting confidently on a book that never existed.
 - **Follow the ground rules above** (int64, downward layering, no clock/RNG in
   the match path); keep it `gofmt`-clean, focused, and documented if it changes
   public API.

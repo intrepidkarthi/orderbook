@@ -67,6 +67,20 @@ const (
 	EventResumed                     // engine returned to Open (manual resume, or a band-breach pause elapsed)
 	EventCancelOnly                  // engine entered cancel-only: cancels accepted, new liquidity refused
 	EventBusted                      // a previously published trade is annulled; the book is NOT rewound
+
+	// eventKindCount is a sentinel: keep it last, and unexported so it never reaches
+	// a wire, a file or the frozen surface.
+	//
+	// It is the entryKindCount treatment (pkg/wal/wal.go) applied to the second enum
+	// that needed it. internal/semcheck's corpus guard asserts that the fingerprint
+	// run REACHED every event kind, and a guard that enumerates a hand-written list
+	// reports coverage of the list rather than of the enum: a kind added here would
+	// be invisible to it forever. With this sentinel a new kind fails the guard the
+	// moment it is declared, which is the whole point of declaring it.
+	//
+	// EventBookDelta is the one named exception, because it is declared, deprecated
+	// and deliberately never emitted — see the note below.
+	eventKindCount
 )
 
 func (k EventKind) String() string {

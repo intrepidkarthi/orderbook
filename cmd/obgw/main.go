@@ -65,6 +65,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -86,6 +87,31 @@ func splitSymbols(list string) []string {
 		}
 	}
 	return out
+}
+
+// parseSemanticsList reads -wal-accept-semantics.
+//
+// It refuses anything it does not understand rather than skipping it, because the one
+// thing worse than a venue that will not start is a venue that starts having silently
+// dropped half of what an operator typed during an incident.
+func parseSemanticsList(list string) ([]int, error) {
+	if strings.TrimSpace(list) == "" {
+		return nil, nil
+	}
+	var out []int
+	for _, f := range strings.Split(list, ",") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		v, err := strconv.Atoi(f)
+		if err != nil || v < 0 {
+			return nil, fmt.Errorf("%q is not a semantics version; it is a comma-separated list of "+
+				"non-negative integers, and 0 means a log written before the stamp existed", f)
+		}
+		out = append(out, v)
+	}
+	return out, nil
 }
 
 func main() {
@@ -114,6 +140,7 @@ func main() {
 		minFreeStop  = flag.Int64("wal-min-free-stop", 0, "stop-water mark in bytes: below it, every book goes cancel-only (0 = 256MiB)")
 		profiling    = flag.Bool("pprof", false, "mount net/http/pprof on the admin listener (operator-only; a heap dump exposes everything the venue holds)")
 		syncEvery    = flag.Bool("sync-every-command", false, "fsync each command before applying it, so durability precedes acknowledgement (correct, and ~210x slower than the 20ms group commit)")
+		acceptSem    = flag.String("wal-accept-semantics", "", "comma-separated matching semantics versions whose records this recovery may replay besides this build's; 0 means a log written before the stamp existed. Use it only after reading the refusal, and remove it after the next checkpoint — see docs/RUNBOOKS.md \"Upgrading across a semantics change\"")
 	)
 	flag.Parse()
 
@@ -158,6 +185,9 @@ func main() {
 		SyncEveryCommand:  *syncEvery,
 		Profiling:         *profiling,
 	}
+	if cfg.WALAcceptSemantics, err = parseSemanticsList(*acceptSem); err != nil {
+		log.Fatalf("obgw: -wal-accept-semantics: %v", err)
+	}
 	if auth.Count() == 0 {
 		log.Println("obgw: no accounts configured — every login will be rejected")
 	}
@@ -182,6 +212,15 @@ func main() {
 	if cfg.WALRetainBytes > 0 && cfg.WALArchiveDir == "" {
 		log.Println("obgw: -wal-retain without -wal-archive — deleted segments are gone, so this venue's recovery point " +
 			"is its newest snapshot and one corrupt snapshot away from nothing.")
+	}
+	if len(cfg.WALAcceptSemantics) > 0 {
+		// Said at every start, because the whole value of naming a version rather than
+		// setting a boolean is that the decision goes stale and has to be re-made. A
+		// flag that lives quietly in a unit file for three releases is the failure
+		// docs/SEMANTICS-VERSION.md §3.5 is written to prevent.
+		log.Printf("obgw: -wal-accept-semantics %v — recovery will replay records written by a build whose "+
+			"matching behaviour is not this one's. Remove it once a checkpoint under this build has landed; "+
+			"until then every restart is replaying somebody else's rules.", cfg.WALAcceptSemantics)
 	}
 	if cfg.AdminAddr == "" {
 		log.Println("obgw: no -admin address — running unobserved; nothing reports queue depth, book size or a stalled matcher")

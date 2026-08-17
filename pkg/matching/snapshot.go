@@ -45,7 +45,20 @@ type EngineSnapshot struct {
 	// write-ahead, so an entry can exist on disk that the engine has not yet
 	// processed, and treating the writer's latest sequence as the checkpoint would
 	// skip exactly those commands. Zero means unknown — replay the whole log.
-	WALSeq         int64
+	WALSeq int64
+	// Semantics is SemanticsVersion of the build that produced this state. Zero
+	// means a snapshot written before the stamp existed.
+	//
+	// It is a REPORT and never a gate. A snapshot is not replayed, so restoring a
+	// book an older build actually had into a newer engine is the documented upgrade
+	// procedure rather than an error; refusing on it would refuse the procedure.
+	//
+	// It is excluded from Digest for the same reason WALSeq is — it is provenance,
+	// not book state — and for a second reason that decides it: the enforcement in
+	// internal/semcheck fingerprints snapshot digests, so a Semantics inside the
+	// digest would make every bump satisfy its own evidence and the forcing function
+	// would be circular. See docs/SEMANTICS-VERSION.md §2.4.
+	Semantics      int `json:"semantics,omitempty"`
 	LastTradePrice int64
 	MarkPrice      int64 // external mark/index reference (0 => use last trade)
 	State          EngineState
@@ -118,7 +131,10 @@ func copyOrder(o *types.Order) *types.Order {
 // snapshot (see EngineSnapshot for what is and isn't captured).
 func (e *Engine) TakeSnapshot() *EngineSnapshot {
 	snap := &EngineSnapshot{
-		Symbol:         e.config.Symbol,
+		Symbol: e.config.Symbol,
+		// Stamped from the constant rather than from a literal, so the field cannot
+		// drift away from the number the log gate compares against.
+		Semantics:      SemanticsVersion,
 		Seq:            e.orderSeq,
 		TradeSeq:       e.tradeSeq,
 		EventSeq:       e.eventSeq,
@@ -308,6 +324,15 @@ func RestoreEngine(config Config, snap *EngineSnapshot) (*Engine, error) {
 func (s *EngineSnapshot) Digest() string {
 	n := *s
 	n.WALSeq = 0
+	// Semantics is normalised away for two reasons, and the second is the one that
+	// decides it. Two engines whose books are identical must compare equal even when
+	// one of them is a build ahead, or the digest stops being usable for the thing it
+	// exists for. And internal/semcheck's fingerprint contains snapshot digests, so a
+	// Semantics inside the digest would let every bump satisfy its own evidence —
+	// bump, fingerprint moves, regenerate, done — and the rule that a bump with no
+	// observable change is refused would be unenforceable. See
+	// docs/SEMANTICS-VERSION.md §2.4.
+	n.Semantics = 0
 	n.PausedUntil = time.Time{}
 	n.Guard.Start = time.Time{}
 	n.Orders = normalisedOrders(s.Orders)

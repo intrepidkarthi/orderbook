@@ -330,6 +330,24 @@ default**: `-wal-retain` unset means keep everything, which is exactly the behav
 of every earlier release, and the venue says so at startup. Rotation itself is on by
 default and changes only where the bytes live.
 
+**A journal now says which matcher wrote it, and recovery refuses rather than lying.**
+Each segment header carries `matching.SemanticsVersion` — a number that moves only when
+matching *behaviour* moves, not on every release — and `wal.Recover` refuses when it is
+about to replay records a different matcher produced. It refuses on the records it would
+**apply**, so a venue that checkpoints before upgrading never meets it; the refusal
+falls on a venue that crashed across an upgrade and on a replay from an archive, which
+are the two cases where the alternative is a book that never existed. The number is held
+to by a test rather than by discipline: `internal/semcheck` freezes the engine's
+observable outcomes over a fixed corpus and refuses to regenerate its golden unless the
+constant has been raised. A log written before this shipped declares nothing, which is
+not the same as declaring compatible — `-wal-accept-semantics 0` is the deliberate
+override, and it goes stale on the next bump by design. See
+[SEMANTICS-VERSION.md](SEMANTICS-VERSION.md) and RUNBOOKS' "Upgrading across a semantics
+change". What it does **not** cover is engine CONFIGURATION: two builds at the same
+semantics version with different `ProRata`, `SelfTradePrevention` or `PriceBand` replay
+the same log into different books and nothing notices, which is a live gap named here
+rather than implied to be closed.
+
 At about 220 bytes of journal per client message — 44 GiB a day at 2,500/s, 18 GB a
 day at the gentler rate the four-hour run used — a venue with no budget set still
 fills a disk on a schedule, and still gets slower to restart every day it stays up.

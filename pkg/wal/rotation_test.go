@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -383,7 +384,7 @@ func TestCrashDuringRotation(t *testing.T) {
 					continue
 				}
 				raw := readFile(t, filepath.Join(dir, name))
-				if len(raw) < SegHeaderBytes || string(raw[:len(SegMagic)]) != SegMagic {
+				if len(raw) < SegHeaderBytesV3 || string(raw[:len(SegMagicV3)]) != SegMagicV3 {
 					t.Fatalf("crash before step %d left %s with no segment header (%d bytes).\n"+
 						"Steps 3-5 write the header into a temp file, fsync it and LINK it into place precisely so this\n"+
 						"state cannot exist; a reader that met it would have to guess a base, which is guessing which\n"+
@@ -609,15 +610,18 @@ func TestTheStemBecomesSegmentOneOnTheFirstRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenWith: %v", err)
 	}
-	// Before any rotation the stem is an ordinary OBWAL\x01 file.
+	// Before any rotation the stem is one ordinary file holding the records, not a
+	// set. It carries a segment header declaring base 1 and this build's matching
+	// semantics — a log that says nothing about which matcher wrote it is what
+	// docs/SEMANTICS-VERSION.md exists to end — and it is still the whole log.
 	if _, err := w.AppendSubmit(mustOrder(t, "u", 1000, 1)); err != nil {
 		t.Fatalf("AppendSubmit: %v", err)
 	}
 	if err := w.Sync(); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
-	if raw := readFile(t, walPath); string(raw[:len(Magic)]) != Magic {
-		t.Fatalf("an unrotated log is not in the pre-rotation format: %q", raw[:8])
+	if raw := readFile(t, walPath); string(raw[:len(SegMagicV3)]) != SegMagicV3 {
+		t.Fatalf("an unrotated log does not carry a segment header: %q", raw[:8])
 	}
 	if names := segmentSetOf(t, walPath); len(names) != 0 {
 		t.Fatalf("an unrotated log produced numbered segments: %v", names)
@@ -683,11 +687,25 @@ func TestAnOldBuildRefusesAMarkerLoudly(t *testing.T) {
 	}
 }
 
-// handBuiltSegment frames entries into a DECLARED segment: an 18-byte header naming
-// base, then correctly framed and checksummed records carrying the sequences given.
+// handBuiltSegment frames entries into a DECLARED segment: a header naming base and
+// this build's matching semantics, then correctly framed and checksummed records
+// carrying the sequences given.
 func handBuiltSegment(tb testing.TB, path string, base int64, seqs []int64) {
 	tb.Helper()
-	raw := segHeader(base)
+	handBuiltSegmentAt(tb, path, base, matching.SemanticsVersion, seqs)
+}
+
+// handBuiltSegmentAt is handBuiltSegment with the declared matching semantics named,
+// so a test can build the segment a DIFFERENT build would have written. Passing 0
+// produces a pre-stamp segment, which is the shape every log on every disk has today.
+func handBuiltSegmentAt(tb testing.TB, path string, base int64, sem int, seqs []int64) {
+	tb.Helper()
+	raw := segHeaderV3(base, sem)
+	if sem == 0 {
+		// A segment that declares NOTHING, rather than one that declares zero: the
+		// 18-byte OBWAL\x02 header, which is what every pre-stamp build wrote.
+		raw = segHeader(base)
+	}
 	for i, seq := range seqs {
 		o, err := types.NewOrder("u", "X", types.SideBuy, types.OrderTypeLimit,
 			int64(1000+i%50), 1, types.TIFGoodTillCancel)
@@ -835,12 +853,22 @@ func TestRotatingAV1LogKeepsTheWholeSetReadable(t *testing.T) {
 	stem := filepath.Join(dir, "u.wal")
 	writeV1Log(t, stem, pre)
 
+	v1Before := readFile(t, stem)
+
 	w, err := OpenWith(stem, Options{MaxSegmentBytes: 4 << 10})
 	if err != nil {
 		t.Fatalf("OpenWith on a v1 log: %v", err)
 	}
-	if w.Checksummed() {
-		t.Fatal("appending to a v1 log switched framing mid-file")
+	// The property this test is about — framing never changes mid-file — is now
+	// enforced one step earlier and one step harder. A v1 file declares no matching
+	// semantics, so Open migrates it into the set and seals it before writing
+	// anything (docs/SEMANTICS-VERSION.md Rule 17), and this build's records go into
+	// a new checksummed segment beside it. The old assertion here was
+	// !w.Checksummed(), a PROXY for "the v1 file's framing is preserved"; the proxy
+	// stopped matching the property, so the property is asserted directly below —
+	// byte-identically — which the proxy never could.
+	if !w.Checksummed() {
+		t.Fatal("the sealed-past segment is not checksummed; sealing is what gets checksums onto an old file")
 	}
 	for i := pre + 1; i <= total; i++ {
 		if _, err := w.AppendSubmit(mustOrder(t, "u", int64(1000+i%50), 1)); err != nil {
@@ -854,10 +882,16 @@ func TestRotatingAV1LogKeepsTheWholeSetReadable(t *testing.T) {
 		t.Fatalf("the fixture never rotated; it is not exercising the transition")
 	}
 	if !w.Checksummed() {
-		t.Error("a rotated segment declares OBWAL\\x02 in its header, so its records must carry CRCs")
+		t.Error("a rotated segment declares its header, so its records must carry CRCs")
 	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+
+	// The v1 file itself never changed a byte. It is segment 1 now, which is where
+	// the first rotation would have put it anyway.
+	if after := readFile(t, filepath.Join(dir, "u.wal.0000000000000001")); !bytes.Equal(v1Before, after) {
+		t.Errorf("the v1 segment changed under an append: %d bytes before, %d after", len(v1Before), len(after))
 	}
 
 	names := segmentSetOf(t, stem)
@@ -880,8 +914,17 @@ func TestRotatingAV1LogKeepsTheWholeSetReadable(t *testing.T) {
 			t.Fatalf("entry %d carries sequence %d, want %d", i, e.Seq, i+1)
 		}
 	}
-	if _, err := Recover(tapeCfg(), "", stem); err != nil {
+	// The set holds records from two matchers: the v1 file's twenty, written before
+	// semantics were stamped, and this build's behind them. Replaying all of it needs
+	// the pre-stamp half named, which is the whole of what
+	// docs/SEMANTICS-VERSION.md §4 asks of a venue upgrading with a v1 log in hand.
+	if _, _, err := RecoverWithOptions(tapeCfg(), "", stem, RecoverOptions{AcceptSemantics: []int{0}}); err != nil {
 		t.Errorf("Recover over a rotated v1 log: %v", err)
+	}
+	// And without it, recovery refuses rather than serving a book the venue that
+	// wrote those twenty records never had.
+	if _, err := Recover(tapeCfg(), "", stem); !errors.Is(err, ErrSemanticsMismatch) {
+		t.Errorf("Recover err = %v, want ErrSemanticsMismatch", err)
 	}
 }
 
@@ -918,8 +961,8 @@ func TestOpenWritesTheMagicIntoAnExistingEmptyFile(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	if raw := readFile(t, stem); len(raw) < len(Magic) || string(raw[:len(Magic)]) != Magic {
-		t.Fatalf("the file does not begin with the magic: %q\n"+
+	if raw := readFile(t, stem); len(raw) < SegHeaderBytesV3 || string(raw[:len(SegMagicV3)]) != SegMagicV3 {
+		t.Fatalf("the file does not begin with a segment header: %q\n"+
 			"Records were appended at offset 0 with CRC frames into a file every reader classifies as a v1\n"+
 			"headerless log. ReadAll returns nothing with a nil error and the venue cannot tell it happened.", raw[:min(len(raw), 8)])
 	}

@@ -70,15 +70,35 @@ func buildSnapshottedLog(tb testing.TB, dir string, n, at int) (walPath, snapPat
 // walFrame locates one record in a headered log.
 type walFrame struct{ hdr, crc, payload, end int }
 
+// recordsBegin is the offset of the first record in a checksummed log, whichever
+// header shape it carries.
+//
+// Byte surgery has to know where the records start, and there are now three answers:
+// the six-byte Magic of an OBWAL\x01 file, the eighteen bytes of a pre-stamp segment,
+// and the twenty-two of one that declares its matching semantics. Every helper below
+// asks this rather than hard-coding one of them, which is the same move
+// docs/LOG-ROTATION.md §7 made when segment headers first appeared. It is not a
+// weakening: each caller still asserts the file IS a checksummed log before it cuts.
+func recordsBegin(tb testing.TB, raw []byte) int {
+	tb.Helper()
+	switch {
+	case len(raw) >= SegHeaderBytesV3 && string(raw[:len(SegMagicV3)]) == SegMagicV3:
+		return SegHeaderBytesV3
+	case len(raw) >= SegHeaderBytes && string(raw[:len(SegMagic)]) == SegMagic:
+		return SegHeaderBytes
+	case len(raw) >= len(Magic) && string(raw[:len(Magic)]) == Magic:
+		return len(Magic)
+	}
+	tb.Fatalf("not a headered log; first bytes %q", raw[:min(len(raw), 8)])
+	return 0
+}
+
 // walFrames walks a headered log's framing the way a reader does, so a test can
 // damage record k specifically rather than "some bytes near the front".
 func walFrames(tb testing.TB, raw []byte) []walFrame {
 	tb.Helper()
-	if len(raw) < len(Magic) || string(raw[:len(Magic)]) != Magic {
-		tb.Fatalf("not a headered log; first bytes %q", raw[:min(len(raw), 8)])
-	}
 	var out []walFrame
-	for off := len(Magic); off+8 <= len(raw); {
+	for off := recordsBegin(tb, raw); off+8 <= len(raw); {
 		n := int(binary.BigEndian.Uint32(raw[off : off+4]))
 		if n <= 0 || off+8+n > len(raw) {
 			break
@@ -500,9 +520,13 @@ func TestAFileThatDeclaresBaseOneAndCarriesSequence1001FallsBack(t *testing.T) {
 	// them must be applied.
 	emptySnapshotAt(t, snapPath, 500)
 
-	eng, rep, err := RecoverWithReport(tapeCfg(), snapPath, walPath)
+	// The log is hand-built in the pre-stamp format, so it declares no matching
+	// semantics and the gate would refuse it. Naming 0 at the call site says out loud
+	// what this test is deliberately NOT about: it is about sequence arithmetic, and
+	// every assertion below is unchanged. See docs/SEMANTICS-VERSION.md §7.2.
+	eng, rep, err := RecoverWithOptions(tapeCfg(), snapPath, walPath, RecoverOptions{AcceptSemantics: []int{0}})
 	if err != nil {
-		t.Fatalf("RecoverWithReport: %v", err)
+		t.Fatalf("RecoverWithOptions: %v", err)
 	}
 	if !rep.FellBack {
 		t.Error("a log whose first record is sequence 1001 was skipped by ordinal without falling back")
@@ -539,9 +563,10 @@ func TestOnlyTheFirstRecordDisagreeingStillFallsBack(t *testing.T) {
 	handBuiltLog(t, walPath, seqs)
 	emptySnapshotAt(t, snapPath, 50)
 
-	eng, rep, err := RecoverWithReport(tapeCfg(), snapPath, walPath)
+	// Pre-stamp framing, as above: the option says what this test is not about.
+	eng, rep, err := RecoverWithOptions(tapeCfg(), snapPath, walPath, RecoverOptions{AcceptSemantics: []int{0}})
 	if err != nil {
-		t.Fatalf("RecoverWithReport: %v", err)
+		t.Fatalf("RecoverWithOptions: %v", err)
 	}
 	if !rep.FellBack {
 		t.Error("record 1's sequence disagreed with its ordinal and the skip went ahead anyway")
@@ -643,7 +668,7 @@ func TestLogShorterThanTheBoundaryIsReported(t *testing.T) {
 func stripToV1(tb testing.TB, dir, walPath string) string {
 	tb.Helper()
 	raw := readFile(tb, walPath)
-	body := raw[len(Magic):]
+	body := raw[recordsBegin(tb, raw):]
 	var legacy []byte
 	for len(body) > 0 {
 		n := int(binary.BigEndian.Uint32(body[0:4]))
@@ -667,9 +692,16 @@ func TestV1LogRecoversIdenticallyBehindASnapshot(t *testing.T) {
 
 	v1Path := stripToV1(t, dir, walPath)
 
-	eng, rep, err := RecoverWithReport(tapeCfg(), snapPath, v1Path)
+	// A v1 file declares no matching semantics, so the gate would refuse the hundred
+	// records past the boundary. Naming 0 at the call site says what this test is
+	// deliberately not about — it is about FRAMING, and every assertion below is
+	// unchanged. docs/SEMANTICS-VERSION.md §7.2.
+	eng, rep, err := RecoverWithOptions(tapeCfg(), snapPath, v1Path, RecoverOptions{AcceptSemantics: []int{0}})
 	if err != nil {
-		t.Fatalf("RecoverWithReport: %v", err)
+		t.Fatalf("RecoverWithOptions: %v", err)
+	}
+	if !rep.SemanticsAccepted {
+		t.Error("recovery replayed pre-stamp records without reporting that an override let them through")
 	}
 	if got, want := eng.TakeSnapshot().Digest(), fullParse(t, snapPath, v1Path); got != want {
 		t.Errorf("v1 recovery\n got %s\nwant %s", got, want)
@@ -725,9 +757,11 @@ func TestV1UndecodableRecordBehindTheSnapshotStillStops(t *testing.T) {
 		t.Fatalf("ReadAll returned %d entries, want 9 — the fixture is not damaged where it thinks it is", len(entries))
 	}
 
-	eng, rep, err := RecoverWithReport(tapeCfg(), snapPath, v1Path)
+	// Pre-stamp framing, as in the test above: the option says what this one is not
+	// about, and leaves every assertion below it exactly as it was.
+	eng, rep, err := RecoverWithOptions(tapeCfg(), snapPath, v1Path, RecoverOptions{AcceptSemantics: []int{0}})
 	if err != nil {
-		t.Fatalf("RecoverWithReport: %v", err)
+		t.Fatalf("RecoverWithOptions: %v", err)
 	}
 	if got, want := eng.TakeSnapshot().Digest(), fullParse(t, snapPath, v1Path); got != want {
 		t.Fatalf("v1 recovery walked past an undecodable record\n got %s\nwant %s\n"+

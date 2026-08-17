@@ -90,6 +90,15 @@ type Config struct {
 	// A venue that wants a small retained set wants small segments: 500 MiB of budget
 	// against 16 MiB segments has an 80 MiB floor and does what it says.
 	WALRetainBytes int64
+	// WALAcceptSemantics lists the matching semantics versions whose records recovery
+	// may replay besides this build's, from -wal-accept-semantics. Empty is the
+	// default and refuses: a journal written by a build whose matching behaviour is
+	// not this one's replays into a book the venue that wrote it never had, and
+	// recovery says so and stops rather than starting confidently.
+	//
+	// It names versions rather than being a boolean so it goes stale on the next
+	// bump; see wal.RecoverOptions.AcceptSemantics.
+	WALAcceptSemantics []int
 	// WALRetainSegments is how many sealed segments are kept regardless of coverage.
 	// Zero takes wal.DefaultMinSegments.
 	//
@@ -367,7 +376,8 @@ func NewServer(cfg Config) (*Server, error) {
 			_, snapPath := cfg.paths(symbol)
 			var err error
 			var rep wal.RecoverReport
-			if recovered, rep, err = wal.RecoverWithReport(eng, snapPath, walPath); err != nil {
+			opts := wal.RecoverOptions{AcceptSemantics: cfg.WALAcceptSemantics}
+			if recovered, rep, err = wal.RecoverWithOptions(eng, snapPath, walPath, opts); err != nil {
 				return nil, fmt.Errorf("obgw: recover %s: %w", symbol, err)
 			}
 			// The larger of the two, not the log's last record alone: after a crash a
@@ -390,6 +400,26 @@ func NewServer(cfg Config) (*Server, error) {
 					"the missing records are already folded into the snapshot, so this recovery is correct, "+
 					"but the venue will reuse those sequence numbers until the next checkpoint lands. "+
 					"Force a checkpoint to close it.", symbol, rep.SnapshotSeq, rep.LogLastSeq)
+			}
+			if rep.SemanticsAccepted {
+				// Loud, because this is a venue serving a book built by replaying
+				// another build's rules. It is a deliberate act and it should stop
+				// being needed after the next checkpoint.
+				log.Printf("obgw: %s REPLAYED RECORDS FROM ANOTHER MATCHER. This build matches at semantics %d; "+
+					"the log declares %v, and -wal-accept-semantics let it through. The recovered book is what "+
+					"THIS build's rules produce from those commands, which is not necessarily what the venue that "+
+					"wrote them served. Force a checkpoint and remove the flag. "+
+					"See docs/RUNBOOKS.md \"Upgrading across a semantics change\".",
+					symbol, rep.Semantics, rep.LogSemantics)
+			} else if len(rep.LogSemantics) > 1 || (len(rep.LogSemantics) == 1 && rep.LogSemantics[0] != rep.Semantics) ||
+				(rep.SnapshotSeq > 0 && rep.SnapshotSemantics != rep.Semantics) {
+				// A set that spans an upgrade, or a snapshot an older build wrote, with
+				// nothing left to replay from the older half. That is the documented
+				// upgrade path completing correctly, and it is reported rather than
+				// refused — see docs/SEMANTICS-VERSION.md §3.1.
+				log.Printf("obgw: %s matching semantics %d; snapshot declares %d, log segments declare %v — "+
+					"nothing from another matcher was replayed.",
+					symbol, rep.Semantics, rep.SnapshotSemantics, rep.LogSemantics)
 			}
 			if rep.FellBack {
 				log.Printf("obgw: %s log record sequences are not the ones their segments' declared bases imply, "+

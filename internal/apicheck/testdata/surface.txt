@@ -312,6 +312,7 @@ matching.EngineSnapshot.MarkPrice int64
 matching.EngineSnapshot.OCOs []OCOEntry
 matching.EngineSnapshot.Orders []*types.Order
 matching.EngineSnapshot.PausedUntil time.Time
+matching.EngineSnapshot.Semantics int
 matching.EngineSnapshot.Seq int64
 matching.EngineSnapshot.State EngineState
 matching.EngineSnapshot.Stops []*types.StopOrder
@@ -411,6 +412,7 @@ matching.STPCancelNewest const
 matching.STPCancelOldest const
 matching.STPDecrement const
 matching.SelfTradePrevention type
+matching.SemanticsVersion const
 matching.SeqBits const
 matching.ShardIndexBits const
 matching.Shards struct
@@ -1103,6 +1105,7 @@ wal.ErrBelowFloor var
 wal.ErrCorrupt var
 wal.ErrLogGap var
 wal.ErrNotALog var
+wal.ErrSemanticsMismatch var
 wal.FreeBytes(stem string) (int64, bool)
 wal.KindBust const
 wal.KindCancel const
@@ -1133,16 +1136,23 @@ wal.ReadAfter(stem string, afterSeq int64) ([]Entry, error)
 wal.ReadAll(path string) ([]Entry, error)
 wal.ReadSnapshot(path string) (*matching.EngineSnapshot, error)
 wal.Recover(config matching.Config, snapPath, walPath string) (*matching.Engine, error)
+wal.RecoverOptions struct
+wal.RecoverOptions.AcceptSemantics []int
 wal.RecoverReport struct
 wal.RecoverReport.Applied int
 wal.RecoverReport.FellBack bool
 wal.RecoverReport.Floor int64
 wal.RecoverReport.LogLastSeq int64
+wal.RecoverReport.LogSemantics []int
 wal.RecoverReport.RetainedBytes int64
 wal.RecoverReport.Segments int
+wal.RecoverReport.Semantics int
+wal.RecoverReport.SemanticsAccepted bool
 wal.RecoverReport.Skipped int
 wal.RecoverReport.SnapshotAhead bool
+wal.RecoverReport.SnapshotSemantics int
 wal.RecoverReport.SnapshotSeq int64
+wal.RecoverWithOptions(config matching.Config, snapPath, walPath string, opts RecoverOptions) (*matching.Engine, RecoverReport, error)
 wal.RecoverWithReport(config matching.Config, snapPath, walPath string) (*matching.Engine, RecoverReport, error)
 wal.Restore(eng *matching.Engine, entries []Entry)
 wal.RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64)
@@ -1154,7 +1164,9 @@ wal.RetentionResult.Floor int64
 wal.RetentionResult.RetainedBytes int64
 wal.RetentionResult.Skipped string
 wal.SegHeaderBytes const
+wal.SegHeaderBytesV3 const
 wal.SegMagic const
+wal.SegMagicV3 const
 wal.SetInfo struct
 wal.SetInfo.Bytes int64
 wal.SetInfo.Floor int64

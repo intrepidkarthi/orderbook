@@ -328,7 +328,13 @@ func enumerateSetByName(stem string) (*segmentSet, error) {
 	// A log that has never rotated is one file at the stem, and it is the active
 	// segment, so retention has nothing to consider. It is included so floor() and
 	// bytes() answer for the whole set rather than for the numbered part of it.
-	if st, err := os.Lstat(stem); err == nil && st.Mode().IsRegular() && st.Size() > int64(SegHeaderBytes) {
+	// Bigger than the LARGEST header any shape of stem can carry, so a bare header
+	// with no records behind it — a set marker, or a freshly opened log that has not
+	// taken a command yet — is not mistaken for a record-bearing file. Sized off the
+	// V3 header because that is the widest, and a v1 stem holding even one record is
+	// far past it: the smallest record this package writes is a length prefix, a CRC
+	// and a JSON order.
+	if st, err := os.Lstat(stem); err == nil && st.Mode().IsRegular() && st.Size() > int64(SegHeaderBytesV3) {
 		set.present = true
 		set.segs = append(set.segs, segment{
 			path: stem, name: stemName, base: 1, kind: kindHeadered, size: st.Size(),

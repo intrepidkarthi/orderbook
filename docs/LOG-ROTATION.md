@@ -129,15 +129,27 @@ that walks toward it would be perverse.
 
 ### 2.2 The segment header
 
-A segment written by this build begins with 18 bytes:
+A segment written by this build begins with 22 bytes:
 
 ```
-offset 0    "OBWAL\x02"      6 bytes   magic and version
+offset 0    "OBWAL\x03"      6 bytes   magic and version
 offset 6    [base:8]         big-endian int64: the Seq of record 1
-offset 14   [crc:4]          CRC-32C over the 8 base bytes
+offset 14   [sem:4]          big-endian uint32: matching.SemanticsVersion of the
+                             build that produced these records
+offset 18   [crc:4]          CRC-32C over the 12 bytes at offset 6
             [len:4][crc:4][payload]     record 1
             ...
 ```
+
+The semantics field arrived after this document was written; the magic was bumped from
+`OBWAL\x02` rather than the header extended in place, and
+[`SEMANTICS-VERSION.md`](SEMANTICS-VERSION.md) §2.3 is the reasoning. `OBWAL\x02`
+segments are still read exactly as described here — they declare no semantics, which is
+not the same as declaring zero — and the **set marker at the stem keeps the `OBWAL\x02`
+shape forever**, because it holds no records and because §2.5's downgrade argument is
+calibrated to those exact bytes. Everything below about bases, names and record framing
+is unchanged by the four extra bytes; where this section says "the CRC covers the base",
+read "the base and the semantics, as one twelve-byte field".
 
 Records are unchanged: same framing, same CRC-32C over the payload only, same
 `MaxRecordBytes`. Nothing about a record's bytes depends on which segment it is in, so a

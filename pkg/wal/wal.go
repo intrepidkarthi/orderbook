@@ -409,6 +409,15 @@ func Open(path string) (*Writer, error) { return OpenWith(path, Options{}) }
 // partial record, it is left exactly as it is and the next record starts a new
 // segment based at lastSeq+1.
 //
+// It also SEALS a segment whose declared matching semantics is not this build's, so
+// this build's records never land behind a header that would then describe records it
+// did not produce. That is what makes the mismatch Recover refuses self-healing: one
+// rotation at the first restart after an upgrade, and the set is correct from then on.
+// See openPastTheStamp and docs/SEMANTICS-VERSION.md §3.7. Open itself never REFUSES —
+// it is the most permissive reader in this package, per docs/BOUNDED-RECOVERY.md §9.1,
+// because cmd/obgw opens the log it has just recovered from and two readers of the same
+// bytes disagreeing is how a benign file becomes an outage.
+//
 // That closes the defect docs/BOUNDED-RECOVERY.md §6.1 confirmed by experiment and
 // left open for want of a safe fix. Open used to take O_APPEND and write the next
 // record BEHIND the fragment's bytes; the fragment's length prefix then found enough
@@ -477,9 +486,18 @@ func OpenWith(path string, opts Options) (*Writer, error) {
 		// so start a proper segment at 1.
 		return openFreshSegment(w, 1)
 	case !have:
-		// Nothing at this path. A fresh log is a single file in the current format,
-		// which is what every existing deployment, runbook and test expects to find
-		// there — the set materialises around it at the first rotation.
+		// Nothing at this path. A fresh log is a single file at the stem, which is
+		// what every existing deployment, runbook and test expects to find there —
+		// the set materialises around it at the first rotation.
+		//
+		// That file now opens with a full segment header rather than the six-byte
+		// Magic, and the reason is the stamp rather than tidiness. A log this build
+		// writes must DECLARE the semantics its records were produced under, or the
+		// first crash recovery on a brand-new venue meets a file carrying this
+		// build's records and no statement of whose rules made them — which is
+		// exactly the condition docs/SEMANTICS-VERSION.md §4 refuses to guess about.
+		// The header also declares base 1 explicitly, which the six-byte form only
+		// ever implied by being the only file there was.
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			return nil, err
@@ -492,12 +510,12 @@ func OpenWith(path string, opts Options) (*Writer, error) {
 			return nil, err
 		}
 		if st.Size() == 0 {
-			if _, err := w.w.WriteString(Magic); err != nil {
+			if _, err := w.w.Write(segHeaderV3(1, matching.SemanticsVersion)); err != nil {
 				_ = f.Close()
 				return nil, err
 			}
 		}
-		w.written = int64(len(Magic))
+		w.written = int64(SegHeaderBytesV3)
 	case sw.torn:
 		// Rule 8. The fragment stays where it is; this segment never takes another
 		// record. The new segment's base is exactly last+1, which is what makes the
@@ -514,6 +532,26 @@ func OpenWith(path string, opts Options) (*Writer, error) {
 			}
 		}
 		return openFreshSegment(w, base)
+	case newest.semantics != matching.SemanticsVersion:
+		// Rule 15 of docs/SEMANTICS-VERSION.md: the active segment declares somebody
+		// else's matching semantics, so this build does not append behind its header.
+		//
+		// Without this the stamp is a lie in the one direction that matters. A venue
+		// upgrades, restarts, Open resumes the newest segment — created by the
+		// PREVIOUS build and declaring the previous semantics — and every record this
+		// build writes lands in it. The segment then claims one semantics and holds
+		// records from two, and the next crash recovery either refuses a tail that is
+		// perfectly replayable or, with the override in hand, replays records it
+		// should have refused. Either way the header has stopped describing its own
+		// contents, which is the only thing it was for.
+		//
+		// It is also what makes the condition SELF-HEALING. Leaving the segment alone
+		// and letting the gate be conservative means a venue that upgraded correctly
+		// meets the refusal on every crash recovery until the segment fills, which at
+		// the 128 MiB default is a long time to be one power loss away from an outage.
+		// The cost is one rotation per upgrade.
+		return openPastTheStamp(w, newest, last, sw)
+
 	default:
 		f, err := os.OpenFile(newest.path, os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
@@ -524,28 +562,99 @@ func OpenWith(path string, opts Options) (*Writer, error) {
 		w.checksummed = newest.checksummed()
 		w.legacyStem = !newest.named
 		w.written, w.segRecords = newest.size, sw.records
-		if newest.size == 0 {
-			// An EXISTING zero-byte file. readSegHeader classifies one as the current
-			// format — there is nothing in it to be a v1 log — but that classification
-			// only becomes true once the magic is actually written, and the fresh-path
-			// branch above is not the only way to meet an empty file. `touch`, a
-			// provisioning script, a restored volume, or a venue killed between Open
-			// and its first Sync all leave one.
-			//
-			// Without this, CRC-framed records go in at offset 0 behind no header, and
-			// every reader in this package then classifies the result as a v1 headerless
-			// log: ReadAll returns no entries and a nil error, Recover starts an empty
-			// venue, and the next Open resumes at sequence 0 and rewrites the log from
-			// the start. Silent, total, and the venue cannot tell it happened.
-			// TestOpenWritesTheMagicIntoAnExistingEmptyFile.
-			if _, err := w.w.WriteString(Magic); err != nil {
-				_ = f.Close()
-				return nil, err
-			}
-			w.written = int64(len(Magic))
-		}
 	}
 	return w, nil
+}
+
+// openPastTheStamp puts this build's records somewhere other than behind a header
+// that declares a different matching semantics, and points w at it.
+//
+// Two shapes, because the general one is arithmetically impossible on the second.
+//
+// A segment that HOLDS RECORDS is sealed: it keeps every byte it has, and a new
+// segment based at last+1 takes the appends. A legacy stem is migrated into the set
+// first, by the same rename-and-mark the first rotation would have done, so the v1
+// file's own bytes and framing are never touched and this build's records go into a
+// new checksummed segment beside it. That is the Writer doc comment's "rotate to get
+// checksums on an old file" becoming true a second time, for a second reason.
+//
+// A segment that holds NO records is REPLACED IN PLACE, because rotation cannot
+// express it: the next segment's base is last+1, an empty segment's last is base−1,
+// so the new segment would claim the base the old one already has and collide with
+// its own filename — EEXIST at exactly the moment a venue is trying to start. There
+// is nothing to preserve in a file with no records, so the header is rewritten
+// through the same crash-atomic temp-and-rename WriteSnapshot uses. See
+// docs/SEMANTICS-VERSION.md Rules 15 to 17.
+func openPastTheStamp(w *Writer, newest segment, last int64, sw segWalk) (*Writer, error) {
+	if sw.records == 0 {
+		base := newest.base
+		if !newest.named {
+			// The stem, holding a header and nothing else. Its base is implicit and
+			// is 1, whatever shape the header it carries has.
+			base = 1
+		}
+		if err := replaceSegmentHeader(newest.path, base); err != nil {
+			return nil, err
+		}
+		f, err := os.OpenFile(newest.path, os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return nil, err
+		}
+		w.f, w.w = f, bufio.NewWriter(f)
+		w.path, w.base = newest.path, base
+		w.checksummed, w.legacyStem = true, !newest.named
+		w.written, w.segRecords = int64(SegHeaderBytesV3), 0
+		// Not a rotation: nothing was sealed and no segment was created. Rotations
+		// counts sealed segments, and a header swap on an empty file seals none.
+		return w, nil
+	}
+	if !newest.named {
+		// The migration docs/LOG-ROTATION.md §7 performs at the first rotation,
+		// performed here instead because this Open is the first moment the stem stops
+		// being able to describe the whole log. openFreshSegment writes the marker,
+		// since the stem is absent the instant the rename lands.
+		if err := os.Rename(w.stem, segPath(w.stem, 1)); err != nil {
+			return nil, err
+		}
+	}
+	out, err := openFreshSegment(w, last+1)
+	if err != nil {
+		return nil, err
+	}
+	out.rotations++
+	return out, nil
+}
+
+// replaceSegmentHeader swaps a record-free segment's header for this build's,
+// crash-atomically: a complete header into a temp file, fsynced, renamed over the
+// target, then the directory fsynced. A crash at any point leaves either the old
+// header or the new one, and both are valid segments holding no records.
+func replaceSegmentHeader(path string, base int64) error {
+	tmp := path + ".hdr.tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if _, err := f.Write(segHeaderV3(base, matching.SemanticsVersion)); err != nil {
+		return fail(err)
+	}
+	if err := f.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return syncDir(filepath.Dir(path))
 }
 
 // openFreshSegment materialises <stem>.<base> and points w at it. It is the same
@@ -572,7 +681,7 @@ func openFreshSegment(w *Writer, base int64) (*Writer, error) {
 	w.f, w.w = f, bufio.NewWriter(f)
 	w.path, w.base = segPath(w.stem, base), base
 	w.checksummed, w.legacyStem = true, false
-	w.written, w.segRecords = int64(SegHeaderBytes), 0
+	w.written, w.segRecords = int64(SegHeaderBytesV3), 0
 	return w, nil
 }
 
@@ -806,7 +915,7 @@ func (w *Writer) rotateLocked(base int64) error {
 	w.f, w.w = f, bufio.NewWriter(f)
 	w.path, w.base = segPath(w.stem, base), base
 	w.checksummed = true
-	w.written, w.segRecords = int64(SegHeaderBytes), 0
+	w.written, w.segRecords = int64(SegHeaderBytesV3), 0
 	w.rotations++
 	return nil
 }
@@ -845,7 +954,12 @@ func (w *Writer) materialiseSegment(base int64) (*os.File, error) {
 		_ = os.Remove(tmp)
 		return nil, err
 	}
-	if _, err := f.Write(segHeader(base)); err != nil {
+	// The stamp comes from the constant, never from a literal. A literal here would
+	// diverge from matching.SemanticsVersion the first time the constant moved, and
+	// every test that reads a header back would still pass — which is why
+	// TestTheStampIsWired asserts this specific wiring rather than the shape of the
+	// bytes.
+	if _, err := f.Write(segHeaderV3(base, matching.SemanticsVersion)); err != nil {
 		return fail(err)
 	}
 	if err := f.Sync(); err != nil {
@@ -1786,6 +1900,28 @@ type RecoverReport struct {
 	// checkpoint lands, a second crash would have RestoreAfter skip them. Naming the
 	// condition is what lets an operator force a checkpoint and close it.
 	SnapshotAhead bool
+
+	// Semantics is matching.SemanticsVersion of THIS BUILD — the number the gate
+	// compared everything against. It is in the report so a log line can name it
+	// without the embedder importing pkg/matching to find out.
+	Semantics int
+	// SnapshotSemantics is the semantics the snapshot declares, 0 when there is no
+	// snapshot or when it predates the stamp. It is a REPORT and never a gate: a
+	// snapshot is not replayed, so restoring a book an older build actually had is
+	// the documented upgrade procedure rather than an error. After an upgrade it
+	// disagreeing with Semantics is the normal state, which is why it is reported
+	// rather than refused.
+	SnapshotSemantics int
+	// LogSemantics is the distinct set of semantics the segments on disk declare,
+	// ascending, with 0 meaning "declares none". More than one entry is not a
+	// corruption: a set legitimately spans an upgrade, and that is precisely the fact
+	// the gate needed.
+	LogSemantics []int
+	// SemanticsAccepted reports that records from a build other than this one were
+	// replayed because RecoverOptions.AcceptSemantics named their version. If this is
+	// routinely true in the field, the number has become a formality and the
+	// diagnosis is that the refusal is firing on cases it was designed not to.
+	SemanticsAccepted bool
 }
 
 // Recover rebuilds an engine from a snapshot plus the log tail after it: the
@@ -1820,8 +1956,13 @@ type RecoverReport struct {
 // segment, an overlap, or a snapshot that sits below the oldest retained sequence —
 // because every one of those recovers into a plausible book that is missing commands,
 // with every remaining record verifying perfectly.
+//
+// It also refuses on a fourth condition, where the bytes are intact, the files are all
+// present, and a MEANING has moved: records it is about to replay were written by a
+// build whose matching behaviour is not this one's. That is ErrSemanticsMismatch, and
+// RecoverWithOptions is where the deliberate override lives.
 func Recover(config matching.Config, snapPath, walPath string) (*matching.Engine, error) {
-	eng, _, err := RecoverWithReport(config, snapPath, walPath)
+	eng, _, err := RecoverWithOptions(config, snapPath, walPath, RecoverOptions{})
 	return eng, err
 }
 
@@ -1829,7 +1970,26 @@ func Recover(config matching.Config, snapPath, walPath string) (*matching.Engine
 // the report dropped; embedders that want to log the conditions in RecoverReport —
 // cmd/obgw does — call this instead.
 func RecoverWithReport(config matching.Config, snapPath, walPath string) (*matching.Engine, RecoverReport, error) {
-	var rep RecoverReport
+	return RecoverWithOptions(config, snapPath, walPath, RecoverOptions{})
+}
+
+// RecoverWithOptions is RecoverWithReport with the deliberate deviations named.
+//
+// The only deviation there is, and the only one this function will ever grow, is
+// RecoverOptions.AcceptSemantics: the list of matching semantics versions whose
+// records this recovery will replay besides this build's. Recover and
+// RecoverWithReport are this function with the zero options, which is the default and
+// refuses.
+//
+// It refuses if and only if it is about to APPLY a record from a segment whose
+// declared semantics is not this build's. A mismatched segment whose records are all
+// covered by the snapshot is read, CRC-verified, skipped, reported and never refused
+// — it contributes nothing to the recovered book, so refusing on it is refusing on a
+// file that could be deleted with no effect. That is the same move
+// docs/BOUNDED-RECOVERY.md §5.2 already made when it let the decode check travel with
+// the snapshot boundary. See docs/SEMANTICS-VERSION.md §3.
+func RecoverWithOptions(config matching.Config, snapPath, walPath string, opts RecoverOptions) (*matching.Engine, RecoverReport, error) {
+	rep := RecoverReport{Semantics: matching.SemanticsVersion}
 	// The snapshot first, always: a venue whose base is unreadable should say so
 	// without first spending a minute reading a log it is not going to use.
 	snap, err := ReadSnapshot(snapPath)
@@ -1839,6 +1999,7 @@ func RecoverWithReport(config matching.Config, snapPath, walPath string) (*match
 	var after int64
 	if snap != nil {
 		after = snap.WALSeq
+		rep.SnapshotSemantics = snap.Semantics
 	}
 	rep.SnapshotSeq = after
 
@@ -1857,7 +2018,18 @@ func RecoverWithReport(config matching.Config, snapPath, walPath string) (*match
 		rep.RetainedBytes = set.bytes()
 		rep.Floor = set.floor()
 		rep.FellBack = false
+		rep.LogSemantics = logSemantics(set)
+		rep.SemanticsAccepted = false
 		if err := set.validateAgainstSnapshot(after, snap != nil); err != nil {
+			return err
+		}
+		// Stage one of the semantics gate, before a byte of any record is read. A
+		// sealed segment's span comes from the 16-digit filenames alone, so a
+		// mismatch that would be replayed is refused in milliseconds rather than
+		// after reading gigabytes. It joins the startup validations above and is
+		// checked AFTER them: a gap or an overlap is a more fundamental condition
+		// than a version, and the override must not be able to mask one.
+		if err := gateSealedSegments(set, after, opts); err != nil {
 			return err
 		}
 		if walk, err = walkSetIn(set, after); err != nil {
@@ -1874,6 +2046,14 @@ func RecoverWithReport(config matching.Config, snapPath, walPath string) (*match
 				return err
 			}
 		}
+		// Stage two: the active segment, decided from its last complete record's
+		// sequence rather than from the directory, because the directory does not
+		// bound it above. Still before RestoreEngine and before a single command is
+		// applied.
+		if err := gateNewestSegment(set, after, walk.lastSeq, opts); err != nil {
+			return err
+		}
+		rep.SemanticsAccepted = replaySemanticsDiffer(set, after, walk.lastSeq)
 		return nil
 	}); err != nil {
 		return nil, rep, err

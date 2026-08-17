@@ -478,7 +478,7 @@ func TestArchivalHappensBeforeDeletion(t *testing.T) {
 	// encrypted or re-checksummed, so it can be copied back into place.
 	for _, name := range archived {
 		raw := readFile(t, filepath.Join(archive, name))
-		if len(raw) < SegHeaderBytes || string(raw[:len(SegMagic)]) != SegMagic {
+		if len(raw) < SegHeaderBytesV3 || string(raw[:len(SegMagicV3)]) != SegMagicV3 {
 			t.Errorf("archived %s is not a segment", name)
 		}
 	}
