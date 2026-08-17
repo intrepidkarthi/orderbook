@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -67,7 +68,24 @@ func NewPrimary(symbol, walPath, addr string) (*Primary, error) {
 // the venue manifest, so the ids this primary mints — and therefore the ids its
 // follower replays — are unique across the venue. See docs/MULTI-SYMBOL.md.
 func NewPrimaryFor(cfg matching.Config, walPath, addr string) (*Primary, error) {
-	w, err := wal.Open(walPath)
+	return NewPrimaryWith(cfg, walPath, addr, wal.Options{})
+}
+
+// NewPrimaryWith is NewPrimaryFor with the log's segment policy supplied, which is
+// what a venue running retention needs. It matters here rather than only in the
+// venue because a primary is also a READER of its own log: a reconnecting follower
+// is caught up from the file, and retention can have deleted the records it is
+// asking for. serve answers that with a snapshot; see the ErrBelowFloor branch.
+//
+// This opens the log without recovering from it, which is right for an example that
+// starts an empty book — and is worth being explicit about, because wal.Open is NOT an
+// integrity check. It reads only the newest segment, so a set with a missing middle
+// segment, an overlap or a CRC-damaged sealed segment opens cleanly here and is refused
+// by wal.Recover and wal.ReadAll. A venue that means to serve the book its log
+// describes calls wal.Recover first, the way cmd/obgw does; anything that only Opens is
+// extending a set nothing has checked.
+func NewPrimaryWith(cfg matching.Config, walPath, addr string, opts wal.Options) (*Primary, error) {
+	w, err := wal.OpenWith(walPath, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -200,17 +218,35 @@ func (p *Primary) serve(conn net.Conn) {
 		// A reconnecting follower catches up from the file. Sync first: the live
 		// stream it is already subscribed to starts at "appended after now", and
 		// entries appended before now must therefore all be readable on disk.
+		// Rotation is what makes that argument survive — a segment is sealed and
+		// fsynced before the next one takes a record, so a Sync on the active
+		// segment never leaves bytes behind in one the writer has moved on from.
 		if p.wal.Sync() != nil {
 			return
 		}
-		entries, err := wal.ReadAll(p.walPath)
+		entries, err := wal.ReadAfter(p.walPath, h.Have)
+		if errors.Is(err, wal.ErrBelowFloor) {
+			// Retention has deleted the records this follower needs. Shipping what is
+			// still on disk would start the catch-up above Have+1, the follower's gap
+			// check would see it and terminate with "gap in the feed" — a protocol
+			// error raised against the one source that is supposed to be authoritative.
+			// The right answer is the same one market data gives an evicted subscriber:
+			// a snapshot, from which it bootstraps.
+			snap, cerr := p.Runner.Checkpoint()
+			if cerr != nil || enc.Encode(frame{Snapshot: snap}) != nil {
+				return
+			}
+			for rec := range ch {
+				if enc.Encode(frame{Record: rec}) != nil {
+					return
+				}
+			}
+			return
+		}
 		if err != nil {
 			return
 		}
 		for i := range entries {
-			if entries[i].Seq <= h.Have {
-				continue
-			}
 			// These entries are private decodes off the disk — nothing mutates
 			// them — so re-encoding here is safe in a way it is not for a live
 			// entry.

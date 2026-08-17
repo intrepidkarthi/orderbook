@@ -43,7 +43,8 @@ the arithmetic arrives, and by then the operator is already in an incident.
 Two things are wrong, and this document fixes one of them:
 
 1. **A restart reads the whole log.** That is this slice.
-2. **The log never shrinks.** That is slice 2, and it is untouched here.
+2. **The log never shrinks.** That is slice 2 — [`LOG-ROTATION.md`](LOG-ROTATION.md),
+   now built — and it is untouched here.
 
 Fixing (1) without (2) is worth doing on its own because the two walls are different
 heights. The memory wall is the sharp one, 2.1 KB of allocation per stored record of
@@ -367,11 +368,22 @@ measured in memory bandwidth, would be paying the whole price for a fraction of 
 
 - **It does not rotate, truncate or archive the log.** The file still grows without
   bound, about 44 GiB a day at 2,500 messages/s. Restart time is still O(total log),
-  with a smaller constant. One day of continuous operation at that rate is roughly
-  144 million records; reading and CRC-verifying them at the measured 112 ns each is
-  about 16 seconds, and the day after that is 32, and it never stops climbing. **Slice 1
+  with a smaller constant. One day of continuous operation at that rate is 216 million
+  records; reading and CRC-verifying them at the measured 112 ns each is about 24
+  seconds, and the day after that is 48, and it never stops climbing. **Slice 1
   removes the memory wall and lowers the time wall. Only rotation removes the time
   wall.** Any sentence that says otherwise is wrong.
+
+  *(This bullet said "roughly 144 million records… about 16 seconds". 2,500 × 86,400
+  is 216 million, and 216 million × 220 bytes is the same 44 GiB the sentence above it
+  quotes — so the record count and the byte count disagreed with each other by 1.5×.
+  Corrected by [`LOG-ROTATION.md`](LOG-ROTATION.md) §1, which had to run the same
+  arithmetic to size a segment. The conclusion is unchanged, which is the point of it.)*
+
+  **Slice 2 built the rotation.** Restart cost is now O(*retained* log), bounded by a
+  byte budget the operator sets — and it is O(total log) still for a venue that does
+  not set one, because deletion is off by default. See
+  [`LOG-ROTATION.md`](LOG-ROTATION.md).
 
   *(This bullet said "still minutes" until §9.3 was measured. That was the pre-change
   constant of ~3.33 µs a record carried forward by hand — 144 million of those really is

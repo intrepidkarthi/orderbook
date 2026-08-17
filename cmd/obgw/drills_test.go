@@ -33,9 +33,18 @@ import (
 //
 // Coverage of docs/RUNBOOKS.md, so a reader can audit it rather than trust it:
 //
-//	A torn log                     TestATornLogStillYieldsANameableBook (recovery_test.go)
+//	A torn log                     TestATornLogStillYieldsANameableBook (recovery_test.go),
+//	                               TestATornTailSealsItsSegment (pkg/wal)
 //	A corrupt log record           TestDrillCorruptLogRecordRefusesToStart
-//	A corrupt snapshot             TestDrillCorruptSnapshotProcedureRestoresTheSameBook
+//	A gap between snapshot and log TestSnapshotBelowTheRetentionFloorRefuses (pkg/wal),
+//	                               TestAMissingMiddleSegmentRefuses (pkg/wal)
+//	A corrupt snapshot             TestDrillCorruptSnapshotProcedureRestoresTheSameBook —
+//	                               which exercises the FLOOR-IS-1 branch, the only one
+//	                               where "delete the snapshot and replay" is still the
+//	                               procedure. The floor-above-1 branch is a refusal, and
+//	                               it is pinned by TestSnapshotBelowTheRetentionFloorRefuses.
+//	The disk filled up             TestDiskFullHaltsRatherThanAcknowledging (diskfull_test.go),
+//	                               TestStopWaterGoesCancelOnly (diskfull_test.go)
 //	A stuck matching goroutine     TestDrillAStalledMatcherIsVisibleAndAQuietOneIsNot
 //	A mass cancel                  TestDrillAMassCancelIsNotAStall
 //	An evicted subscriber          TestMarketDataRejectsAnEvictedCursor (mdserver_test.go),

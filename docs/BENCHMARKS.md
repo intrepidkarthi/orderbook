@@ -263,10 +263,98 @@ Three things fall out:
    The first version of that row was published as "6.0 ms" by transcription error and
    explained away as "barely improves"; see [BOUNDED-RECOVERY.md](BOUNDED-RECOVERY.md)
    §9.3 and §9.5.
-3. **It is still O(total log).** 88.4 MiB has to be read and checksummed however
-   recent the snapshot is, and nothing rotates or truncates the file. Skipping the
-   read as well would be faster still and would stop detecting corruption behind the
-   snapshot — permanently, since each checkpoint buries it deeper — so it is not done.
+3. **It is O(RETAINED log), which is O(total log) until retention is turned on.**
+   88.4 MiB has to be read and checksummed however recent the snapshot is. Skipping
+   the read as well would be faster still and would stop detecting corruption behind
+   the snapshot — permanently, since each checkpoint buries it deeper — so it is not
+   done. What bounds the read instead is deleting the file: see the next table.
+
+### Restart cost against retention
+
+`BenchmarkRestartWithRetention`, on `buildRetainedChurnLog`
+(`pkg/wal/retention_bench_test.go`) — submit/cancel pairs, so the resting book stays
+near empty and the log term is isolated from the book term. It is a different fixture
+from slice 1's `buildCoveredChurnLog` (`restart_cost_test.go`), which does not rotate
+and takes no retention parameters. "Total history" is what was written; "retained" is
+what survived and therefore what the restart read.
+
+1 MiB segments, a 4 MiB retained budget, 1,000 records to apply in every row, Apple M4,
+`-benchtime 1x` — one pass over a log this process has just written, so the retained
+rows are warm and the 1,068 MiB row is partly evicted and effectively cold. Single
+samples, not medians: expect run-to-run spread of a few milliseconds on the small rows
+(a repeat run put the 60,000-record retention-off row at 10.9 ms against the 18.1 ms
+below). The spread does not touch the conclusion, which is a factor of a hundred.
+
+| total history written | retention | retained on disk | segments | `Recover` |
+|---:|---|---:|---:|---:|
+| 60,000 records (11 MiB) | 4 MiB | 3.7 MiB | 4 | **5.95 ms** |
+| 600,000 records (110 MiB) | 4 MiB | 4.1 MiB | 5 | **6.28 ms** |
+| 6,000,000 records (1.1 GiB) | 4 MiB | 3.3 MiB | 4 | **5.66 ms** |
+| 60,000 records (11 MiB) | off | 10.7 MiB | 11 | 18.1 ms |
+| 600,000 records (110 MiB) | off | 106.1 MiB | 107 | 84.1 ms |
+| 6,000,000 records (1.1 GiB) | off | 1,068 MiB | 1,069 | **2.21 s** |
+
+**A hundred times the history, the same restart** — 5.95 ms against 5.66 ms, which is
+noise. The retention-off rows are the control, they are what every release before this
+one did, and they are what a venue with `-wal-retain` unset still does: the same 100×
+of history costs 18.1 ms against 2.21 s, a factor of 122. Allocation follows the same
+split — 2.1 MB retained against 9.7 MB unretained at the largest row — because what is
+allocated is the tail, and what is read is the whole retained set.
+
+**Two rates, and the difference is the page cache, not the segment count.** The 2.21 s
+row is a single `-benchtime 1x` pass over a file that has just been written and partly
+evicted — 2.07 s/GiB, and the closest thing here to what a restart after a reboot
+costs. Re-reading the same 1,068 MiB warm, best of three, takes **767 ms — 0.74 s/GiB**,
+which is the ~0.65 s/GiB slice 1 measured on a single file.
+
+Segment count is not what separates them, and this was worth measuring rather than
+assuming: the same 1,068 MiB in **1,069 segments of 1 MiB reads in 767 ms and in 9
+segments of 128 MiB reads in 799 ms**. A thousand extra `open`/`close` pairs cost
+nothing next to a gigabyte of I/O, so the argument for the 128 MiB default is the
+rotation cost in the append path below, not the read cost here.
+
+For sizing, use 2 s/GiB cold and 0.75 s/GiB warm: an operator who wants a
+one-second cold restart budget picks about 500 MiB of `-wal-retain`, plus O(book) for
+the snapshot and O(tail) for what is left to apply.
+
+**`-wal-retain` is a budget, not a bound, and `-wal-retain-segments` is the floor under
+it.** The byte budget is checked first and the segment floor second, so the floor wins:
+the retained set never falls below `(-wal-retain-segments + 1) x -wal-segment-bytes`,
+which at the shipped defaults of 4 and 128 MiB is **640 MiB**. Asking for 500 MiB
+against the defaults therefore gets 640 MiB and about 1.3 s, not 1.0 s. Bring the
+segment size down with the budget — 500 MiB against 16 MiB segments has an 80 MiB
+floor — or raise the budget above the floor and let it do the deciding.
+
+### What a rotation costs the append path
+
+`BenchmarkRotationAppendTail`. A rotation is two fsyncs, a link, an unlink and a
+directory fsync, and they land on the goroutine that assigns sequences — the matching
+goroutine when the `Writer` is a `Runner`'s command log. Published rather than called
+negligible, because a 10 ms hiccup every four minutes is a different product decision
+from a 10 ms hiccup every four seconds.
+
+`-benchtime 200000x`, Apple M4, `t.TempDir()` on APFS:
+
+| segments | ns/op | p50 | p99 | p99.9 | rotations | mean rotation | worst rotation |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| off | 2,526 | 1,625 ns | 9,959 ns | 52 µs | 0 | — | — |
+| 128 MiB | 2,423 | 1,625 ns | 9,958 ns | 45 µs | 0 | — | — |
+| 1 MiB | 6,001 | 1,625 ns | 9,959 ns | 76 µs | 58 | **12.4 ms** | **21.2 ms** |
+
+**A rotation costs 12.4 ms on the appending goroutine**, and that is measured on the
+appends that rotated rather than inferred from the difference between two runs. It is
+two fsyncs, a `link`, an `unlink` and a directory fsync on a filesystem where fsync is
+not cheap; a Linux server with a battery-backed controller will be faster and should
+be measured rather than assumed.
+
+Read it against the rotation RATE, which is what the segment size sets. At the 128 MiB
+default and 2,500 msg/s a rotation happens about every four minutes, so 12 ms of
+matching-goroutine pause every four minutes — smaller and rarer than a checkpoint's.
+At 1 MiB it is every two seconds, which is a different product entirely: the median is
+unmoved, the p99 is unmoved, and the mean per append triples. **Small segments are a
+test fixture, not a configuration.** If a deployment needs both small segments and a
+clean tail, the fix is to pre-create the next segment ahead of need, which changes the
+crash matrix in [LOG-ROTATION.md](LOG-ROTATION.md) §3.3 and is not in this slice.
 
 ### Against the spec targets (§7)
 

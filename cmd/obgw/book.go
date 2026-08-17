@@ -26,6 +26,26 @@ type symbolBook struct {
 	feed       *marketdata.Feed
 	wal        *wal.Writer
 	gate       *gateway.Gateway
+
+	// walFailOnce keeps the halt-and-log for a failed sync to one line rather than
+	// fifty a second, which is what made the old log-and-continue easy to ignore.
+	walFailOnce sync.Once
+	// diskStopped records that this book was put into cancel-only by the stop-water
+	// mark, so crossing back and forth does not flap the venue's state on every
+	// checkpoint tick.
+	//
+	// It is ONE-WAY. Nothing clears it when free space recovers, there is no admin
+	// endpoint that resumes trading, and the only thing that returns the book to
+	// normal is a restart. That is deliberate — a venue oscillating in and out of
+	// cancel-only around a threshold is worse for participants than one that stays
+	// out until a human has looked — and it is stated here and in docs/RUNBOOKS.md
+	// "The disk filled up" because an operator who frees space will otherwise
+	// reasonably expect trading to resume.
+	diskStopped bool
+	// lastRetainSkip is the previous cycle's RetentionResult.Skipped, so the reason a
+	// cycle deleted less than the budget asked for is logged when it CHANGES rather
+	// than every checkpoint tick. Touched only from checkpointLoop's goroutine.
+	lastRetainSkip string
 }
 
 // bookSet is the venue's set of instruments, with the two lookups the gateway needs:

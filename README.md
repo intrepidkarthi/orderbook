@@ -40,8 +40,9 @@ WebAssembly demo that runs the real engine in the browser.
 > had no independent review. Its Go API and its wire protocol have each broken more
 > than once in a single week, and the compatibility promise that now governs them
 > ([docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)) is days old. Known problems are
-> documented rather than fixed — a venue left running becomes progressively harder
-> to restart, because the command log never shrinks and recovery reads all of it.
+> documented rather than fixed — a venue left running with `-wal-retain` unset still
+> becomes progressively harder to restart, because the command log then keeps every
+> byte it has ever written and recovery reads all of it.
 >
 > **If you run this and something goes wrong — lost orders, a wrong book, money —
 > that is yours, not mine.** The MIT licence's "without warranty of any kind" is the
@@ -117,11 +118,14 @@ no library work can close, because they are properties of your deployment.
   checkpoint anywhere, recover, and the book, all three sequence counters, the
   duplicate guard and the conditional-order state match the uninterrupted run. What
   a snapshot bounds is the *replay* and the *parse*, not the read: recovery reads and
-  checksum-verifies the whole log however recent the snapshot, and nothing rotates the
-  file, so restart time still grows with every day a venue stays up — with a constant
-  about 26× smaller than it was, and allocation that no longer grows at all. Measured
-  in [docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md); what was and was
-  not fixed is in [docs/BOUNDED-RECOVERY.md](docs/BOUNDED-RECOVERY.md).
+  checksum-verifies every retained byte however recent the snapshot. What bounds the
+  read is retention — the log rotates into segments and a prefix of them is deleted
+  once a verified snapshot covers it, so restart cost is O(retained log) and the
+  retained size is a byte budget you set. That budget is **not set by default**, and a
+  venue that leaves it unset gets slower to restart every day it stays up. Measured in
+  [docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md); the design and its
+  costs are in [docs/LOG-ROTATION.md](docs/LOG-ROTATION.md) and
+  [docs/BOUNDED-RECOVERY.md](docs/BOUNDED-RECOVERY.md).
 - **An event stream that reconstructs the book.** `Accepted`/`Trade`/`Canceled`/
   `Replaced` replay into an L3 book identical to the engine's, asserted on every
   commit across 23 scenarios covering every order class — including iceberg

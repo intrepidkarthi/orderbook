@@ -566,6 +566,31 @@ command missing from it is not "not yet logged", it is a book the log cannot
 reproduce, which is exactly how a reduced order used to come back at its original
 size and a pulled account used to get its book handed back.
 
+**The log is a set of files, and it is bounded only if you bound it.** `-wal
+/var/lib/obgw/BTC-USD.wal` names a stem; segments are its siblings,
+`BTC-USD.wal.0000000000610422`, the sixteen digits being the first sequence that file
+holds. `-wal-segment-bytes` sets when it rotates (128 MiB), `-wal-retain` is a byte
+budget for the whole set, and `-wal-retain-segments` a floor under it. Once a snapshot
+that has been read back and verified covers a segment entirely, that segment is copied
+to `-wal-archive` if one is set and then deleted, oldest first, never the one being
+written. **`-wal-retain` defaults to zero, meaning keep everything**, so an upgrade
+changes where bytes live and not how many there are; the venue says so on startup.
+Restart cost is O(retained log), which is O(all history) until you set a budget.
+
+Retention has a price and it is not hidden: once it has fired, the log below the
+retention floor is gone, so a venue running it without `-wal-archive` has a recovery
+point objective equal to its newest snapshot. `RUNBOOKS.md` §"A corrupt snapshot"
+carries the procedure that replaces "delete the snapshot and replay from the
+beginning", which stops working the moment the beginning is not there.
+
+**A full disk is defined behaviour rather than undefined.** Below `-wal-min-free`
+(2 GiB) the venue warns and runs retention immediately; below `-wal-min-free-stop`
+(256 MiB) every book goes cancel-only, so new orders are refused with `ReasonHalted`
+and cancels still work — participants can get flat while the largest source of log
+growth stops. A sync that actually fails halts the book, fails `/readyz`, and latches
+until a restart. No new wire message and no new reject reason: cancel-only is a state
+clients already see, and `orderbook_phase` already reports it.
+
 Without `-wal` the gateway runs with no durability at all and says so on startup.
 That is a legitimate configuration for a test harness and an indefensible one for
 anything else.

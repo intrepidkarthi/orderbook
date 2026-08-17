@@ -17,6 +17,7 @@ import (
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
 	"github.com/intrepidkarthi/orderbook/pkg/orderentry"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
+	"github.com/intrepidkarthi/orderbook/pkg/wal"
 )
 
 // venue is what a tape drives — satisfied by both *matching.Runner (the
@@ -513,5 +514,134 @@ func TestDrillD8Refuses_AFollowerOnTheWrongShard(t *testing.T) {
 	}
 	if got == snap.Digest() {
 		t.Error("a follower on the wrong shard index matched the primary — ids are not partitioned after all")
+	}
+}
+
+// TestDrillD9_AFollowerReconnectsAcrossARotation — the primary's log is now a set
+// of segments and older ones get deleted, so "catch a reconnecting follower up from
+// the file" has two new ways to go wrong and both are silent.
+//
+// A catch-up that read only the stem would ship nothing at all once the log had
+// rotated. A catch-up that shipped whatever segments happen to remain would start
+// above the follower's position, and the follower's gap check would kill it with
+// "gap in the feed" — a protocol error raised against the one source that is
+// supposed to be authoritative, every time the primary rotated.
+func TestDrillD9_AFollowerReconnectsAcrossARotation(t *testing.T) {
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "primary.wal")
+	p, err := NewPrimaryWith(matching.DefaultConfig("BTC-USD"), walPath, "127.0.0.1:0",
+		wal.Options{MaxSegmentBytes: 8 << 10})
+	if err != nil {
+		t.Fatalf("NewPrimaryWith: %v", err)
+	}
+	defer p.Close()
+
+	const n = 400
+	runTape(t, p.Runner, 1, n)
+	if info, err := wal.Stat(walPath); err != nil {
+		t.Fatalf("Stat: %v", err)
+	} else if info.Segments < 3 {
+		t.Fatalf("the primary's log is %d segments; this drill is not exercising rotation", info.Segments)
+	}
+
+	// A follower that has applied 100 reconnects. It must be caught up with records,
+	// starting at exactly 101, across every segment boundary in between.
+	const have = 100
+	first, records, gotSnapshot := reconnect(t, p, have)
+	if gotSnapshot {
+		t.Fatalf("a follower inside the retained log was bootstrapped with a snapshot rather than caught up")
+	}
+	if first != have+1 {
+		t.Fatalf("catch-up started at sequence %d, want %d — the follower would report a gap in the feed", first, have+1)
+	}
+	if records != n-have {
+		t.Errorf("catch-up shipped %d records, want %d", records, n-have)
+	}
+}
+
+// TestDrillD9_AFollowerBelowTheFloorIsBootstrapped — retention has deleted the
+// records this follower is asking for. The primary must answer with a snapshot,
+// which is the same answer market data already gives an evicted subscriber, and not
+// with the records it happens to still have.
+func TestDrillD9_AFollowerBelowTheFloorIsBootstrapped(t *testing.T) {
+	dir := t.TempDir()
+	walPath := filepath.Join(dir, "primary.wal")
+	snapPath := filepath.Join(dir, "primary.snap")
+	opts := wal.Options{MaxSegmentBytes: 8 << 10, RetainBytes: 1, MinSegments: -1}
+	p, err := NewPrimaryWith(matching.DefaultConfig("BTC-USD"), walPath, "127.0.0.1:0", opts)
+	if err != nil {
+		t.Fatalf("NewPrimaryWith: %v", err)
+	}
+	defer p.Close()
+
+	const n = 400
+	runTape(t, p.Runner, 1, n)
+	// Checkpoint and retain, exactly as a venue's checkpoint loop does.
+	snap, err := p.Runner.Checkpoint()
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	if err := wal.WriteSnapshot(snapPath, snap); err != nil {
+		t.Fatalf("WriteSnapshot: %v", err)
+	}
+	res, err := wal.Retain(walPath, snapPath, opts)
+	if err != nil {
+		t.Fatalf("Retain: %v", err)
+	}
+	if len(res.Deleted) == 0 {
+		t.Fatalf("retention deleted nothing, so no follower can be below the floor")
+	}
+	if res.Floor <= 2 {
+		t.Fatalf("the floor is at %d; nothing is below it", res.Floor)
+	}
+
+	// A follower at sequence 1 needs record 2, which is gone.
+	_, _, gotSnapshot := reconnect(t, p, 1)
+	if !gotSnapshot {
+		t.Fatalf("a follower below the retention floor (%d) was shipped records instead of a snapshot.\n"+
+			"Those records start above the sequence it asked for, so it would terminate with \"gap in the feed\" —\n"+
+			"a protocol error raised against the primary because the primary deleted the answer.", res.Floor)
+	}
+}
+
+// reconnect speaks the follower's opening handshake by hand and reports what came
+// back: the sequence of the first record, how many records arrived, and whether the
+// primary answered with a snapshot instead.
+func reconnect(t *testing.T, p *Primary, have int64) (first int64, records int, gotSnapshot bool) {
+	t.Helper()
+	conn, err := net.Dial("tcp", p.Addr())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	if err := json.NewEncoder(conn).Encode(hello{Have: have}); err != nil {
+		t.Fatalf("hello: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	dec := json.NewDecoder(conn)
+	for {
+		var fr frame
+		if err := dec.Decode(&fr); err != nil {
+			return first, records, gotSnapshot
+		}
+		if fr.Snapshot != nil {
+			gotSnapshot = true
+			return first, records, gotSnapshot
+		}
+		var e wal.Entry
+		if err := json.Unmarshal(fr.Record, &e); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if records == 0 {
+			first = e.Seq
+		}
+		records++
+		// The catch-up is finished when it has reached the live tail; there is no
+		// framing that says so, so stop at the primary's current sequence.
+		if e.Seq >= p.LogSeq() {
+			return first, records, gotSnapshot
+		}
 	}
 }

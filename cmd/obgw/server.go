@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -65,9 +66,54 @@ type Config struct {
 	WALPath string
 	// SnapshotPath is where periodic checkpoints are written. Recovery APPLIES only
 	// the log tail after the snapshot, and PARSES only that tail — but it still reads
-	// and checksum-verifies the whole file, so this bounds replay work and recovery's
-	// allocation, not restart time. See wal.Recover.
+	// and checksum-verifies every RETAINED byte, so this bounds replay work and
+	// recovery's allocation. What bounds restart TIME is WALRetainBytes, because that
+	// is what bounds how much log there is to read. See wal.Recover.
 	SnapshotPath string
+	// WALSegmentBytes is the size at which the log rotates into a new segment. Zero
+	// takes wal.DefaultMaxSegmentBytes (128 MiB); negative disables rotation.
+	WALSegmentBytes int64
+	// WALRetainBytes is the byte budget for the retained log. Zero — the default —
+	// keeps everything, which is the behaviour every earlier release had, with
+	// better file names. Deleting a venue's journal is not something anybody should
+	// acquire by upgrading.
+	//
+	// It converts directly into restart time: reading and CRC-verifying costs about
+	// 2 s per GiB cold on the hardware docs/BENCHMARKS.md was measured on, so an
+	// operator who wants a one-second cold restart budget picks about 500 MiB, plus
+	// O(book) for the snapshot.
+	//
+	// It is a budget, not a bound, and WALRetainSegments is what puts a floor under
+	// it. The retained set never falls below (WALRetainSegments + 1) x
+	// WALSegmentBytes, which at the defaults of 4 and 128 MiB is 640 MiB — so 500 MiB
+	// here yields 640 MiB and roughly 1.3 s unless WALSegmentBytes comes down with it.
+	// A venue that wants a small retained set wants small segments: 500 MiB of budget
+	// against 16 MiB segments has an 80 MiB floor and does what it says.
+	WALRetainBytes int64
+	// WALRetainSegments is how many sealed segments are kept regardless of coverage.
+	// Zero takes wal.DefaultMinSegments.
+	//
+	// It is checked AFTER the byte budget and it wins, so it is the term that decides
+	// the smallest the retained set can be. See WALRetainBytes.
+	WALRetainSegments int
+	// WALArchiveDir, when set, receives a byte-identical copy of every segment
+	// before it is deleted. A venue running retention WITHOUT archival has a
+	// recovery point equal to its newest snapshot and is one corrupt snapshot away
+	// from nothing, which is why this is the first flag to set after WALRetainBytes.
+	WALArchiveDir string
+	// WALMinFree is the low-water mark: below it the venue warns and runs retention
+	// immediately instead of waiting for the next checkpoint. Zero takes 2 GiB.
+	WALMinFree int64
+	// WALMinFreeStop is the stop-water mark: below it every book goes cancel-only.
+	// Zero takes 256 MiB.
+	//
+	// Cancel-only rather than halt, and the reason is the client's rather than the
+	// venue's: a venue that stops accepting EVERYTHING leaves participants holding
+	// positions they cannot withdraw, on a venue whose disk is about to fill.
+	// Cancel-only lets them get flat and removes the largest source of log growth.
+	// It does not stop the log growing, because a cancel is a record too, which is
+	// why the halt on a failed sync exists below it and is not optional.
+	WALMinFreeStop int64
 	// CheckpointEvery bounds how much log a restart must replay. Zero disables
 	// checkpointing, which is legal but means replay grows without limit.
 	CheckpointEvery time.Duration
@@ -141,6 +187,26 @@ func (c *Config) applyDefaults() {
 	if c.ExpireEvery <= 0 {
 		c.ExpireEvery = time.Second
 	}
+	if c.WALMinFree == 0 {
+		c.WALMinFree = 2 << 30
+	}
+	if c.WALMinFreeStop == 0 {
+		// Far more than a clean shutdown needs — flush a buffer, fsync a segment,
+		// write a snapshot, fsync a directory — and chosen to be obviously sufficient
+		// rather than tuned. What the rule is about is that the number is not zero and
+		// is not the same as the threshold at which writes actually start failing.
+		c.WALMinFreeStop = 256 << 20
+	}
+}
+
+// walOptions is the segment-set policy every book's Writer is opened with.
+func (c *Config) walOptions() wal.Options {
+	return wal.Options{
+		MaxSegmentBytes: c.WALSegmentBytes,
+		RetainBytes:     c.WALRetainBytes,
+		MinSegments:     c.WALRetainSegments,
+		ArchiveDir:      c.WALArchiveDir,
+	}
 }
 
 // Server is an order-entry gateway over one or more instruments.
@@ -186,6 +252,17 @@ type Server struct {
 	wg       sync.WaitGroup
 	quit     chan struct{}
 	closeOne sync.Once
+
+	// walFailed is set when any book's log stops being writable. It fails readiness
+	// venue-wide, because a node that cannot journal one of its books is a node the
+	// orchestrator should take out of rotation rather than one it should keep half
+	// of. walFree is the last free-space sample, exported as a gauge.
+	walFailed atomic.Bool
+	walFree   atomic.Int64
+	// walStopped records that the stop-water mark put the venue into cancel-only. It
+	// is a separate fact from the engine's trading state, which an operator can also
+	// change by hand, and it is readable from any goroutine — Engine.State is not.
+	walStopped atomic.Bool
 
 	// live connections, so shutdown can unblock handlers parked in a read.
 	// Closing the listener stops new accepts but does nothing to established
@@ -264,9 +341,24 @@ func NewServer(cfg Config) (*Server, error) {
 		eng.ShardIndex = shardIndex
 
 		walPath, _ := cfg.paths(symbol)
+		// Refused at startup rather than at the first checkpoint tick. An archive
+		// directory that IS the log directory destroys every segment it reports having
+		// archived, and the moment an operator finds that out should not be the moment
+		// the disk is filling. wal.Retain refuses it again on its own account.
+		if walPath != "" {
+			if err := wal.CheckArchiveDir(cfg.WALArchiveDir, filepath.Dir(walPath)); err != nil {
+				return nil, fmt.Errorf("obgw: %s: %w", symbol, err)
+			}
+		}
 		var (
 			w         *wal.Writer
 			recovered *matching.Engine
+			// recoveredThrough is the log sequence the recovered engine stands at: the
+			// last record folded into it, counting the snapshot and the replayed tail
+			// together. It is what the Runner must be told, because it is what the next
+			// checkpoint stamps and the restart after that replays from. Zero for a
+			// venue with no log, which is also where a fresh one starts.
+			recoveredThrough int64
 		)
 		if walPath != "" {
 			// Recover with NO event sink attached. Replaying the log re-emits every
@@ -277,6 +369,14 @@ func NewServer(cfg Config) (*Server, error) {
 			var rep wal.RecoverReport
 			if recovered, rep, err = wal.RecoverWithReport(eng, snapPath, walPath); err != nil {
 				return nil, fmt.Errorf("obgw: recover %s: %w", symbol, err)
+			}
+			// The larger of the two, not the log's last record alone: after a crash a
+			// checkpoint can be durable while records it covers are still buffered, so
+			// the snapshot is legitimately ahead of the log (rep.SnapshotAhead) and its
+			// position is the one the engine actually holds.
+			recoveredThrough = rep.LogLastSeq
+			if rep.SnapshotSeq > recoveredThrough {
+				recoveredThrough = rep.SnapshotSeq
 			}
 			if n := recovered.OrderCount(); n > 0 {
 				log.Printf("obgw: %s recovered %d resting orders from %s (%d records applied, %d read past)",
@@ -292,9 +392,20 @@ func NewServer(cfg Config) (*Server, error) {
 					"Force a checkpoint to close it.", symbol, rep.SnapshotSeq, rep.LogLastSeq)
 			}
 			if rep.FellBack {
-				log.Printf("obgw: %s log record sequences are not their file ordinals, so recovery re-read the "+
-					"whole log rather than skipping the part the snapshot covers. The recovered book is correct; "+
-					"the restart was slower than it needed to be. See docs/BOUNDED-RECOVERY.md.", symbol)
+				log.Printf("obgw: %s log record sequences are not the ones their segments' declared bases imply, "+
+					"so recovery re-read the whole log rather than skipping the part the snapshot covers. The "+
+					"recovered book is correct; the restart was slower than it needed to be. "+
+					"See docs/BOUNDED-RECOVERY.md and docs/LOG-ROTATION.md.", symbol)
+			}
+			if rep.Floor > 1 {
+				// Once retention has fired, "delete the snapshot and replay from the
+				// beginning" stops being a procedure that works: the beginning is not
+				// there. The floor is legible from ls, and it is said out loud at every
+				// start so an operator reaching for that runbook has already seen it.
+				log.Printf("obgw: %s retained log starts at sequence %d across %d segments (%.1f MiB) — "+
+					"everything below that is deleted or archived, so the snapshot is the only base this log can be "+
+					"joined to. See docs/RUNBOOKS.md \"A corrupt snapshot\".",
+					symbol, rep.Floor, rep.Segments, float64(rep.RetainedBytes)/(1<<20))
 			}
 			// Rebuild the session layer's index over the recovered book. Recovery used
 			// to restore the book and nothing else, which left every recovered order
@@ -310,7 +421,7 @@ func NewServer(cfg Config) (*Server, error) {
 			// Only now do the sinks go on, so live events are published and replayed
 			// history is not.
 			recovered.SetEventSink(sink)
-			if w, err = wal.Open(walPath); err != nil {
+			if w, err = wal.OpenWith(walPath, cfg.walOptions()); err != nil {
 				return nil, fmt.Errorf("obgw: open wal %s: %w", symbol, err)
 			}
 		}
@@ -322,7 +433,7 @@ func NewServer(cfg Config) (*Server, error) {
 		// pointer, so the Runner's `log != nil` check passes and the first command
 		// dereferences nil. This is the standard Go typed-nil trap and it cost a
 		// segfault on the first run with durability disabled.
-		rc := matching.RunnerConfig{Engine: eng, QueueSize: 8192}
+		rc := matching.RunnerConfig{Engine: eng, QueueSize: 8192, LastApplied: recoveredThrough}
 		if w != nil {
 			if cfg.SyncEveryCommand {
 				rc.Log = &syncingLog{w: w}
@@ -333,7 +444,10 @@ func NewServer(cfg Config) (*Server, error) {
 		// recovered is nil without a WAL, in which case NewRunnerFor builds a fresh
 		// engine from the config. With one, the recovered book is what we serve —
 		// building from the bare config here is how the first attempt silently threw
-		// away everything it had just read back from disk.
+		// away everything it had just read back from disk. The book and the log
+		// position travel together for the same reason: handing over the book and
+		// leaving the position at zero is how a checkpoint taken before the first
+		// order of the session came to claim it covered none of it.
 		runner := matching.NewRunnerFor(recovered, rc)
 
 		set.add(&symbolBook{
@@ -538,6 +652,19 @@ func (s *Server) expireLoop() {
 // syncLoop group-commits the log. Syncing per command would put a disk write in
 // the matching path; syncing never would make the log decorative. The interval is
 // the durability window: a crash loses at most this much.
+//
+// A failed sync HALTS the book and fails readiness. It used to log the error and
+// carry on, which is worse than it sounds: a full disk produced a venue that kept
+// accepting orders, kept acknowledging them, kept matching them and stopped
+// journalling, at fifty log lines a second with /readyz still green. Every
+// acknowledgement after the first failed sync was a lie, and the venue was the only
+// party that could have known.
+//
+// The honest limit, stated because it is the kind of thing that gets overclaimed:
+// commands acknowledged inside the 20 ms window that ENDED in the failed sync were
+// acknowledged before they were durable, and their fate is whatever the disk did.
+// That is the existing, documented durability window (-sync-every-command closes
+// it). A full disk does not widen it; it is just the moment it matters.
 func (s *Server) syncLoop() {
 	t := time.NewTicker(20 * time.Millisecond)
 	defer t.Stop()
@@ -551,18 +678,45 @@ func (s *Server) syncLoop() {
 					continue
 				}
 				if err := b.wal.Sync(); err != nil {
-					log.Printf("obgw: %s wal sync: %v", b.symbol, err)
+					s.failDurability(b, err)
 				}
 			}
 		}
 	}
 }
 
-// checkpointLoop bounds how much log a restart has to APPLY, and to parse and hold
-// in memory, by snapshotting on a cadence. It does not bound how much a restart
-// READS, which is the whole file however recent the snapshot — see wal.Recover. The
-// snapshot is taken on the matching goroutine and stamped with the log position it
+// failDurability halts a book whose log can no longer be written, once.
+//
+// The Writer latches the failure, so this is idempotent by construction; the sync
+// once here is about the log line and the halt, not about the state. Halting rather
+// than degrading is the point: the venue stops being able to accept a command it
+// cannot journal, and the orchestrator takes the node out of rotation because
+// readiness fails. Clearing it needs a restart, which is where an operator decides
+// whether the disk is actually fixed.
+func (s *Server) failDurability(b *symbolBook, err error) {
+	s.walFailed.Store(true)
+	b.walFailOnce.Do(func() {
+		log.Printf("obgw: %s WAL SYNC FAILED — halting the book and failing readiness. "+
+			"Every command acknowledged since the last successful sync may not be durable, and no further "+
+			"command will be accepted: %v", b.symbol, err)
+		b.runner.Halt()
+	})
+}
+
+// checkpointLoop is where a restart's cost is decided, in both of its halves.
+//
+// The snapshot bounds how much log a restart has to APPLY, and to parse and hold in
+// memory. It is taken on the matching goroutine and stamped with the log position it
 // is consistent with, so recovery replays only the tail after it.
+//
+// Retention bounds how much a restart READS, and it runs from here too, immediately
+// after the snapshot it is predicated on becomes durable. That sentence is the whole
+// of docs/LOG-ROTATION.md: a snapshot alone leaves the read O(total history), because
+// every byte of the set is still opened and checksum-verified however recent the
+// snapshot is. Deleting a prefix of the SET — the log is a set of segments, not one
+// file — under a predicate that cannot outrun the snapshot is what makes the read
+// O(retained log) instead, which is a number the operator chose with -wal-retain.
+// Unset, which is the default, and it is still O(total history).
 //
 // It does not sync the log before writing the snapshot, so a checkpoint can be
 // durable while records it covers are still in the writer's 20ms group-commit
@@ -582,7 +736,8 @@ func (s *Server) checkpointLoop() {
 			// than tolerated: no invariant spans two books, so there is no venue-wide
 			// point in the command order for them to share (docs/MULTI-SYMBOL.md §4.4).
 			for _, b := range s.books.all() {
-				_, snapPath := s.cfg.paths(b.symbol)
+				walPath, snapPath := s.cfg.paths(b.symbol)
+				s.checkDiskSpace(b, walPath)
 				if snapPath == "" {
 					continue
 				}
@@ -593,8 +748,113 @@ func (s *Server) checkpointLoop() {
 				if err := wal.WriteSnapshot(snapPath, snap); err != nil {
 					log.Printf("obgw: %s checkpoint: %v", b.symbol, err)
 				}
+				// Retention runs whether or not this checkpoint landed, and skipping it
+				// when the write failed was backwards: the write fails on a full disk, which
+				// is precisely when freeing segments is the only automatic thing left that
+				// can help. It is safe because Retain does not trust this write — it re-reads
+				// the snapshot from disk and verifies it, so a failed checkpoint simply
+				// leaves the PREVIOUS snapshot in force and retention deletes only what that
+				// one already covers.
+				s.retain(b, walPath, snapPath)
 			}
 		}
+	}
+}
+
+// retain runs one retention cycle against the snapshot that was just made durable.
+//
+// Immediately AFTER a successful WriteSnapshot, never on the matching goroutine,
+// and it re-reads the snapshot from disk rather than trusting the write it just did:
+// a snapshot that exists and fails its checksum is one recovery refuses, so gating
+// deletion on existence would delete the fallback for a snapshot that cannot be
+// used. WriteSnapshot's temp-fsync-rename-fsync sequence is what guarantees the
+// snapshot is durable before the first unlink, so there is no window in which a
+// segment is gone and the snapshot covering it is not on disk.
+func (s *Server) retain(b *symbolBook, walPath, snapPath string) {
+	if walPath == "" || s.cfg.WALRetainBytes <= 0 {
+		return
+	}
+	res, err := wal.Retain(walPath, snapPath, s.cfg.walOptions())
+	if err != nil {
+		log.Printf("obgw: %s retention: %v", b.symbol, err)
+		return
+	}
+	if len(res.Deleted) > 0 {
+		log.Printf("obgw: %s retention deleted %d segment(s) (%s..%s), archived %d; retained log is now %.1f MiB from sequence %d",
+			b.symbol, len(res.Deleted), res.Deleted[0], res.Deleted[len(res.Deleted)-1],
+			len(res.Archived), float64(res.RetainedBytes)/(1<<20), res.Floor)
+	}
+	// Why a cycle deleted less than the budget asked for, said out loud once per
+	// distinct reason rather than computed and thrown away.
+	//
+	// This is the only place an operator can learn that the set is sitting above
+	// -wal-retain on purpose. The commonest reason is the segment floor: the byte
+	// budget is checked before the -wal-retain-segments floor and the floor wins, so
+	// the retained set can never fall below (floor + 1) x -wal-segment-bytes — 640 MiB
+	// at the defaults — whatever byte number was asked for. Watching a disk fill while
+	// a configured retention deletes nothing, with nothing in the log saying why, is
+	// the shape this avoids.
+	//
+	// Only on change, because Skipped is non-empty on most cycles in a healthy venue
+	// and a line every 30 seconds is a line nobody reads. Unsynchronised because
+	// retention runs only from checkpointLoop's goroutine, whether directly or through
+	// checkDiskSpace.
+	if res.Skipped != "" && res.Skipped != b.lastRetainSkip {
+		log.Printf("obgw: %s retention kept %.1f MiB, above the %.1f MiB budget: %s",
+			b.symbol, float64(res.RetainedBytes)/(1<<20), float64(s.cfg.WALRetainBytes)/(1<<20), res.Skipped)
+	}
+	b.lastRetainSkip = res.Skipped
+}
+
+// checkDiskSpace samples free space on the log's filesystem and acts on the two
+// thresholds. Cheap, once per checkpoint tick, and not on the matching goroutine.
+//
+// Cancel-only at the stop-water mark reuses an existing, defined, client-visible
+// state: orderbook_phase already reads 2 for it, clients already receive
+// ReasonHalted for a refused new order, and the runbook already documents what it
+// means. Inventing a ReasonDiskFull would be a wire change, and "why" belongs in the
+// metric, the log line and the runbook rather than in a byte a trading client is
+// expected to branch on.
+func (s *Server) checkDiskSpace(b *symbolBook, walPath string) {
+	if walPath == "" {
+		return
+	}
+	free, ok := wal.FreeBytes(walPath)
+	if !ok {
+		return // the platform cannot answer; the latched sync failure is the whole guard
+	}
+	s.walFree.Store(free)
+	// What the venue will actually do about it, so the log line and the behaviour
+	// agree. Retention deletes nothing without -wal-retain, which is the default, and
+	// a line that says "running retention now" against that configuration is a venue
+	// telling an operator it is reclaiming space while the space keeps falling.
+	remedy := "running retention now"
+	if s.cfg.WALRetainBytes <= 0 {
+		remedy = "-wal-retain is unset, so nothing will be reclaimed; set it, or free space by hand"
+	}
+	switch {
+	case free < s.cfg.WALMinFreeStop:
+		if !b.diskStopped {
+			b.diskStopped = true
+			s.walStopped.Store(true)
+			log.Printf("obgw: %s DISK NEARLY FULL — %.0f MiB free on %s, below the %.0f MiB stop-water mark. "+
+				"Going CANCEL-ONLY: new orders are refused, cancels and reduces are accepted so participants can "+
+				"get flat. This does NOT clear when space returns; it clears on a restart. %s. "+
+				"Free space or the venue will halt on the first failed sync.",
+				b.symbol, float64(free)/(1<<20), walPath, float64(s.cfg.WALMinFreeStop)/(1<<20), remedy)
+			b.runner.SetCancelOnly()
+		}
+		// And retention runs here too, every tick, not only in the low-water branch.
+		// The switch is ordered by severity, so below the stop-water mark the low-water
+		// case is unreachable — which meant the one automatic mechanism that can free
+		// space was skipped exactly when it was the only one left.
+		_, snapPath := s.cfg.paths(b.symbol)
+		s.retain(b, walPath, snapPath)
+	case free < s.cfg.WALMinFree:
+		log.Printf("obgw: %s disk low — %.0f MiB free on %s, below the %.0f MiB low-water mark; %s",
+			b.symbol, float64(free)/(1<<20), walPath, float64(s.cfg.WALMinFree)/(1<<20), remedy)
+		_, snapPath := s.cfg.paths(b.symbol)
+		s.retain(b, walPath, snapPath)
 	}
 }
 

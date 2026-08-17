@@ -7,15 +7,22 @@
 // replays the log — optionally starting from a snapshot — to reach identical book state, the same recovery contract LMAX (journal +
 // snapshot + replay) and Binance (hourly snapshot + sequential replay) rely on.
 // Snapshotting bounds the REPLAY to O(recent) — only the WAL tail after the
-// snapshot's sequence is applied, at roughly 2µs per record. It does not bound the
-// restart. A restart costs three terms: O(book) to load the snapshot (~174ms at a
-// 100,000-order book), O(total log) to read and checksum-verify every record
-// including the ones the snapshot already covers, and O(tail) to apply what is left
-// (~21ms for 10,000 records). Recovery skips decoding and retaining the covered
-// prefix, which makes its ALLOCATION flat in that prefix, but it still reads and
-// verifies every byte of it — see Recover and walkLog — and nothing here rotates or
-// truncates the file, so the middle term grows for as long as the venue runs. See
-// docs/BENCHMARKS.md and docs/BOUNDED-RECOVERY.md.
+// snapshot's sequence is applied, at roughly 2µs per record. A restart costs three
+// terms: O(book) to load the snapshot (~174ms at a 100,000-order book), O(RETAINED
+// log) to read and checksum-verify every record still on disk including the ones the
+// snapshot already covers, and O(tail) to apply what is left (~21ms for 10,000
+// records). Recovery skips decoding and retaining the covered prefix, which makes its
+// ALLOCATION flat in that prefix, but it still reads and verifies every byte of it —
+// see Recover and walkSegment.
+//
+// The middle term is bounded by RETENTION and by nothing else. A log is a SET of
+// segments (see segment.go); rotation cuts it into files, and Retain deletes a prefix
+// of them once a verified snapshot covers it. Deletion is OFF by default, and a venue
+// that leaves it off still gets slower to restart every day it stays up — about
+// 44 GiB of journal a day at 2,500 messages/s. With a byte budget set, restart time is
+// what the operator chose: reading and verifying costs about 2 s per GiB cold and
+// 0.75 s per GiB warm, whatever the segment size. See
+// docs/BENCHMARKS.md, docs/BOUNDED-RECOVERY.md and docs/LOG-ROTATION.md.
 //
 // Records are length-prefixed, CRC-32C-checksummed JSON, written write-ahead:
 // appended before the engine applies the command, so the log is never missing
@@ -61,6 +68,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
@@ -194,9 +202,102 @@ type Writer struct {
 	seq int64
 	// checksummed is false when appending to a headerless v1 file. Records keep
 	// that file's framing rather than switching mid-file, which would leave a log
-	// no reader could parse. Rotate to get checksums on an old file.
+	// no reader could parse. A framing change is legal at a segment boundary and
+	// only there, so rotating really does get checksums onto an old file.
 	checksummed bool
 	onAppend    func(seq int64, record []byte)
+
+	// The set this writer appends to, and where in it.
+	stem string
+	dir  string
+	// path, base, written and segRecords describe the ACTIVE segment: the newest
+	// member of the set and the only one anything ever writes to.
+	path       string
+	base       int64
+	written    int64 // bytes in the active segment, buffered ones included
+	segRecords int64
+	// legacyStem is true while the active segment IS the stem — a log that has
+	// never rotated. The first rotation migrates it into the set.
+	legacyStem bool
+	opts       Options
+	rotations  int64
+
+	// failed latches a durability failure. A log that cannot be flushed means every
+	// command since the last successful sync is acknowledged and not durable, so
+	// continuing to serve is continuing to lie; and a partially completed flush
+	// leaves bufio.Writer's buffer in an indeterminate relationship to the file, so
+	// appending behind it writes a record into the middle of a torn one. Clearing it
+	// takes a restart, which is where an operator gets to decide whether the disk is
+	// actually fixed.
+	failed error
+
+	// beforeRotateStep, when set, runs before each numbered step of the rotation
+	// protocol and can fail it. Test-only: it is how the crash matrix in
+	// docs/LOG-ROTATION.md §3.3 is exercised without killing a process.
+	beforeRotateStep func(step int) error
+}
+
+// Options configure a Writer's segment set. The zero value is the shipped default:
+// rotate at 128 MiB, keep everything, keep at least four sealed segments, archive
+// nowhere.
+//
+// Rotation is on by default because it changes where bytes live and nothing about
+// what they say, and a venue that does not rotate can never be bounded. DELETION is
+// off by default — RetainBytes zero means keep everything, which is the old
+// behaviour with better file names. Deleting a venue's journal is not a behaviour
+// anybody should acquire by upgrading, and it is the one thing in this package that
+// cannot be undone.
+type Options struct {
+	// MaxSegmentBytes is the size at which the active segment is sealed and a new
+	// one started. Zero takes the default; negative disables rotation entirely.
+	//
+	// A single record may legitimately be up to MaxRecordBytes, so a limit below
+	// that produces an oversized segment rather than an infinite rotation loop.
+	MaxSegmentBytes int64
+	// RetainBytes is the byte budget for the retained set. Zero keeps everything.
+	//
+	// A budget, not a bound. It is the point at which retention stops WANTING to
+	// delete; MinSegments is a separate term that stops it being ABLE to, and it is
+	// checked second, so the floor wins. The smallest set retention will leave is
+	// therefore (MinSegments + 1) * MaxSegmentBytes — the sealed floor plus the active
+	// segment — which at the defaults of 4 and 128 MiB is 640 MiB whatever number is
+	// set here. Sizing a retained set means picking all three together; setting this
+	// alone to something below the floor is silent, and RetentionResult.Skipped is
+	// where a cycle says which term stopped it.
+	RetainBytes int64
+	// MinSegments is how many sealed segments are kept regardless of coverage. Not
+	// a correctness term — the snapshot predicate is — but an operational one: it
+	// keeps recent history on disk for forensics and keeps a reconnecting follower's
+	// catch-up out of the snapshot-bootstrap path in the common case.
+	//
+	// It is also the floor under RetainBytes; see there.
+	MinSegments int
+	// ArchiveDir, when set, receives a byte-identical copy of every segment before
+	// it is deleted. A failure to archive stops retention for that cycle.
+	ArchiveDir string
+}
+
+// DefaultMaxSegmentBytes is 128 MiB: about 610,000 records at 220 bytes, roughly
+// four minutes at 2,500 messages/s and roughly 350 segments a day. Small enough
+// that retention and archival have useful granularity and an archived unit is a
+// manageable object; large enough that a rotation's two fsyncs, link, unlink and
+// directory fsync amortise over minutes rather than seconds.
+const DefaultMaxSegmentBytes int64 = 128 << 20
+
+// DefaultMinSegments is the sealed-segment floor retention will not go below.
+const DefaultMinSegments = 4
+
+func (o Options) withDefaults() Options {
+	if o.MaxSegmentBytes == 0 {
+		o.MaxSegmentBytes = DefaultMaxSegmentBytes
+	}
+	if o.MinSegments == 0 {
+		o.MinSegments = DefaultMinSegments
+	}
+	if o.MinSegments < 0 {
+		o.MinSegments = 0
+	}
+	return o
 }
 
 // SetOnAppend registers fn to be called after every successful append, with the
@@ -231,29 +332,101 @@ func (w *Writer) SetOnAppend(fn func(seq int64, record []byte)) {
 	w.onAppend = fn
 }
 
-// Open opens (creating if needed) a WAL file for appending, recovering the last
-// sequence number so new entries continue monotonically.
+// Open opens (creating if needed) a WAL for appending, recovering the last
+// sequence number so new entries continue monotonically. It takes the default
+// Options; OpenWith is where they are set.
 //
-// A new or empty file gets the header and checksummed records. An existing file
-// keeps whichever framing it already has: appending checksummed records to a
-// headerless log would produce a file that is neither format.
-func Open(path string) (*Writer, error) {
-	checksummed, err := hasHeader(path)
-	if err != nil {
+// path names a set: the newest segment is the one appended to. A path with nothing
+// at it gets a single file in the current format, exactly as it always did, and
+// that file becomes segment 1 of a set the first time it rotates. An existing file
+// keeps whichever framing it already has, because appending checksummed records to
+// a headerless log would produce a file that is neither format.
+func Open(path string) (*Writer, error) { return OpenWith(path, Options{}) }
+
+// OpenWith is Open with the segment set's policy named.
+//
+// It never migrates a legacy file, never deletes anything and never rewrites a
+// record. What it may do that Open did not is SEAL: if the newest segment ends in a
+// partial record, it is left exactly as it is and the next record starts a new
+// segment based at lastSeq+1.
+//
+// That closes the defect docs/BOUNDED-RECOVERY.md §6.1 confirmed by experiment and
+// left open for want of a safe fix. Open used to take O_APPEND and write the next
+// record BEHIND the fragment's bytes; the fragment's length prefix then found enough
+// following bytes to look complete, its CRC failed, and the venue refused to start
+// on the SECOND restart after a crash. §6.1 said the fix was to truncate and that
+// truncating in a recovery path needed its own spec, because a fragment is sometimes
+// the only evidence a command was attempted. Segments give a fix that truncates
+// nothing: leave the fragment, stop writing to that file forever, start a new one.
+func OpenWith(path string, opts Options) (*Writer, error) {
+	opts = opts.withDefaults()
+	var (
+		set  *segmentSet
+		last int64
+		sw   segWalk
+	)
+	// The enumeration and the newest segment's walk happen before anything is
+	// created, so restarting them on a segment that retention removed underneath is
+	// free of consequence.
+	if err := retryWhileVanishing(func() error {
+		var err error
+		if set, err = enumerateSet(path); err != nil {
+			return err
+		}
+		// A rotation that crashed between materialising a segment and linking it into
+		// place leaves a temp behind. It is not in the set — it fails the 16-digit
+		// pattern — so no reader has ever seen it; clearing it here keeps the
+		// directory honest and is the one thing Open does that a reader would not.
+		removeStaleTemps(set)
+		last, sw, err = lastSeq(set)
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	last, err := lastSeq(path)
-	if err != nil {
+	// The one shape a downgrade cannot survive — numbered segments with NOTHING at
+	// the stem — is repaired here, before any of the branches below, because none of
+	// them would. It is the same kind of thing removeStaleTemps does and it is done
+	// for a stronger reason: a stale temp is untidy, and an absent stem is an older
+	// build finding no file at -wal, concluding there is no log, and starting an empty
+	// venue beside every record the set holds.
+	//
+	// It is reachable without a bug in this package. The migration at the first
+	// rotation renames the stem to segment 1 and writes the marker as two steps, and
+	// nothing makes them one: a process killed between them, or a writeMarker that
+	// fails with ENOSPC or EROFS — the disk condition this whole mechanism exists for
+	// — leaves exactly this state. rotateLocked fails the append and halts the engine
+	// when that happens, which is correct and is also why the repair belongs at the
+	// next start rather than in the writer: the process that noticed is on its way
+	// out. Before this, OpenWith's default branch inferred legacyStem from
+	// newest.named, which is false once the rename has happened, so neither Open nor
+	// any later rotation ever wrote the missing marker — confirmed to survive 46
+	// further rotations. TestOpenHealsASetWhoseStemIsMissing.
+	if err := healMissingStem(set, path); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, err
+
+	w := &Writer{
+		stem: path, dir: filepath.Dir(path),
+		seq: last, opts: opts,
 	}
-	w := &Writer{f: f, w: bufio.NewWriter(f), seq: last, checksummed: checksummed}
-	if checksummed {
-		// Only a brand-new file needs the header written; hasHeader reports true for
-		// an empty file precisely so this happens once.
+
+	newest, have := set.newest()
+	switch {
+	case !have && set.marker:
+		// A marker with no segments: a venue owns this path and its segments are gone
+		// or were never written. Records must not go at the stem underneath a marker,
+		// so start a proper segment at 1.
+		return openFreshSegment(w, 1)
+	case !have:
+		// Nothing at this path. A fresh log is a single file in the current format,
+		// which is what every existing deployment, runbook and test expects to find
+		// there — the set materialises around it at the first rotation.
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return nil, err
+		}
+		w.f, w.w = f, bufio.NewWriter(f)
+		w.path, w.base, w.checksummed, w.legacyStem = path, 1, true, true
 		st, err := f.Stat()
 		if err != nil {
 			_ = f.Close()
@@ -265,31 +438,150 @@ func Open(path string) (*Writer, error) {
 				return nil, err
 			}
 		}
+		w.written = int64(len(Magic))
+	case sw.torn:
+		// Rule 8. The fragment stays where it is; this segment never takes another
+		// record. The new segment's base is exactly last+1, which is what makes the
+		// contiguity check treat a sealed torn segment as legal rather than as a gap.
+		base := last + 1
+		if newest.base >= base {
+			// A segment holding a header and nothing but a torn first record. Its base
+			// is already the next sequence, so a new segment cannot be named without
+			// colliding with it. Move the fragment aside — no complete record is in it,
+			// so nothing committed is lost — and start the segment cleanly.
+			base = newest.base
+			if err := setAside(newest.path); err != nil {
+				return nil, err
+			}
+		}
+		return openFreshSegment(w, base)
+	default:
+		f, err := os.OpenFile(newest.path, os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return nil, err
+		}
+		w.f, w.w = f, bufio.NewWriter(f)
+		w.path, w.base = newest.path, newest.base
+		w.checksummed = newest.checksummed()
+		w.legacyStem = !newest.named
+		w.written, w.segRecords = newest.size, sw.records
+		if newest.size == 0 {
+			// An EXISTING zero-byte file. readSegHeader classifies one as the current
+			// format — there is nothing in it to be a v1 log — but that classification
+			// only becomes true once the magic is actually written, and the fresh-path
+			// branch above is not the only way to meet an empty file. `touch`, a
+			// provisioning script, a restored volume, or a venue killed between Open
+			// and its first Sync all leave one.
+			//
+			// Without this, CRC-framed records go in at offset 0 behind no header, and
+			// every reader in this package then classifies the result as a v1 headerless
+			// log: ReadAll returns no entries and a nil error, Recover starts an empty
+			// venue, and the next Open resumes at sequence 0 and rewrites the log from
+			// the start. Silent, total, and the venue cannot tell it happened.
+			// TestOpenWritesTheMagicIntoAnExistingEmptyFile.
+			if _, err := w.w.WriteString(Magic); err != nil {
+				_ = f.Close()
+				return nil, err
+			}
+			w.written = int64(len(Magic))
+		}
 	}
 	return w, nil
 }
 
-// hasHeader reports whether new records in path should carry checksums: true for a
-// missing or empty file (a fresh log) and for one already carrying the header,
-// false for a headerless v1 log.
-func hasHeader(path string) (bool, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return true, nil // a log that does not exist yet is written in the current format
+// openFreshSegment materialises <stem>.<base> and points w at it. It is the same
+// protocol rotation uses, for the same reason: a reader must never meet a segment
+// whose header is missing.
+//
+// If nothing is at the stem it also writes the marker, and that is not tidiness. A
+// numbered segment with an ABSENT stem is the one shape a downgrade cannot survive:
+// an older build finds no file at -wal, concludes there is no log, and starts an
+// empty venue beside everything. The other shapes are all detectable — an old build
+// that appends into a legacy stem alongside a numbered segment produces an overlap,
+// which this build refuses on the next start — so the marker is what turns the silent
+// case into a loud one.
+func openFreshSegment(w *Writer, base int64) (*Writer, error) {
+	if _, err := os.Lstat(w.stem); os.IsNotExist(err) {
+		if err := writeMarker(w.stem); err != nil {
+			return nil, err
 		}
-		return false, err
 	}
-	defer f.Close()
-	buf := make([]byte, len(Magic))
-	n, err := io.ReadFull(f, buf)
-	if err == io.EOF || (err == io.ErrUnexpectedEOF && n == 0) {
-		return true, nil // empty file
+	f, err := w.materialiseSegment(base)
+	if err != nil {
+		return nil, err
 	}
-	if err != nil && err != io.ErrUnexpectedEOF {
-		return false, err
+	w.f, w.w = f, bufio.NewWriter(f)
+	w.path, w.base = segPath(w.stem, base), base
+	w.checksummed, w.legacyStem = true, false
+	w.written, w.segRecords = int64(SegHeaderBytes), 0
+	return w, nil
+}
+
+// setAside renames a file out of the set without destroying it. Used for exactly
+// one thing: a segment that holds a torn first record and no complete one, whose
+// declared base is the sequence the next segment must have. The bytes survive under
+// a name no enumerator will match, so ReadAll still reports the set as it is and the
+// evidence that a command was attempted is still on disk.
+func setAside(path string) error {
+	for i := 0; ; i++ {
+		aside := path + ".torn"
+		if i > 0 {
+			aside = fmt.Sprintf("%s.torn.%d", path, i)
+		}
+		if _, err := os.Lstat(aside); err == nil {
+			continue
+		}
+		return os.Rename(path, aside)
 	}
-	return n == len(Magic) && string(buf) == Magic, nil
+}
+
+// healMissingStem writes the marker when the set holds numbered segments and there
+// is no file at the stem at all.
+//
+// Only that shape. A stem that exists is left exactly as it is, whatever it holds —
+// a marker, or a pre-rotation file still holding records 1..k — because rewriting
+// either would destroy information. A set with no numbered segments is not this
+// shape: there is nothing for an old build to miss.
+func healMissingStem(set *segmentSet, stem string) error {
+	// Only a definite absence acts. Anything else — the stem is there holding a
+	// marker or a pre-rotation file, or the stat itself failed — is left exactly as
+	// it is, because writing over a stem this function cannot read is how a repair
+	// turns into damage. enumerateSet has already put a present stem in the set.
+	if _, err := os.Lstat(stem); !os.IsNotExist(err) {
+		return nil
+	}
+	// With the stem absent, every member of the set came from the directory scan, so
+	// a non-empty set here means numbered segments and no stem. An empty one is a
+	// path with no log at it, which is not this shape and needs no marker.
+	if len(set.segs) == 0 {
+		return nil
+	}
+	return writeMarker(stem)
+}
+
+// removeStaleTemps clears <stem>.<16 digits>.tmp left by a rotation that crashed
+// between writing a segment's header and linking it into place.
+func removeStaleTemps(set *segmentSet) {
+	if set.dir == "" {
+		return
+	}
+	ents, err := os.ReadDir(set.dir)
+	if err != nil {
+		return
+	}
+	stemName := filepath.Base(set.stem)
+	for _, ent := range ents {
+		name := strings.TrimSuffix(ent.Name(), ".tmp")
+		if name == ent.Name() {
+			continue
+		}
+		// A segment's temp, or the marker's. Both are written, fsynced and renamed or
+		// linked into place, so one left behind is the residue of a crash between those
+		// steps and is never anything a reader has seen.
+		if _, ok := segBaseFromName(stemName, name); ok || name == stemName+".marker" {
+			_ = os.Remove(filepath.Join(set.dir, ent.Name()))
+		}
+	}
 }
 
 // Checksummed reports whether records this writer appends carry a CRC. It is false
@@ -303,6 +595,9 @@ func (w *Writer) Checksummed() bool {
 func (w *Writer) append(e Entry) (int64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.failed != nil {
+		return 0, w.failed
+	}
 	w.seq++
 	e.Seq = w.seq
 	b, err := json.Marshal(e)
@@ -314,6 +609,62 @@ func (w *Writer) append(e Entry) (int64, error) {
 		w.seq--
 		return 0, fmt.Errorf("%w: record of %d bytes exceeds the %d-byte maximum", ErrCorrupt, len(b), MaxRecordBytes)
 	}
+	// Rotation is decided HERE and nowhere else: on the appending goroutine, inside
+	// the same critical section that assigns the sequence, before the frame header is
+	// BUILT — not merely before it is written.
+	//
+	// Under w.mu because Sync takes w.mu, flushes the buffer and fsyncs the fd — a
+	// rotation that could land between those two lines would flush buffered bytes to
+	// the old fd and fsync the new one, and the venue would report durable a set of
+	// records that are not. Under one lock that is structurally impossible rather
+	// than carefully avoided, and there is exactly one place where w.f and w.w
+	// change, which is what SetOnAppend's "in log order" guarantee needs.
+	//
+	// Before the header write because append writes the frame header and the payload
+	// as two separate buffered writes. A rotation between them would leave a header
+	// in segment n whose payload is in segment n+1: unreadable by every reader here
+	// and indistinguishable from a torn tail followed by a segment of garbage.
+	//
+	// Before the header is BUILT because a rotation can change the FRAMING. A v1
+	// headerless segment rotates into an OBWAL\x02 one whose records carry CRCs, and
+	// a header computed from the old framing lands four bytes short inside a segment
+	// that declares every record checksummed. The reader takes the record's first
+	// four payload bytes as its checksum, refuses, and the set is unreadable from
+	// that segment onward — permanently, and invisibly until the next restart, since
+	// Open reads only the newest segment. TestRotatingAV1LogKeepsTheWholeSetReadable.
+	//
+	// The frame's own size is therefore measured against the framing of the segment
+	// the record would land in if it did NOT rotate, which is the segment whose
+	// budget the test is about.
+	//
+	// The segRecords term is not decoration. A single record may legitimately be up
+	// to MaxRecordBytes, so a limit set below that must produce one oversized segment
+	// rather than an infinite rotation loop.
+	frame := int64(4)
+	if w.checksummed {
+		frame = 8
+	}
+	if w.opts.MaxSegmentBytes > 0 && w.segRecords > 0 &&
+		w.written+frame+int64(len(b)) > w.opts.MaxSegmentBytes {
+		if err := w.rotateLocked(w.seq); err != nil {
+			// Rule 5: a rotation that fails at any step fails the append. The sequence
+			// rolls back, the record is not written, onAppend does not fire, and the
+			// error reaches Runner.logCommand, which halts the engine. The property a
+			// log shipper depends on is that a sequence handed to onAppend is a
+			// sequence that exists.
+			//
+			// It latches for the same reason a failed Sync does. A rotation that got as
+			// far as linking the new segment into place and then failed leaves a writer
+			// whose active segment is the OLD one, so continuing to append there would
+			// write records carrying sequences the new segment's name already claims —
+			// an overlap, self-inflicted, that the next start would refuse.
+			w.seq--
+			w.failed = err
+			return 0, err
+		}
+	}
+
+	// The frame, from the framing of the segment this record is actually going into.
 	var hdr [8]byte
 	binary.BigEndian.PutUint32(hdr[0:4], uint32(len(b)))
 	n := 4
@@ -327,10 +678,203 @@ func (w *Writer) append(e Entry) (int64, error) {
 	if _, err := w.w.Write(b); err != nil {
 		return 0, err
 	}
+	w.written += int64(n) + int64(len(b))
+	w.segRecords++
 	if w.onAppend != nil {
 		w.onAppend(w.seq, b)
 	}
 	return w.seq, nil
+}
+
+// rotateLocked seals the active segment and makes a new one based at base. Called
+// with w.mu held, from append and from nowhere else.
+//
+// The steps are docs/LOG-ROTATION.md §3.2, and steps 3 to 5 are a link-and-unlink
+// dance where os.Create would do. The reason is the crash matrix: it deletes the
+// state "the segment exists and its header does not" from existence, rather than
+// requiring every reader to have a rule for it. The alternative — create, write the
+// header, and teach recovery that a segment shorter than its header is one it should
+// rewrite — was rejected because it makes a READER repair a file, and a reader that
+// writes is a reader that can turn a diagnosis into damage.
+//
+// link rather than rename because rename overwrites. EEXIST here means something
+// else is writing this set, and the right answer is to fail the append (which halts
+// the engine) rather than to overwrite a file that may hold records.
+func (w *Writer) rotateLocked(base int64) error {
+	if base >= 1e16 {
+		return fmt.Errorf("wal: sequence %d needs more than %d digits, which the segment naming cannot express", base, segDigits)
+	}
+	if err := w.step(1); err != nil {
+		return err
+	}
+	if err := w.w.Flush(); err != nil {
+		return err
+	}
+	if err := w.step(2); err != nil {
+		return err
+	}
+	if err := w.f.Sync(); err != nil {
+		return err
+	}
+
+	// The migration, and it happens here rather than at Open on purpose. A venue's
+	// first rotation is the first moment the stem stops being able to describe the
+	// whole log, so it is the first moment a downgrade could read the stem, find no
+	// segments and start an empty venue beside four hundred million records. Before
+	// that instant the stem IS the log and an old build reads it correctly.
+	if w.legacyStem {
+		if err := os.Rename(w.stem, segPath(w.stem, 1)); err != nil {
+			return err
+		}
+		w.path, w.legacyStem = segPath(w.stem, 1), false
+		if err := writeMarker(w.stem); err != nil {
+			return err
+		}
+	}
+
+	f, err := w.materialiseSegment(base)
+	if err != nil {
+		return err
+	}
+	if err := w.step(7); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := w.f.Close(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	w.f, w.w = f, bufio.NewWriter(f)
+	w.path, w.base = segPath(w.stem, base), base
+	w.checksummed = true
+	w.written, w.segRecords = int64(SegHeaderBytes), 0
+	w.rotations++
+	return nil
+}
+
+// materialiseSegment creates <stem>.<base> with its header already durable, and
+// returns the fd positioned to take the first record.
+//
+// The returned fd is opened on the FINAL path, not the temp the segment was built
+// through, and that is not cosmetic. An *os.File remembers the name it was opened
+// with for the life of the fd, and every write, flush, fsync and close error it
+// produces is a *PathError carrying that name. Returning the temp's fd meant every
+// durability failure on the active segment named <base>.tmp — a file that does not
+// exist, because it was unlinked at rotation time. An operator following
+// docs/RUNBOOKS.md "The disk filled up" greps for the filename in the error and finds
+// nothing; worse, §3.3 teaches that a stray <base>.tmp means a rotation that crashed
+// between materialising a segment and linking it into place, so the message points
+// the diagnosis at a crashed rotation when the condition is a flush failure on a live
+// segment. Observed on a real ENOSPC: "write /Volumes/WALTINY/venue/
+// v.wal.0000000000078054.tmp: no space left on device" while ls showed the segment
+// present at 1,069,056 bytes and no .tmp anywhere.
+//
+// The reopen cannot lose the header: durability belongs to the inode, which the link
+// preserved, and it was fsynced before the link. TestTheActiveSegmentsFdNamesTheFile.
+func (w *Writer) materialiseSegment(base int64) (*os.File, error) {
+	target := segPath(w.stem, base)
+	tmp := target + ".tmp"
+	if err := w.step(3); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	fail := func(err error) (*os.File, error) {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return nil, err
+	}
+	if _, err := f.Write(segHeader(base)); err != nil {
+		return fail(err)
+	}
+	if err := f.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := w.step(4); err != nil {
+		return fail(err)
+	}
+	if err := os.Link(tmp, target); err != nil {
+		return fail(fmt.Errorf("wal: segment %s already exists — another writer owns this set: %w",
+			filepath.Base(target), err))
+	}
+	if err := w.step(5); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := os.Remove(tmp); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := w.step(6); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := syncDir(w.dir); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	// O_APPEND, like every other fd this package writes through, so the write offset
+	// is the end of the file rather than something this function has to keep track of
+	// across a reopen. The new fd is taken before the old one is released: a failure
+	// here fails the rotation, which fails the append and halts the engine, and that
+	// is the right answer for "cannot open a file created two syscalls ago" — but it
+	// must not also cost the caller the fd it already had.
+	named, err := os.OpenFile(target, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		_ = named.Close()
+		return nil, err
+	}
+	return named, nil
+}
+
+// step runs the injected fault hook for one numbered step of the rotation protocol.
+// Nil in every build that is not a test.
+func (w *Writer) step(n int) error {
+	if w.beforeRotateStep == nil {
+		return nil
+	}
+	return w.beforeRotateStep(n)
+}
+
+// writeMarker puts the 18-byte set marker at the stem, durably.
+//
+// The marker is what makes a downgrade loud. Without it an older build pointed at a
+// rotated set finds no file at -wal, concludes there is no log, starts an EMPTY
+// VENUE and begins writing sequence 1 beside segments holding four hundred million
+// records. With it, the old build peeks six bytes, does not find OBWAL\x01, treats
+// the file as a headerless v1 log, reads "OBWA" as a length prefix of 1,329,747,777
+// bytes and refuses from both ReadAll and Open. A loud refusal on a downgrade, where
+// the alternative is a silent empty venue.
+//
+// It is advisory: a set without one is valid, which is what makes the migration
+// crash-safe at every point.
+func writeMarker(stem string) error {
+	tmp := stem + ".marker.tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(segHeader(markerBase)); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, stem)
 }
 
 // AppendSubmit logs a Process(order). Call before submitting so the record
@@ -443,13 +987,47 @@ func (w *Writer) AppendBust(tradeID int64, reason string) (int64, error) {
 
 // Sync flushes buffered records and fsyncs the file — the durability point. Call
 // it before acknowledging the commands since the last Sync (group commit).
+//
+// A failure LATCHES. Every subsequent append and sync returns the same error until
+// the process restarts, and an embedder is expected to halt the book and fail
+// readiness on it rather than log it and carry on.
+//
+// Two reasons, and the second is the sharper one. A log that cannot be flushed means
+// every command since the last successful sync is acknowledged and not durable, so
+// continuing to serve is continuing to lie — which is exactly what a full disk used
+// to produce: fifty log lines a second, /readyz still green, and the write-ahead
+// property silently gone. And a partially completed flush leaves bufio.Writer's
+// buffer in an indeterminate relationship to the file, so appending behind it writes
+// a record into the middle of a torn one. Latching also stops the engine flapping
+// open and closed as space transiently appears; clearing it takes a restart, which
+// is where an operator gets to decide whether the disk is actually fixed.
 func (w *Writer) Sync() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.w.Flush(); err != nil {
-		return err
+	return w.syncLocked()
+}
+
+func (w *Writer) syncLocked() error {
+	if w.failed != nil {
+		return w.failed
 	}
-	return w.f.Sync()
+	if err := w.w.Flush(); err != nil {
+		w.failed = fmt.Errorf("wal: %s is no longer being journalled and this writer will not be used again: %w", w.stem, err)
+		return w.failed
+	}
+	if err := w.f.Sync(); err != nil {
+		w.failed = fmt.Errorf("wal: %s is no longer being journalled and this writer will not be used again: %w", w.stem, err)
+		return w.failed
+	}
+	return nil
+}
+
+// Failed reports the latched durability failure, or nil. An embedder polls it to
+// decide readiness; there is no way to clear it short of a restart.
+func (w *Writer) Failed() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.failed
 }
 
 // Seq returns the last written sequence number.
@@ -459,32 +1037,64 @@ func (w *Writer) Seq() int64 {
 	return w.seq
 }
 
-// Close syncs and closes the WAL file.
-func (w *Writer) Close() error {
-	if err := w.Sync(); err != nil {
-		return err
-	}
-	return w.f.Close()
+// Rotations counts the segments this writer has sealed. It is the number
+// docs/BENCHMARKS.md publishes rotation's cost against, so it is exported rather
+// than inferred from a directory listing.
+func (w *Writer) Rotations() int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.rotations
 }
 
-// ReadAll reads every complete entry from a WAL file, in order, stopping cleanly
-// at a torn tail (a partial record left by a crash mid-write). A missing file
-// yields no entries.
+// ActiveSegment is the path of the segment records are currently written to, and
+// Base is the sequence its first record carries. Both are what a test or an
+// operator-facing tool needs to aim at a specific file.
+func (w *Writer) ActiveSegment() (path string, base int64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.path, w.base
+}
+
+// Close syncs and closes the WAL file. The file descriptor is released even when
+// the sync fails, because leaking it would turn a disk problem into a second one.
+func (w *Writer) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	err := w.syncLocked()
+	if cerr := w.f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// ReadAll reads every complete entry from a WAL, in order, stopping cleanly at a
+// torn tail (a partial record left by a crash mid-write). A missing log yields no
+// entries.
 //
-// It is the whole log, deliberately: an operator reaching for it wants what is on
-// disk, and a dozen callers index the result by ordinal. Recovery and Open take the
-// same walk with a retention boundary (see walkLog), so all three agree exactly on
-// the framing and on every checksum: no reader in this package accepts bytes another
-// would call corrupt on those grounds.
+// path names a SET, not necessarily a file: the stem plus its numbered segments,
+// concatenated in base order into one flat slice. A log that has never rotated is a
+// set of one, so this is the same slice it always was.
+//
+// One qualifier is the price of retention, and it is new: ReadAll returns what is
+// STILL ON DISK. Once retention has deleted a prefix of the set, the first entry's
+// Seq is the retention floor rather than 1, and an operator asking "what happened to
+// order X" may need the archive instead. The floor is legible without tooling — it
+// is the oldest segment's name.
+//
+// It is the whole retained log, deliberately: an operator reaching for it wants what
+// is on disk, and a dozen callers index the result by ordinal. Recovery and Open take
+// the same walk with a retention boundary (see walkSegment), so all three agree
+// exactly on the framing and on every checksum: no reader in this package accepts
+// bytes another would call corrupt on those grounds.
 //
 // They differ in one thing, and only one: each decodes the records it hands back and
 // no more. ReadAll hands back every record, so it decodes every record, which makes
 // it the strictest reader here — the only one that reports a payload that passes its
 // CRC and is not a record, wherever in the file it sits. Recover decodes the tail it
-// applies; Open decodes the record whose sequence it resumes from. walkLog's second
-// paragraph says what that costs and why it was accepted.
+// applies; Open decodes the record whose sequence it resumes from. walkSegment's
+// second paragraph says what that costs and why it was accepted.
 func ReadAll(path string) ([]Entry, error) {
-	w, err := walkLog(path, 0)
+	w, err := walkSet(path, 0)
 	return w.entries, err
 }
 
@@ -493,28 +1103,55 @@ func ReadAll(path string) ([]Entry, error) {
 // lastSeq wants: one number, no slice.
 const retainNothing = int64(math.MaxInt64)
 
-// logWalk is what one pass over a log file learned.
+// logWalk is what one pass over a whole segment set learned.
 type logWalk struct {
-	// entries are the retained records: ordinal after+1 and beyond, in log order.
+	// entries are the retained records: sequence after+1 and beyond, in log order,
+	// concatenated across segments.
 	entries []Entry
-	// records is the ordinal of the last complete, verified record — the number of
-	// records the file holds.
+	// records is the number of complete, verified records the set holds.
 	records int64
 	// skipped counts records that were read and verified but not retained.
 	skipped int
-	// lastSeq is the Seq of the last complete record, 0 for an empty or absent file.
+	// lastSeq is the Seq of the last complete record, 0 for an empty or absent set.
 	lastSeq int64
 	// present distinguishes an empty log from an absent one. A snapshot ahead of a
 	// log that does not exist yet is not a condition worth reporting.
 	present bool
-	// suspect reports that a parsed record's Seq was not its ordinal, i.e. the
-	// property the skip rests on does not hold in this file. The caller decides what
-	// to do about it; walkLog itself never guesses.
+	// suspect reports that a parsed record's Seq was not the sequence its segment's
+	// declared base and its own position imply, i.e. the property the skip rests on
+	// does not hold in this file. The caller decides what to do about it; the walk
+	// itself never guesses.
 	suspect bool
 }
 
-// walkLog reads a log file front to back, verifying every record, and retains only
-// those at ordinal afterSeq+1 and beyond.
+// segWalk is what one pass over ONE segment learned.
+type segWalk struct {
+	// records is the number of complete, verified records in the segment.
+	records int64
+	// lastSeq is the Seq the segment's last complete record should carry, which is
+	// base-1 for a segment holding none.
+	lastSeq int64
+	// skipped counts records read and verified but not retained.
+	skipped int
+	// suspect is this segment's contribution to logWalk.suspect.
+	suspect bool
+	// torn reports bytes after the last complete record: a crash mid-write. Open
+	// uses it to seal the segment rather than append behind the fragment.
+	torn bool
+	// end is the byte offset immediately after the last complete record.
+	end int64
+}
+
+// walkSegment reads one segment front to back, verifying every record, and retains
+// only those whose sequence is past afterSeq.
+//
+// A segment declares where its sequence space starts, so the per-record arithmetic
+// is seq = base + ordinal - 1. For a log that has never rotated the base is 1 and
+// every expression below is character-for-character what it was before segments
+// existed — which is both the backward-compatibility argument and the correctness
+// one. The skip's invariant was never really "ordinal equals sequence"; it was "the
+// file declares where its sequence space starts and its records agree", and a
+// single file declared it by being the only file.
 //
 // Every record is read in full and its CRC checked whether it is retained or not.
 // That is the point of the design and not an oversight: seeking past the covered
@@ -536,14 +1173,21 @@ type logWalk struct {
 // the boundary further past it. That is a decision — docs/BOUNDED-RECOVERY.md §5.2 —
 // and it is why ReadAll still decodes everything.
 //
-// The skip rests on the ordinal of a record being its sequence number — true of
-// every file this package writes, because Writer.append increments seq and writes
-// one record under one mutex. It is a property of these files and not a law, so it
-// is checked rather than trusted: record 1 is parsed, so is every record from
-// ordinal afterSeq onward, and each parsed record must carry Seq equal to its
-// ordinal. A disagreement sets suspect and the caller re-reads the file whole.
+// The skip rests on a record's sequence being the one its segment's declared base
+// and its position imply. That is a property of the files this package writes —
+// Writer.append increments seq and writes one record under one mutex — and not a
+// law, so it is checked rather than trusted: record 1 is parsed and must carry the
+// declared base, every record from the boundary onward is parsed, and each parsed
+// record must carry the sequence the arithmetic predicts. A disagreement sets
+// suspect and the caller re-reads the set whole.
 //
-// A v1 headerless log parses every record regardless. It has no checksum, so
+// The base comes from the header and the name, never from record 1. Deriving it
+// from the data would make the data unable to disagree with itself: the anchor
+// would be deleted in effect while appearing to be present, and a segment whose
+// record 1 was altered, or two writers' records interleaved under O_APPEND, would
+// be accepted without a murmur.
+//
+// A v1 headerless segment parses every record regardless. It has no checksum, so
 // "decodes" is its only integrity signal and the only guard against a misframed
 // walk after a damaged length prefix (see the break below). v1 therefore gets the
 // allocation saving and not the parse saving, and its invariant check is total
@@ -551,29 +1195,35 @@ type logWalk struct {
 //
 // afterSeq of 0 retains everything and behaves exactly as a full parse, record for
 // record and error for error.
-func walkLog(path string, afterSeq int64) (logWalk, error) {
-	var w logWalk
-	f, err := os.Open(path)
+func walkSegment(seg segment, afterSeq int64, out *[]Entry) (segWalk, error) {
+	sw := segWalk{lastSeq: seg.base - 1, end: seg.headerBytes()}
+	f, err := os.Open(seg.path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return w, nil
+			// Retention runs in the same process on the checkpoint cadence, so a read
+			// that enumerated and then opened can lose a segment between the two. It
+			// is never a gap — retention deletes oldest-first and never the active
+			// segment — so the answer is to start the read again rather than to report
+			// a hole that does not exist.
+			return sw, errSegmentVanished
 		}
-		return w, err
+		return sw, err
 	}
 	defer f.Close()
-	w.present = true
-	r := bufio.NewReader(f)
-
-	// Detect the framing. A header means every record carries a CRC; its absence
-	// means a v1 log, which is read without checksums so an upgrade does not lose
-	// the ability to recover — those records simply cannot be verified.
-	checksummed := false
-	if hdr, err := r.Peek(len(Magic)); err == nil && string(hdr) == Magic {
-		if _, err := r.Discard(len(Magic)); err != nil {
-			return w, err
-		}
-		checksummed = true
+	size := seg.size
+	if st, err := f.Stat(); err == nil {
+		size = st.Size()
 	}
+	if hb := seg.headerBytes(); hb > 0 {
+		if _, err := f.Seek(hb, io.SeekStart); err != nil {
+			return sw, err
+		}
+	}
+	r := bufio.NewReader(f)
+	// A header means every record carries a CRC; its absence means a v1 segment,
+	// read without checksums so an upgrade does not lose the ability to recover —
+	// those records simply cannot be verified.
+	checksummed := seg.checksummed()
 
 	// Two payload buffers, swapped after every verified record and grown to the
 	// largest record seen. cur receives the record being read; prev holds the last
@@ -592,6 +1242,7 @@ func walkLog(path string, afterSeq int64) (logWalk, error) {
 	// left once parsing stops.
 	var hdr [8]byte
 	for ordinal := int64(1); ; ordinal++ {
+		seq := seg.base + ordinal - 1
 		if _, err := io.ReadFull(r, hdr[:4]); err != nil {
 			break // clean EOF or torn length prefix — stop at the last complete record
 		}
@@ -599,7 +1250,8 @@ func walkLog(path string, afterSeq int64) (logWalk, error) {
 		// Bound before allocating: this length came off disk and a flipped bit in it
 		// must not turn recovery into a multi-gigabyte allocation.
 		if n == 0 || n > MaxRecordBytes {
-			return w, fmt.Errorf("%w: record %d declares %d bytes (limit %d)", ErrCorrupt, ordinal, n, MaxRecordBytes)
+			return sw, fmt.Errorf("%w: %s record %d (sequence %d) declares %d bytes (limit %d)",
+				ErrCorrupt, seg.name, ordinal, seq, n, MaxRecordBytes)
 		}
 
 		var want uint32
@@ -621,19 +1273,21 @@ func walkLog(path string, afterSeq int64) (logWalk, error) {
 			if got := crc32.Checksum(buf, crcTable); got != want {
 				// Complete on disk and altered since it was written. Stopping quietly
 				// here would look identical to a clean end of log while discarding
-				// everything after it. The record is named by its ordinal in the file,
-				// counting the ones this walk skipped: RUNBOOKS tells an operator to
-				// recover the records before the corrupt one, so a number that counted
-				// only retained records would send them to the wrong place.
-				return w, fmt.Errorf("%w: record %d checksum %08x, want %08x", ErrCorrupt, ordinal, got, want)
+				// everything after it. The record is named by its segment, its ordinal
+				// WITHIN that segment counting the ones this walk skipped, and the
+				// sequence the two imply: RUNBOOKS tells an operator to recover the
+				// records before the corrupt one, and across a set of segments a bare
+				// per-file ordinal is ambiguous while a sequence is not.
+				return sw, fmt.Errorf("%w: %s record %d (sequence %d) checksum %08x, want %08x",
+					ErrCorrupt, seg.name, ordinal, seq, got, want)
 			}
 		}
 
-		// Parse record 1 (the anchor: a segment that starts at some sequence other
-		// than 1 must be caught before any record is discarded), everything from the
-		// boundary onward, and — on a v1 log — everything.
-		parse := afterSeq == 0 || !checksummed || ordinal == 1 || ordinal >= afterSeq
-		retain := ordinal > afterSeq
+		// Parse record 1 (the anchor: a segment whose first record does not carry the
+		// base it declares must be caught before any record is discarded), everything
+		// from the boundary onward, and — on a v1 segment — everything.
+		parse := afterSeq == 0 || !checksummed || ordinal == 1 || seq >= afterSeq
+		retain := seq > afterSeq
 		if parse {
 			var e Entry
 			if err := json.Unmarshal(buf, &e); err != nil {
@@ -641,63 +1295,158 @@ func walkLog(path string, afterSeq int64) (logWalk, error) {
 					// The checksum passed, so these are the bytes that were written and
 					// they are not a record. That is a bug or a format mismatch, not
 					// media corruption, and it must not be swallowed.
-					return w, fmt.Errorf("%w: record %d passed its checksum but does not decode: %v", ErrCorrupt, ordinal, err)
+					return sw, fmt.Errorf("%w: %s record %d (sequence %d) passed its checksum but does not decode: %v",
+						ErrCorrupt, seg.name, ordinal, seq, err)
 				}
 				break // v1 log: unverifiable, so an undecodable record is treated as the tail
 			}
-			lastParsed, w.lastSeq = ordinal, e.Seq
-			if e.Seq != ordinal {
-				w.suspect = true
+			lastParsed, sw.lastSeq = ordinal, e.Seq
+			if e.Seq != seq {
+				sw.suspect = true
 			}
 			if retain {
-				w.entries = append(w.entries, e)
+				*out = append(*out, e)
 			}
 		}
 		if !retain {
-			w.skipped++
+			sw.skipped++
 		}
-		w.records = ordinal
+		sw.records = ordinal
+		sw.end += int64(len(hdr[:4])) + int64(n)
+		if checksummed {
+			sw.end += 4
+		}
 		cur, prev = prev, buf
 	}
 
 	// The last record of a skipping walk is usually parsed already — the boundary
-	// rule reaches the end of the file. It is not when the log stops short of the
-	// boundary, which is exactly the case worth reporting, so parse the retained
-	// tail payload for its sequence. A v1 log never reaches here: it parses every
+	// rule reaches the end of the segment. It is not when the segment stops short of
+	// the boundary, which is exactly the case worth reporting, so parse the retained
+	// tail payload for its sequence. A v1 segment never reaches here: it parses every
 	// record, so lastParsed is always the last one.
-	if checksummed && w.records > 0 && lastParsed != w.records {
+	if checksummed && sw.records > 0 && lastParsed != sw.records {
 		var e Entry
+		last := seg.base + sw.records - 1
 		if err := json.Unmarshal(prev, &e); err != nil {
-			return w, fmt.Errorf("%w: record %d passed its checksum but does not decode: %v", ErrCorrupt, w.records, err)
+			return sw, fmt.Errorf("%w: %s record %d (sequence %d) passed its checksum but does not decode: %v",
+				ErrCorrupt, seg.name, sw.records, last, err)
 		}
-		w.lastSeq = e.Seq
-		if e.Seq != w.records {
+		sw.lastSeq = e.Seq
+		if e.Seq != last {
+			sw.suspect = true
+		}
+	}
+	sw.torn = sw.end < size
+	return sw, nil
+}
+
+// walkSet reads a whole segment set in base order, verifying every record of every
+// retained segment, and retains only those past afterSeq.
+//
+// The set is enumerated and structurally validated before a record is read, so a
+// missing or renamed segment is reported as what it is rather than as a corrupt
+// record four hundred thousand records later. Contiguity is the one check that
+// cannot be made from the directory alone, because base(S₍ᵢ₊₁₎) has to be compared
+// against last(Sᵢ); it is made as the walk crosses each boundary, which is still
+// before the following segment's records reach the engine.
+func walkSet(stem string, afterSeq int64) (logWalk, error) {
+	var w logWalk
+	err := retryWhileVanishing(func() error {
+		set, err := enumerateSet(stem)
+		if err != nil {
+			w = logWalk{present: set != nil && set.present}
+			return err
+		}
+		w, err = walkSetIn(set, afterSeq)
+		return err
+	})
+	return w, err
+}
+
+// errSegmentVanished is retention deleting a segment under a reader's feet. It never
+// escapes this package: every entry point that can meet it restarts its read.
+var errSegmentVanished = errors.New("wal: segment vanished mid-read")
+
+// retryWhileVanishing runs a read that enumerates the set, restarting it if
+// retention deleted something while it ran.
+//
+// This is how term (e) of the retention predicate is satisfied — by making the
+// READER restartable rather than by making retention wait. No lease, no refcount, no
+// lock, and nothing that could let a stuck consumer stop a venue reclaiming disk.
+// Retention deletes oldest-first, one prefix per checkpoint interval, and never the
+// active segment, so a retry always converges; the bound exists so that a genuine
+// filesystem problem surfaces as an error rather than as a spin.
+func retryWhileVanishing(read func() error) error {
+	var err error
+	for attempt := 0; attempt < 8; attempt++ {
+		if err = read(); !errors.Is(err, errSegmentVanished) {
+			return err
+		}
+	}
+	return fmt.Errorf("wal: segments kept disappearing while reading the set: %w", err)
+}
+
+// walkSetIn is walkSet over an already-enumerated set, so a caller that had to
+// enumerate first — Recover, which validates the set against its snapshot before
+// reading anything — does not pay for a second directory read, and so the fallback
+// re-reads the same files the first pass saw.
+func walkSetIn(set *segmentSet, afterSeq int64) (logWalk, error) {
+	w := logWalk{present: set.present}
+	for i, seg := range set.segs {
+		sw, err := walkSegment(seg, afterSeq, &w.entries)
+		w.records += sw.records
+		w.skipped += sw.skipped
+		if sw.suspect {
 			w.suspect = true
+		}
+		w.lastSeq = sw.lastSeq
+		if err != nil {
+			return w, err
+		}
+		if i+1 < len(set.segs) {
+			if err := contiguityError(seg, sw.lastSeq, set.segs[i+1]); err != nil {
+				return w, err
+			}
 		}
 	}
 	return w, nil
 }
 
-// lastSeq returns the sequence of the last complete record, which is what Open
-// resumes from. It walks and verifies every frame and decodes record 1 and the last
-// record, so an obgw restart no longer pays a second full parse of the log on top of
-// Recover's.
+// lastSeq returns the sequence of the last complete record of a set, which is what
+// Open resumes from. Only the NEWEST segment is read: it walks and verifies every
+// frame of that segment and decodes its first and last records, so an obgw restart
+// no longer pays a second full parse of the log on top of Recover's.
 //
-// That makes Open the most permissive reader in this package, and it has to be.
-// Recovery's strictness moves with the snapshot boundary; Open does not know where
-// the boundary is. Were Open any stricter than the laxest Recover, a venue could
-// recover its book successfully and then fail to open the very log it recovered from
-// — an outage manufactured by two readers of the same bytes disagreeing. So Open
-// checks what Open depends on, all of it: every frame, every checksum, and the
-// sequence of the record it is about to append behind. A payload that passes its CRC
-// and does not decode in the middle of the file is not one of those things, and
-// ReadAll is where a caller goes to find it.
-func lastSeq(path string) (int64, error) {
-	w, err := walkLog(path, retainNothing)
-	if err != nil {
-		return 0, err
+// Reading only the newest is the decision docs/BOUNDED-RECOVERY.md §9.1 left open.
+// It argued that Open must be the most permissive reader here — recovery's
+// strictness moves with the snapshot boundary and Open does not know where the
+// boundary is, so an Open stricter than the laxest Recover could turn a successful
+// recovery into a failed start, an outage manufactured by two readers of the same
+// bytes disagreeing. It did not say whether Open must re-verify SEALED segments. It
+// must not: cmd/obgw calls Recover and then Open on the same path, Recover has just
+// read and verified every retained byte, and a second full pass would double the
+// restart cost rotation exists to bound in order to re-check something checked
+// seconds ago.
+//
+// So what Open checks of the SEALED segments is only what their directory entries can
+// answer: their names, their headers, their declared bases, and that no two of them
+// claim the same base. NOT contiguity — that needs the previous segment's last record
+// sequence, which only comes from reading its records, which is exactly what this does
+// not do. Open therefore succeeds on a set with a missing middle segment, an overlap,
+// or a CRC-damaged sealed segment, all of which Recover and ReadAll refuse. Open is
+// not an integrity check and must not be used as one: anything that opens a set it did
+// not first Recover or ReadAll is extending a set nothing has checked.
+func lastSeq(set *segmentSet) (int64, segWalk, error) {
+	seg, ok := set.newest()
+	if !ok {
+		return 0, segWalk{}, nil
 	}
-	return w.lastSeq, nil
+	var discard []Entry
+	sw, err := walkSegment(seg, retainNothing, &discard)
+	if err != nil {
+		return 0, sw, err
+	}
+	return sw.lastSeq, sw, nil
 }
 
 // Restore replays every entry into an engine (in log order), reproducing the
@@ -904,6 +1653,18 @@ type RecoverReport struct {
 	// are slower than before, not faster; it is surfaced so that is visible rather
 	// than mysterious.
 	FellBack bool
+	// Segments counts the members of the set that were read. One means a log that
+	// has never rotated.
+	Segments int
+	// RetainedBytes is the size of the set on disk — what this restart had to read,
+	// and the number -wal-retain budgets. Restart time is O(this), not O(total
+	// history), which is the whole point of rotation plus retention.
+	RetainedBytes int64
+	// Floor is the base sequence of the oldest retained segment, 1 until retention
+	// has deleted something. It is the number an operator needs before deleting a
+	// snapshot: below the floor the log cannot be replayed from the beginning,
+	// because the beginning is not there.
+	Floor int64
 	// SnapshotAhead reports a snapshot whose WALSeq is beyond the log's last record.
 	//
 	// Recovery from that pair is still correct — the missing records' effects are
@@ -937,11 +1698,19 @@ type RecoverReport struct {
 // starts a venue that the previous full-parse recovery refused to start. walkLog
 // gives the reasoning; docs/BOUNDED-RECOVERY.md §5.2 records it as a decision.
 //
-// Restart time is reduced and not bounded. Reading and verifying is still O(total
-// log), and nothing here rotates, truncates or archives the file, so a venue that
-// runs continuously still gets slower to restart every day it stays up. Only
-// rotation removes that; see docs/BOUNDED-RECOVERY.md and
-// docs/PRODUCTION-READINESS.md, "Running continuously".
+// Restart time is O(RETAINED log), which is a number the operator chose — and it is
+// only bounded if they chose one. Reading and verifying every retained byte is still
+// linear in what is on disk; rotation cuts the log into segments and Retain deletes a
+// prefix of them once a verified snapshot covers it, but deletion is off by default.
+// Without it, a venue that runs continuously still gets slower to restart every day
+// it stays up. See docs/LOG-ROTATION.md and docs/PRODUCTION-READINESS.md, "Running
+// continuously".
+//
+// walPath names a SET: the stem plus its numbered segments. Recovery enumerates them
+// in base order and refuses to start on a set with a hole in it — a missing middle
+// segment, an overlap, or a snapshot that sits below the oldest retained sequence —
+// because every one of those recovers into a plausible book that is missing commands,
+// with every remaining record verifying perfectly.
 func Recover(config matching.Config, snapPath, walPath string) (*matching.Engine, error) {
 	eng, _, err := RecoverWithReport(config, snapPath, walPath)
 	return eng, err
@@ -964,19 +1733,41 @@ func RecoverWithReport(config matching.Config, snapPath, walPath string) (*match
 	}
 	rep.SnapshotSeq = after
 
-	walk, err := walkLog(walPath, after)
-	if err != nil {
-		return nil, rep, err
-	}
-	if after > 0 && walk.suspect {
-		// A parsed record's sequence was not its ordinal, so the records this walk
-		// already discarded may be exactly the ones that needed applying. Re-read the
-		// file from byte zero rather than guess an offset: continuing forward would
-		// turn a detected anomaly into undetected data loss.
-		rep.FellBack = true
-		if walk, err = walkLog(walPath, 0); err != nil {
-			return nil, rep, err
+	// The set is enumerated and validated against the snapshot before a record is
+	// read. The floor check is the tripwire every retention bug trips: if the oldest
+	// retained sequence is more than one past the snapshot's WALSeq, the commands in
+	// between are in no file this venue can read, and recovering anyway would produce
+	// a plausible book that skipped them with no error anywhere.
+	var walk logWalk
+	if err := retryWhileVanishing(func() error {
+		set, err := enumerateSet(walPath)
+		if err != nil {
+			return err
 		}
+		rep.Segments = len(set.segs)
+		rep.RetainedBytes = set.bytes()
+		rep.Floor = set.floor()
+		rep.FellBack = false
+		if err := set.validateAgainstSnapshot(after, snap != nil); err != nil {
+			return err
+		}
+		if walk, err = walkSetIn(set, after); err != nil {
+			return err
+		}
+		if after > 0 && walk.suspect {
+			// A parsed record's sequence was not the one its segment's declared base
+			// implies, so the records this walk already discarded may be exactly the
+			// ones that needed applying. Re-read from byte zero rather than guess an
+			// offset: continuing forward would turn a detected anomaly into undetected
+			// data loss.
+			rep.FellBack = true
+			if walk, err = walkSetIn(set, 0); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, rep, err
 	}
 	rep.Skipped = walk.skipped
 	rep.LogLastSeq = walk.lastSeq

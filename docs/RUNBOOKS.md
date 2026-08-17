@@ -25,8 +25,15 @@ Two rules that apply to every entry below:
 - **The book is the asset.** Almost every wrong action here destroys or diverges it.
   When in doubt, stop the venue rather than let it trade on state you cannot vouch for
   — a halted market is a bad day, a market trading against a wrong book is a bad year.
-- **Never edit the log or the snapshot by hand.** Both are checksummed. A file you have
-  repaired is a file whose checksum you have recomputed over bytes you invented.
+- **Never edit the log or the snapshot by hand, and never rename, move or delete a
+  segment.** Both are checksummed. A file you have repaired is a file whose checksum
+  you have recomputed over bytes you invented. The log is a SET — a stem plus
+  `<stem>.<16 digits>` siblings, the digits being the first sequence that file holds —
+  and each name is cross-checked against a header inside the file, so a renamed
+  segment refuses to start the venue and a deleted one refuses just as loudly. That is
+  the design working. Copying a segment INTO the set from an archive is the one
+  directory operation that is safe, because an archived segment is byte-identical to
+  the segment that was deleted.
 
 ---
 
@@ -80,12 +87,15 @@ means the bytes changed after they were written — media, not a crash. Recovery
 to start the venue rather than truncating, because truncating silently discards every
 record after the bad one and produces a book that is plausible and wrong.
 
-The `record N` in that message is the record's **ordinal in the file**, counting from
-the first record, including the ones a snapshot already covers. It is not a count of
-records recovery kept. This matters because recovery no longer decodes the covered
-prefix — it still reads and checksums every byte of it, so a record damaged long
-behind the snapshot is still caught and still refuses to start, and step 3 below
-still lands on the right place in the file.
+The message names three things: the **segment**, the record's **ordinal within that
+segment**, and the **sequence** the two imply —
+`wal: corrupt record: BTC-USD.wal.0000000000610422 record 37 (sequence 610458)
+checksum 1fe167eb, want d1517f35`. The ordinal counts from that segment's first
+record, including the ones a snapshot already covers; it is not a count of records
+recovery kept. Use the SEQUENCE for step 3: across a set of segments a bare per-file
+ordinal is ambiguous, and the sequence is not. This matters because recovery no longer
+decodes the covered prefix — it still reads and checksums every retained byte, so a
+record damaged long behind the snapshot is still caught and still refuses to start.
 
 One narrower case does not refuse, and it is worth knowing before you go looking for
 it. A record whose bytes are intact and whose *content* is not a valid record — a
@@ -109,7 +119,112 @@ still reports it, by the same file ordinal. See
    reconstruction.
 
 **What makes it worse.** Deleting the record and restarting. The venue will come up and
-you will not know what it is missing.
+you will not know what it is missing. **Renaming, moving or deleting a segment file is
+the same mistake with a bigger blast radius**: a segment's name declares which
+sequences it holds, the venue cross-checks that name against the header inside it, and
+a set with a hole in it is refused rather than recovered. Do not tidy that directory.
+
+**One message that looks like media damage and is not.** `wal: corrupt record: ...
+record 1 declares 1329747777 bytes (limit 8388608)` from a build older than v0.21.0
+means a DOWNGRADE, not a disk. Those four bytes are the ASCII `OBWA` of a segment-set
+marker being read as a length prefix by a build that predates the format. Check the
+binary's version before you check SMART data.
+
+---
+
+## A gap between the snapshot and the log
+
+**Signal.** The venue refuses to start:
+
+```
+wal: log gap: snapshot covers through sequence 412000 but the oldest retained
+segment BTC-USD.wal.0000000000610422 starts at 610422 — sequences 412001..610421
+are in no file this venue can read.
+```
+
+**What the code has done.** It has refused to recover a book that would be missing
+those commands. The remaining records all verify perfectly; nothing downstream could
+have told you they were incomplete. This check exists so that "retention deleted
+something it should not have" is an outage with two numbers in it rather than a
+plausible, wrong book.
+
+**What to do.**
+
+1. **Read the first number in the message.** If it is `0`, stop here — this is not a
+   retention fault and steps 2 to 5 are the wrong procedure. `0` means the snapshot
+   carries no log position at all, which is a different thing from a snapshot that is
+   too old, and the book in it is very likely complete. See "A snapshot stamped
+   sequence 0" below.
+2. `ls` the segment set. The oldest segment's name is the retention floor, in decimal,
+   with no tooling required. That number is most of the diagnosis.
+3. If the archive directory has the missing segments, copy them back into the set —
+   they are byte-identical to what was deleted — and restart.
+4. If the snapshot is older than the floor because a NEWER snapshot exists and was not
+   used, point `-snapshot` at it. A snapshot whose `WALSeq` is at or past `floor - 1`
+   joins cleanly.
+5. If neither, this node cannot reconstruct the book. Fail over to a node that has the
+   state, or restore both the snapshot and the segments from a backup taken together.
+
+**What makes it worse.** Deleting the remaining segments so the venue starts on the
+snapshot alone. It will start, and it will be missing every command after the
+snapshot's sequence, and the venue will not say so.
+
+---
+
+## A snapshot stamped sequence 0
+
+**Signal.** The gap message above, with `0` as the sequence the snapshot covers:
+
+```
+wal: log gap: snapshot covers through sequence 0 but the oldest retained
+segment BTC-USD.wal.0000000000000385 starts at 385 — sequences 1..384 are in
+no file this venue can read.
+```
+
+**What the code has done.** Exactly what it says, and the refusal is arithmetically
+correct — but the premise is wrong. A `WALSeq` of `0` means "this snapshot covers
+nothing, replay the log from the beginning", and the beginning has been retained away.
+The snapshot itself is almost certainly a complete, verified book.
+
+**Which builds produce it.** A venue restarted, and then checkpointed before it applied
+a single command — a restart into a quiet market, out of hours, before the open, or a
+maintenance window with the flow pointed elsewhere. The Runner was handed a recovered
+engine and not the position that engine stood at, so the first checkpoint stamped `0`
+over a good snapshot. Fixed: `matching.RunnerConfig.LastApplied` now carries the
+position across, and `cmd/obgw` seeds it from the recovery report. A snapshot written
+by an earlier build can still be sitting on disk.
+
+**What to do.**
+
+1. Confirm the shape: the snapshot is recent and the number is `0`, not merely low.
+   `0` is not a sequence any healthy running venue checkpoints at after its first
+   command.
+2. Upgrade to a build that carries the position, so the next checkpoint stamps the
+   snapshot correctly and the condition cannot recur.
+3. To start now: restore the archived segments from the floor down to 1 into the set,
+   **and move the snapshot aside**, so the venue replays the whole log into a fresh
+   engine. Expect a slow start proportional to the whole restored log.
+
+   **Do not restore the segments and leave the snapshot in place.** Replaying a log
+   from sequence 1 onto a snapshot that already contains it double-books every order
+   in it, and the duplicate-client-order-id guard does not stop that. The guard is a
+   bounded ring — 4,096 keys in `cmd/obgw` — so on any log longer than the ring, each
+   key is evicted before the replay reaches it again: 4,097 orders recover as 8,194,
+   and 20,000 recover as 40,000. It is not a partial failure at the margin, it is the
+   whole book. Orders carrying no client order id are never deduped at all and double
+   at any size. This section only applies once retention has fired, which needs about
+   3 million records at the shipped defaults, so the log is always orders of magnitude
+   past the ring. Dropping the snapshot costs a slow start; keeping it costs a book
+   that is wrong in a way nothing downstream detects.
+4. If the segments below the floor are gone and unarchived — the default, since
+   `-wal-archive` is off unless set — the honest options are a fail-over to a node with
+   the state, or accepting the snapshot's book and the loss of everything after it.
+   Neither is good, which is the argument for setting `-wal-archive` alongside
+   `-wal-retain`.
+
+**What makes it worse.** Hand-editing the snapshot's `WALSeq`. It is inside the
+checksum, so the file stops verifying and recovery refuses it outright — turning a
+recoverable venue into "A corrupt snapshot".
 
 ---
 
@@ -124,18 +239,95 @@ media corruption, and it is refused for the same reason a corrupt log record is,
 more so: the snapshot is the base every log record after it is applied to, so starting
 from a wrong one produces a book that nothing downstream can detect as wrong.
 
-**What to do.** Delete the snapshot and restart. Recovery falls back to replaying the
-log from the beginning, which is slower — a 100,000-order replay takes roughly 174 ms,
-and a log that has run since the last checkpoint takes proportionally longer — but it
-is exact. Then investigate the storage as above.
+**What to do. Read the retention floor first — the procedure depends on it.**
 
-**What makes it worse.** Keeping the snapshot because replay is slow. Replay time is
-the cheapest thing you will spend today.
+```
+ls -1 /var/lib/obgw/BTC-USD.wal.*      # the oldest name's 16 digits are the floor
+```
+
+1. **If the floor is 1** — a venue whose retention has never fired, which is every
+   venue running the default configuration — the old procedure is still exactly right.
+   Delete the snapshot and restart. Recovery replays the log from the beginning, which
+   is slower — a 100,000-order replay takes roughly 174 ms, and a log that has run
+   since the last checkpoint takes proportionally longer — but it is exact.
+2. **If the floor is above 1**, DO NOT delete the snapshot. Retention has deleted the
+   log below that sequence, so the snapshot is the only base the retained log can be
+   joined to, and deleting it destroys the book. Restore the archived snapshot and the
+   archived segments from the floor onward, or fail over to a node that has the state.
+3. If neither exists, the honest answer is that this venue's recovery point is its
+   last good snapshot and there is not one. That is a statement about the backup
+   policy, not a procedure — a venue running `-wal-retain` without `-wal-archive` has
+   a recovery point objective equal to its newest snapshot, and this is what that
+   costs.
+
+Then investigate the storage as above.
+
+**What makes it worse.** Keeping the snapshot because replay is slow, on a venue whose
+floor is 1 — replay time is the cheapest thing you will spend today. Or deleting it on
+a venue whose floor is not, which is the most expensive.
 
 > Snapshots written by a build from before the checksum existed (v0.16.0 and earlier)
 > are read without one, so an upgraded venue cannot verify its existing snapshot until
 > the next checkpoint rewrites it. If you want that guarantee immediately, force a
 > checkpoint after upgrading.
+
+---
+
+## The disk filled up
+
+**Signal.** `/readyz` returns 503 with `not ready: the write-ahead log cannot be
+written`, and the log holds one line: `WAL SYNC FAILED — halting the book and failing
+readiness`. Earlier, and more usefully: `disk low` and then `DISK NEARLY FULL ... Going
+CANCEL-ONLY`, with `orderbook_wal_disk_free_bytes` falling and `orderbook_phase`
+reading 2.
+
+**What the code has done.** Three things, at three thresholds.
+
+- Below `-wal-min-free` (2 GiB by default) it warned and ran retention immediately
+  instead of waiting for the next checkpoint. If `-wal-retain` is unset, retention
+  deletes nothing, and the warning says so rather than claiming to be reclaiming space.
+- Below `-wal-min-free-stop` (256 MiB) it put every book into **cancel-only**: new
+  orders are refused with `ReasonHalted`, cancels and reduces are accepted so
+  participants can get flat, resting orders are untouched, market data is unaffected.
+  Retention runs on every tick below this mark too.
+- When a sync actually failed it **halted the book, latched the failure, and failed
+  readiness**.
+
+**Neither latch clears by itself, and cancel-only is a latch too.** This is the part
+that surprises people. The sync failure clears on a restart, which is where you get to
+decide whether the disk is actually fixed — that has always been written down. So does
+**cancel-only**: `diskStopped` is set once and nothing anywhere clears it, there is no
+admin endpoint that resumes trading, and free space returning above
+`-wal-min-free-stop` does not bring the venue back. A book that dipped below the mark
+for a single checkpoint tick — a log rotation on a shared volume, another process
+briefly filling the disk — keeps refusing new orders with `ReasonHalted` until the
+process is restarted, even though no sync ever failed.
+
+That is deliberate: a venue oscillating in and out of cancel-only around a threshold is
+worse for participants than one that stays out until a human has looked at it. But it
+means **freeing space is not the end of the procedure** — the restart is.
+
+**What to do.**
+
+1. Take the node out of rotation if the orchestrator has not already — `/readyz` is
+   telling it to.
+2. Free space. `orderbook_wal_bytes` says how much of it is this venue's log.
+3. If the log is the problem and `-wal-retain` is unset, set it, and set
+   `-wal-archive` with it. Do not delete segments by hand: the venue refuses to start
+   on a set with a hole, and it is right to.
+4. Restart. Only a restart clears either latch — the halted book after a failed sync,
+   and cancel-only after the stop-water mark. A venue that is merely cancel-only can be
+   restarted at leisure, but it will not resume on its own.
+
+**What makes it worse.** Restarting the process without freeing space, repeatedly. Each
+attempt appends more log. Also: deleting the oldest segments by hand to buy room —
+that is what `-wal-retain` does safely, gated on a snapshot that has been read back
+and verified, and doing it by hand is doing it without the gate.
+
+**The honest limit.** Commands acknowledged inside the 20 ms group-commit window that
+ENDED in the failed sync were acknowledged before they were durable. That is the
+existing durability window (`-sync-every-command` closes it); a full disk does not
+widen it, it is just the moment it matters.
 
 ---
 

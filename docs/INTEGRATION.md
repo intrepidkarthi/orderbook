@@ -191,8 +191,10 @@ eng.Process(order)                // then apply
 lastApplied = seq
 wal.Checkpoint("snap.json", eng, lastApplied)
 
-// Recovery: snapshot + the log tail after it. The whole log is still read and
-// checksum-verified; only the tail is decoded and applied.
+// Recovery: snapshot + the log tail after it. Every byte of the RETAINED set is
+// still read and checksum-verified; only the tail is decoded and applied. The log
+// is a set of segments, not one file, and what a restart reads is what retention
+// left on disk — everything, unless wal.Options.RetainBytes says otherwise.
 eng, err := wal.Recover(cfg, "snap.json", "wal.log")
 ```
 

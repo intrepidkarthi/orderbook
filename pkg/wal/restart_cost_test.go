@@ -2,7 +2,6 @@ package wal
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -44,6 +43,19 @@ import (
 // A venue that runs continuously never truncates its log, so this is the arithmetic
 // that decides whether it can be restarted at all. See docs/PRODUCTION-READINESS.md,
 // "Running continuously".
+
+// setBytes is the size of the whole segment set, which is what a restart reads.
+// os.Stat on the path is not, once the log has rotated: the stem is then an 18-byte
+// marker and the records are in its siblings, so a stat would publish a log-MiB
+// figure of 0.000017 into docs/BENCHMARKS.md.
+func setBytes(tb testing.TB, stem string) int64 {
+	tb.Helper()
+	info, err := Stat(stem)
+	if err != nil {
+		tb.Fatalf("Stat: %v", err)
+	}
+	return info.Bytes
+}
 
 // buildCoveredLog writes prefix records, snapshots so that ALL of them are covered,
 // then writes tail more. Recovery therefore has `tail` records to apply however
@@ -154,9 +166,7 @@ func BenchmarkRecoverBehindACoveredPrefix(b *testing.B) {
 		b.Run(fmt.Sprintf("covered%d_tail1000", prefix), func(b *testing.B) {
 			dir := b.TempDir()
 			walPath, snapPath := buildCoveredLog(b, dir, prefix, 1_000)
-			if fi, err := os.Stat(walPath); err == nil {
-				b.ReportMetric(float64(fi.Size())/(1<<20), "log-MiB")
-			}
+			b.ReportMetric(float64(setBytes(b, walPath))/(1<<20), "log-MiB")
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				eng, err := Recover(tapeCfg(), snapPath, walPath)
@@ -190,9 +200,7 @@ func BenchmarkRecoverBehindACoveredChurnPrefix(b *testing.B) {
 			// After the loop, not before it: ResetTimer deletes user-reported metrics,
 			// so a size reported alongside the fixture never reaches the output.
 			b.StopTimer()
-			if fi, err := os.Stat(walPath); err == nil {
-				b.ReportMetric(float64(fi.Size())/(1<<20), "log-MiB")
-			}
+			b.ReportMetric(float64(setBytes(b, walPath))/(1<<20), "log-MiB")
 		})
 	}
 }

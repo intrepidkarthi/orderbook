@@ -16,6 +16,7 @@ import (
 
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
 	"github.com/intrepidkarthi/orderbook/pkg/observability"
+	"github.com/intrepidkarthi/orderbook/pkg/wal"
 )
 
 // The admin edge: a third listener, serving metrics and health to the operator
@@ -192,6 +193,14 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 // not advance its sequence either and calling that a stall would take a healthy node
 // out of rotation every quiet minute.
 func (s *Server) readiness() (bool, string) {
+	// Before anything about the queue: a venue whose log cannot be written is not
+	// ready however fast its matcher is. It is the one readiness signal that is
+	// about correctness rather than about throughput, so it is checked first and it
+	// never clears without a restart.
+	if s.walFailed.Load() {
+		return false, "not ready: the write-ahead log cannot be written, so no command can be accepted durably. " +
+			"The book is halted. See docs/RUNBOOKS.md \"The disk filled up\"."
+	}
 	// The worst book decides. A venue with one wedged matcher is not ready however
 	// healthy the others are, and averaging would hide exactly the case this exists
 	// to catch.
@@ -316,6 +325,55 @@ func (s *Server) registerGauges() {
 		}))
 	c.GaugeFamily("orderbook_phase", "Trading phase per instrument: 0 pre-open, 1 open, 2 cancel-only, 3 halted, 4 closed, 5 closing auction.",
 		perBook(func(r *matching.Runner) float64 { return float64(phaseCode(r.Phase())) }))
+
+	// The two numbers that decide whether this venue can be restarted, and whether
+	// it is about to stop being able to journal at all.
+	//
+	// orderbook_wal_bytes is the RETAINED set, which is what a restart reads: at the
+	// measured read-and-verify rate it converts directly into restart seconds, which
+	// is the sentence docs/LOG-ROTATION.md exists to make true. Without retention
+	// configured it grows for as long as the venue runs, and this is where that
+	// shows up before it becomes an incident.
+	c.GaugeFamily("orderbook_wal_bytes", "Retained write-ahead log on disk, per instrument. This is what a restart reads.",
+		func() []observability.Series {
+			var out []observability.Series
+			for _, b := range s.books.all() {
+				walPath, _ := s.cfg.paths(b.symbol)
+				if walPath == "" {
+					continue
+				}
+				info, err := wal.Stat(walPath)
+				if err != nil {
+					continue
+				}
+				out = append(out, observability.Series{
+					Labels: []observability.Label{{Name: "symbol", Value: b.symbol}},
+					Value:  float64(info.Bytes),
+				})
+			}
+			return out
+		})
+	c.GaugeFamily("orderbook_wal_segments", "Segments in the retained set, per instrument. One means a log that has never rotated.",
+		func() []observability.Series {
+			var out []observability.Series
+			for _, b := range s.books.all() {
+				walPath, _ := s.cfg.paths(b.symbol)
+				if walPath == "" {
+					continue
+				}
+				info, err := wal.Stat(walPath)
+				if err != nil {
+					continue
+				}
+				out = append(out, observability.Series{
+					Labels: []observability.Label{{Name: "symbol", Value: b.symbol}},
+					Value:  float64(info.Segments),
+				})
+			}
+			return out
+		})
+	c.Gauge("orderbook_wal_disk_free_bytes", "Free space on the filesystem holding the write-ahead log, sampled each checkpoint.",
+		func() float64 { return float64(s.walFree.Load()) })
 
 	c.Gauge("obgw_connections", "Established client sockets across both edges.",
 		func() float64 { return float64(s.connCount()) })

@@ -398,6 +398,7 @@ matching.RestoreEngine(config Config, snap *EngineSnapshot) (*Engine, error)
 matching.Runner struct
 matching.RunnerConfig struct
 matching.RunnerConfig.Engine Config
+matching.RunnerConfig.LastApplied int64
 matching.RunnerConfig.Log CommandLog
 matching.RunnerConfig.QueueSize int
 matching.RunnerConfig.Replaying bool
@@ -1046,6 +1047,7 @@ types.TrailingState.Triggered bool
 types.TrailingStop struct
 types.TrailingStop.Order *Order
 types.TrailingStop.Trail int64
+wal.(*Writer).ActiveSegment() (path string, base int64)
 wal.(*Writer).AppendBust(tradeID int64, reason string) (int64, error)
 wal.(*Writer).AppendCancel(orderID int64, userID string) (int64, error)
 wal.(*Writer).AppendCancelAll(userID string) (int64, error)
@@ -1063,10 +1065,16 @@ wal.(*Writer).AppendSubmit(o *types.Order) (int64, error)
 wal.(*Writer).AppendTrailing(ts *types.TrailingStop) (int64, error)
 wal.(*Writer).Checksummed() bool
 wal.(*Writer).Close() error
+wal.(*Writer).Failed() error
+wal.(*Writer).Rotations() int64
 wal.(*Writer).Seq() int64
 wal.(*Writer).SetOnAppend(fn func(seq int64, record []byte))
 wal.(*Writer).Sync() error
+wal.ArchivedSegments(dir, stem string) ([]string, error)
+wal.CheckArchiveDir(dir, setDir string) error
 wal.Checkpoint(path string, eng *matching.Engine, lastAppliedSeq int64) error
+wal.DefaultMaxSegmentBytes const
+wal.DefaultMinSegments const
 wal.Entry struct
 wal.Entry.BustReason string
 wal.Entry.CancelID int64
@@ -1084,7 +1092,12 @@ wal.Entry.TradeID int64
 wal.Entry.Trail int64
 wal.Entry.UserID string
 wal.EntryKind type
+wal.ErrArchiveIsTheLog var
+wal.ErrBelowFloor var
 wal.ErrCorrupt var
+wal.ErrLogGap var
+wal.ErrNotALog var
+wal.FreeBytes(stem string) (int64, bool)
 wal.KindBust const
 wal.KindCancel const
 wal.KindCancelAll const
@@ -1103,19 +1116,44 @@ wal.KindTrailing const
 wal.Magic const
 wal.MaxRecordBytes const
 wal.Open(path string) (*Writer, error)
+wal.OpenWith(path string, opts Options) (*Writer, error)
+wal.Options struct
+wal.Options.ArchiveDir string
+wal.Options.MaxSegmentBytes int64
+wal.Options.MinSegments int
+wal.Options.RetainBytes int64
+wal.ReadAfter(stem string, afterSeq int64) ([]Entry, error)
 wal.ReadAll(path string) ([]Entry, error)
 wal.ReadSnapshot(path string) (*matching.EngineSnapshot, error)
 wal.Recover(config matching.Config, snapPath, walPath string) (*matching.Engine, error)
 wal.RecoverReport struct
 wal.RecoverReport.Applied int
 wal.RecoverReport.FellBack bool
+wal.RecoverReport.Floor int64
 wal.RecoverReport.LogLastSeq int64
+wal.RecoverReport.RetainedBytes int64
+wal.RecoverReport.Segments int
 wal.RecoverReport.Skipped int
 wal.RecoverReport.SnapshotAhead bool
 wal.RecoverReport.SnapshotSeq int64
 wal.RecoverWithReport(config matching.Config, snapPath, walPath string) (*matching.Engine, RecoverReport, error)
 wal.Restore(eng *matching.Engine, entries []Entry)
 wal.RestoreAfter(eng *matching.Engine, entries []Entry, afterSeq int64)
+wal.Retain(stem, snapPath string, opts Options) (RetentionResult, error)
+wal.RetentionResult struct
+wal.RetentionResult.Archived []string
+wal.RetentionResult.Deleted []string
+wal.RetentionResult.Floor int64
+wal.RetentionResult.RetainedBytes int64
+wal.RetentionResult.Skipped string
+wal.SegHeaderBytes const
+wal.SegMagic const
+wal.SetInfo struct
+wal.SetInfo.Bytes int64
+wal.SetInfo.Floor int64
+wal.SetInfo.Names []string
+wal.SetInfo.Segments int
 wal.SnapMagic const
+wal.Stat(stem string) (SetInfo, error)
 wal.WriteSnapshot(path string, snap *matching.EngineSnapshot) (err error)
 wal.Writer struct

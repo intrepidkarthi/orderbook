@@ -650,15 +650,18 @@ hours and a deployment is months. In particular:
 
 - **Restart after a long run is still untested, though the arithmetic is much better
   than it was.** Every soak so far has recovered from a log measured in gigabytes at
-  most. `wal.Recover` reads and checksum-verifies the whole log, and now decodes only
+  most. `wal.Recover` reads and checksum-verifies every RETAINED byte and decodes only
   the records the snapshot does not cover: half a million covered records went from
   1.66 s and 772 MiB of allocation to 64 ms and 2.0 MiB, and the allocation no longer
-  grows with the log at all. Restart cost is still O(total log) in time, with a
-  constant about 26× smaller, and **nothing rotates or truncates the file** — that
-  part is unfixed, and it is a disk-space problem before it is a time problem. No soak
-  here has run long enough to reach either — see
-  [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) for the numbers and
-  [BOUNDED-RECOVERY.md](BOUNDED-RECOVERY.md) for what was and was not done.
+  grows with the log at all. The log now **rotates into segments, and a prefix of them
+  is deleted once a verified snapshot covers it** — so restart cost is O(retained log)
+  rather than O(total history), and the retained size is a byte budget the operator
+  sets with `-wal-retain`. Deletion is **off by default**, so a soak run without that
+  flag has exactly the old behaviour and the old disk-space problem. No soak here has
+  run long enough to reach either wall — see
+  [PRODUCTION-READINESS.md](PRODUCTION-READINESS.md) for the numbers,
+  [LOG-ROTATION.md](LOG-ROTATION.md) for what retention does and does not promise, and
+  [BOUNDED-RECOVERY.md](BOUNDED-RECOVERY.md) for the slice before it.
 
 A soak that finds nothing is evidence for the length of the soak, and for nothing
 longer. That sentence is printed in the harness's own verdict for the same reason it

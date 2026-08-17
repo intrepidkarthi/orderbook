@@ -307,18 +307,68 @@ series per book, and they do so even at a one-instrument venue — a metric whos
 label set depends on how the venue happens to be configured is one no dashboard
 can be written against.
 
-### Running continuously — the log is still the wall, but it is a different wall now
+### Running continuously — the log was the wall, and the wall is now a number you choose
 
 Nothing here is a memory problem. Every in-process cache is fixed-size and the
 four-hour run says so: goroutines and descriptors flat, heap trend decaying
-run-over-run. **The thing that stops a venue running 24×7 is the command log, and it
-used to stop it in two ways. One of them is fixed.**
+run-over-run. **The thing that stopped a venue running 24×7 was the command log, and
+it stopped it in two ways. Both are now addressed, and the second one only if you
+turn it on.**
 
-**It never shrinks.** Nothing rotates, truncates or archives it. Measured at about
-220 bytes of journal per client message — 44 GiB a day at 2,500/s, 18 GB a day at
-the gentler rate the four-hour run used. A snapshot bounds what a restart *applies*;
-it does not remove a single byte from the file. This is unchanged and it is the
-remaining wall.
+**It shrinks when you tell it to, and not before.** The log is a set of segments —
+`BTC-USD.wal` plus `BTC-USD.wal.0000000000610422` and its siblings — and `-wal-retain`
+is a byte budget for the whole set. Once a snapshot that has been read back and
+verified covers a segment entirely, that segment is archived if `-wal-archive` is set
+and then deleted, oldest first, never the one being written. **Deletion is off by
+default**: `-wal-retain` unset means keep everything, which is exactly the behaviour
+of every earlier release, and the venue says so at startup. Rotation itself is on by
+default and changes only where the bytes live.
+
+At about 220 bytes of journal per client message — 44 GiB a day at 2,500/s, 18 GB a
+day at the gentler rate the four-hour run used — a venue with no budget set still
+fills a disk on a schedule, and still gets slower to restart every day it stays up.
+That is now a configuration choice rather than a property of the software.
+
+**The knob converts directly into restart time.** Reading and CRC-verifying costs
+about **2 s per GiB cold and 0.75 s per GiB warm** on this hardware — 1,068 MiB in
+2.21 s on a first pass, 767 ms re-read — so a one-second COLD restart budget is about
+500 MiB of retained log, plus O(book) for the snapshot and O(tail) for what is left to
+apply. Use the cold figure: a restart that matters is usually a restart after a
+reboot. Segment size does not enter this arithmetic — the same gigabyte reads in the
+same time whether it is 9 segments or 1,069 — so pick the retained SIZE from the
+restart budget and the segment size from the append-latency table in
+[BENCHMARKS.md](BENCHMARKS.md).
+
+One qualification, because the arithmetic above is not the whole story: `-wal-retain` is
+a budget, not a bound. `-wal-retain-segments` is checked after it and wins, so the
+retained set never falls below `(-wal-retain-segments + 1) x -wal-segment-bytes` —
+**640 MiB at the shipped defaults of 4 and 128 MiB**. A 500 MiB budget against those
+defaults yields 640 MiB and about 1.3 s. Reduce `-wal-segment-bytes` alongside the
+budget, or pick a budget above the floor.
+
+Measured on `BenchmarkRestartWithRetention`, which grows total history while holding
+retention fixed:
+
+| total history written | retention | retained on disk | segments | `Recover` |
+|---:|---|---:|---:|---:|
+| 60,000 records (11 MiB) | 4 MiB | 3.7 MiB | 4 | **5.95 ms** |
+| 600,000 records (110 MiB) | 4 MiB | 4.1 MiB | 5 | **6.28 ms** |
+| 6,000,000 records (1.1 GiB) | 4 MiB | 3.3 MiB | 4 | **5.66 ms** |
+| 60,000 records (11 MiB) | off | 10.7 MiB | 11 | 18.1 ms |
+| 600,000 records (110 MiB) | off | 106.1 MiB | 107 | 84.1 ms |
+| 6,000,000 records (1.1 GiB) | off | 1,068 MiB | 1,069 | **2.21 s** |
+
+**A hundred times the history, the same restart.** The control rows are what every
+earlier release did, and what a venue with `-wal-retain` unset still does: at 1.1 GiB
+of journal a restart reads all of it and takes 2.21 seconds, and the next day it takes
+longer.
+
+**The recovery point moves, and that is the price.** A venue running retention
+WITHOUT archival has a recovery point objective equal to its newest snapshot: the log
+below the retention floor is gone, so "delete the snapshot and replay from the
+beginning" is no longer a procedure that works — the beginning is not there.
+`RUNBOOKS.md` §"A corrupt snapshot" carries the replacement, which is keyed on the
+oldest segment's name. `-wal-archive` is the first flag to set after `-wal-retain`.
 
 **A restart still reads all of it — but it no longer parses all of it.** `wal.Recover`
 walks every record in the file and verifies every checksum, and decodes and retains
@@ -364,12 +414,22 @@ minutes, and about 2 MiB of allocation instead of 100 GB — so what bounds the 
 now how fast the storage can deliver 13 GiB, not how fast Go can parse it. The
 measurement above has the file in page cache and a cold restart will not.
 
-**What has not changed: the file still grows without bound.** 44 GiB a day at 2,500/s
-is a disk-space problem long before it is a time problem, and restart time is still
-O(total log) with a smaller constant. Rotation and archival — dropping segments a
-durable snapshot already covers — is the piece that removes it, and it is not built.
-`BenchmarkRecoverSnapshotPlusTail` still cannot see any of this: it builds a log that
-is *only* the tail, so the prefix in question is never there.
+**What bounds the read is retention, and nothing else.** Restart time is
+O(*retained* log), which is O(total history) for as long as `-wal-retain` is unset —
+44 GiB a day at 2,500/s is a disk-space problem long before it is a time problem, and
+both problems are the same file. `BenchmarkRecoverSnapshotPlusTail` still cannot see
+any of this: it builds a log that is *only* the tail, so the prefix in question is
+never there.
+
+**And a full disk is now defined behaviour.** It used to be worse than undefined:
+ENOSPC surfaces at the flush inside the 20 ms group commit, whose entire error
+handling was to log and continue, so a full disk produced a venue that kept accepting
+orders, kept acknowledging them, kept matching them and stopped journalling —
+`/readyz` still green, every acknowledgement after the first failed sync a lie. Now:
+below `-wal-min-free` (2 GiB) the venue warns and runs retention immediately; below
+`-wal-min-free-stop` (256 MiB) every book goes cancel-only, so participants can get
+flat while new orders — the largest source of log growth — are refused; and a sync
+that actually fails halts the book, latches until a restart, and fails readiness.
 
 ### The financial stack — absent by design
 

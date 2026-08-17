@@ -468,14 +468,24 @@ func emptySnapshotAt(tb testing.TB, path string, walSeq int64) {
 	}
 }
 
-// TestSegmentStartingAtANonOneSequenceFallsBack is the forward-compatibility guard,
-// and it is the reason the invariant is checked instead of trusted.
+// TestAFileThatDeclaresBaseOneAndCarriesSequence1001FallsBack is the guard that
+// rotation re-aimed rather than deleted. It was
+// TestSegmentStartingAtANonOneSequenceFallsBack, and its assertions have not
+// changed; only the name has, to say what it actually guards now.
 //
-// The next slice of this milestone rotates the log, and a rotated segment begins at
-// ordinal 1 carrying a sequence far above 1. A skip that trusted ordinal == sequence
-// would walk past such a segment in its entirety and apply nothing — no error, no
-// log line, a venue that believes it recovered.
-func TestSegmentStartingAtANonOneSequenceFallsBack(t *testing.T) {
+// It hand-builds an OBWAL\x01 file, which declares base 1 by having no base field
+// and being the only file there is. Its records carry 1001 onward, so they disagree
+// with the sequences their declared base implies, and recovery must still fall back
+// and still re-read the whole thing. That is slice 1's Rule 1 rebased: the anchor is
+// no longer "record 1 carries sequence 1" but "record 1 carries the base this file
+// declares", which means exactly the same thing here and keeps meaning something on
+// a rotated set.
+//
+// A properly rotated segment declares base 1001 in its header and its name, and its
+// records agree with it, so it does NOT fall back — that is
+// TestADeclaredSegmentDoesNotFallBack in rotation_test.go, and the two together are
+// what stop rotation quietly turning the fallback into the common path.
+func TestAFileThatDeclaresBaseOneAndCarriesSequence1001FallsBack(t *testing.T) {
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "segment.wal")
 	snapPath := filepath.Join(dir, "s.snap")

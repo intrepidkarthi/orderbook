@@ -104,8 +104,14 @@ func main() {
 		rate         = flag.Float64("rate", 1000, "per-account orders/second")
 		burst        = flag.Float64("burst", 200, "per-account burst allowance")
 		walPath      = flag.String("wal", "", "write-ahead log path (empty = no durability)")
-		snapPath     = flag.String("snapshot", "", "snapshot path, used with -wal to bound how much log a restart replays (it is still read in full)")
+		snapPath     = flag.String("snapshot", "", "snapshot path, used with -wal to bound how much log a restart replays and parses")
 		ckpt         = flag.Duration("checkpoint", 30*time.Second, "checkpoint interval")
+		segBytes     = flag.Int64("wal-segment-bytes", 0, "rotate the log into a new segment at this size (0 = 128MiB, negative = never rotate)")
+		retainBytes  = flag.Int64("wal-retain", 0, "byte budget for the retained log; older segments are deleted once a verified snapshot covers them (0 = keep everything). A budget, not a bound: -wal-retain-segments floors it at (n+1) x -wal-segment-bytes, 640MiB at the defaults")
+		retainSegs   = flag.Int("wal-retain-segments", 0, "sealed segments to keep regardless of coverage (0 = 4). Checked after -wal-retain and wins, so it decides the smallest the retained set can be")
+		archiveDir   = flag.String("wal-archive", "", "copy each segment here before deleting it; without this, retention makes the newest snapshot the recovery point")
+		minFree      = flag.Int64("wal-min-free", 0, "low-water mark in bytes: below it, warn and run retention immediately (0 = 2GiB)")
+		minFreeStop  = flag.Int64("wal-min-free-stop", 0, "stop-water mark in bytes: below it, every book goes cancel-only (0 = 256MiB)")
 		profiling    = flag.Bool("pprof", false, "mount net/http/pprof on the admin listener (operator-only; a heap dump exposes everything the venue holds)")
 		syncEvery    = flag.Bool("sync-every-command", false, "fsync each command before applying it, so durability precedes acknowledgement (correct, and ~210x slower than the 20ms group commit)")
 	)
@@ -130,21 +136,27 @@ func main() {
 	}
 
 	cfg := Config{
-		Addr:             *addr,
-		MDAddr:           *mdAddr,
-		AdminAddr:        *adminAddr,
-		Symbol:           *symbol,
-		Symbols:          splitSymbols(*symbols),
-		DataDir:          *dataDir,
-		Auth:             auth,
-		TLS:              tlsCfg,
-		RatePerSec:       *rate,
-		Burst:            *burst,
-		WALPath:          *walPath,
-		SnapshotPath:     *snapPath,
-		CheckpointEvery:  *ckpt,
-		SyncEveryCommand: *syncEvery,
-		Profiling:        *profiling,
+		Addr:              *addr,
+		MDAddr:            *mdAddr,
+		AdminAddr:         *adminAddr,
+		Symbol:            *symbol,
+		Symbols:           splitSymbols(*symbols),
+		DataDir:           *dataDir,
+		Auth:              auth,
+		TLS:               tlsCfg,
+		RatePerSec:        *rate,
+		Burst:             *burst,
+		WALPath:           *walPath,
+		SnapshotPath:      *snapPath,
+		CheckpointEvery:   *ckpt,
+		WALSegmentBytes:   *segBytes,
+		WALRetainBytes:    *retainBytes,
+		WALRetainSegments: *retainSegs,
+		WALArchiveDir:     *archiveDir,
+		WALMinFree:        *minFree,
+		WALMinFreeStop:    *minFreeStop,
+		SyncEveryCommand:  *syncEvery,
+		Profiling:         *profiling,
 	}
 	if auth.Count() == 0 {
 		log.Println("obgw: no accounts configured — every login will be rejected")
@@ -159,6 +171,17 @@ func main() {
 		log.Println("obgw: no -wal path — running WITHOUT durability; a crash loses the book")
 	} else if !cfg.SyncEveryCommand {
 		log.Println("obgw: group-committing every 20ms — an acknowledged order can be lost if the process dies inside that window; -sync-every-command closes it at ~210x the cost")
+	}
+	// Rotation is on by default; deletion is not, and a venue that never deletes is
+	// a venue that eventually cannot be restarted. Said at every start rather than
+	// buried in a document, because the failure arrives on a schedule.
+	if cfg.WALPath != "" && cfg.WALRetainBytes <= 0 {
+		log.Println("obgw: -wal-retain is unset — the log will grow without bound (about 44 GiB a day at 2,500 msg/s) " +
+			"and restart time grows with it. Set -wal-retain and -wal-archive.")
+	}
+	if cfg.WALRetainBytes > 0 && cfg.WALArchiveDir == "" {
+		log.Println("obgw: -wal-retain without -wal-archive — deleted segments are gone, so this venue's recovery point " +
+			"is its newest snapshot and one corrupt snapshot away from nothing.")
 	}
 	if cfg.AdminAddr == "" {
 		log.Println("obgw: no -admin address — running unobserved; nothing reports queue depth, book size or a stalled matcher")
