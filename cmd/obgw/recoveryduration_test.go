@@ -69,9 +69,23 @@ func recoverAloneNanos(t *testing.T, path string) int64 {
 	return time.Since(start).Nanoseconds()
 }
 
-func median(xs []int64) int64 {
+// floor is the statistic this test compares on, and the reason is not taste.
+//
+// The claim is that the measured interval CONTAINS wal.Recover plus the two Adopt
+// calls, so the interval must cost more than Recover alone. Both quantities are wall
+// clocks over the same disk, and a median of five carries roughly a third of the
+// machine's noise in it — enough that a slow control run and a fast measured run
+// crossed, and this test failed about once in eight under -race while the code was
+// perfectly correct.
+//
+// A minimum does not have that problem. Scheduling, page-cache misses and a busy
+// machine only ever ADD time, so the smallest of several runs converges on the true
+// cost from above. The floor of (Recover + Adopt) genuinely exceeds the floor of
+// Recover, which is the thing being asserted, and neither floor moves when the
+// machine is loaded.
+func floor(xs []int64) int64 {
 	sort.Slice(xs, func(a, b int) bool { return xs[a] < xs[b] })
-	return xs[len(xs)/2]
+	return xs[0]
 }
 
 // TestRecoveryDurationIsReported is deliverable 19, and the third assertion is the
@@ -131,13 +145,13 @@ func TestRecoveryDurationIsReported(t *testing.T) {
 		srv.Close()
 	}
 
-	bare, mine := median(bares), median(reported)
+	bare, mine := floor(bares), floor(reported)
 	if mine <= bare {
 		t.Errorf("recovery duration %d ns is not above the %d ns wal.Recover alone costs on the same fixture — "+
 			"the two Adopt calls are outside the measured interval, so the venue is reporting a downtime "+
 			"reliably shorter than the one it had", mine, bare)
 	}
-	t.Logf("recovery %d ns; wal.Recover alone %d ns (ratio %.2f); last wall clock around NewServer %d ns",
+	t.Logf("recovery floor %d ns; wal.Recover floor %d ns (ratio %.2f); last wall clock around NewServer %d ns",
 		mine, bare, float64(mine)/float64(bare), wall)
 }
 
