@@ -137,6 +137,68 @@ versions may include breaking changes).
 
 ### Fixed
 
+- **A recovery from the journal alone no longer loses every iceberg's hidden reserve.**
+  `types.NewIcebergOrder` shrinks the order it is handed to the display size and keeps
+  the remainder on the wrapper, so by the time `AppendIceberg` could journal anything,
+  `Order.Quantity` was already the slice — and `Hidden` was never written at all. A
+  nine-lot iceberg shown three was recorded as `quantity 3, display 3`, and a replay
+  rebuilt it with `hidden = 3 - 3 = 0`. **A venue recovering from its log alone came
+  back with every client's reserve gone**, which is the path a venue takes when its
+  snapshot is missing, refused as corrupt, or below the retention floor. A recovery
+  *with* a snapshot was never affected; `EngineSnapshot` carries the reserve.
+
+  The cost is not one order. Measured on `iceberg 9 shown 3, buy 9, sell 5` with no
+  fill-or-kill anywhere: the recovered venue printed 2 trades for 8 lots where the venue
+  printed 3 for 9, **printed five lots at 100 that the venue never printed** — the buy
+  that should have been filled by the reserve rested instead and was hit by the next
+  order — and ended holding the opposite side of the book.
+
+  `AppendIceberg` now logs a **copy** of the order at the client's total
+  (`TotalRemaining()`), leaving the live order the engine is matching against untouched,
+  plus `Entry.TotalQty`: the same number a second time, whose only job is to be
+  **absent** in records written before this change. A reserve field could not have done
+  that — `omitempty` drops a genuine zero reserve, so a pre-fix record with a lost
+  reserve and a post-fix record with no reserve would be byte-identical. Cost: **14
+  bytes on `KindIceberg` records only** (311 → 325), zero on every other kind, no
+  framing, magic, header, CRC or snapshot change, and every existing record
+  byte-identical. A hand-built record with the total in `Quantity` and no `TotalQty`
+  still restores correctly.
+
+  **A log written before this change is refused rather than replayed into a wrong
+  book** — `wal: iceberg reserve unknown`, naming each record's sequence and the order
+  it owns. It fires if and only if such a record would be APPLIED: one the snapshot
+  already covers is read, verified, skipped and never refused, so a venue that
+  checkpointed before upgrading starts with no ceremony. `ReadAll`, `Open`, `Restore`
+  and `RestoreAfter` never refuse. The override is a **count** —
+  `-wal-accept-iceberg-loss N`, which must equal the number found — because a boolean
+  goes into a unit file during one incident and stays for the life of the deployment,
+  and this build cannot produce such a record. It relaxes that gate and nothing else.
+  New: `RecoverReport.IcebergsWithoutReserve`, `.IcebergReserveLossAccepted` and
+  `obgw_recovery_iceberg_reserve_unknown_total{symbol}`, whose normal value is 0
+  forever. Runbook: "An iceberg whose reserve was never journalled".
+
+  **`matching.SemanticsVersion` does not move, and that is argued rather than assumed.**
+  `pkg/matching` is untouched; the engine was never wrong, it correctly executed a
+  command the journal had corrupted. What moved is the translation between bytes and
+  commands. Bumping would also refuse *every* semantics-2 segment with unreplayed
+  records on every venue, iceberg or not — a check firing on the happy path, which is
+  how an override ends up permanent. `internal/semcheck` is green **without
+  regeneration**, which is the proof.
+
+  The audit behind it asked the question that mattered — *is the iceberg the only one?* —
+  and answered it for stop, stop-limit, OCO, pegged and trailing: **it is**, including a
+  stop that fired mid-tape and a trailing stop ratcheted three times, both of which come
+  back exactly because the log carries the trades that produced them. That audit is now
+  three standing guards (a log-only round trip per wrapper-carrying `EntryKind`, a
+  no-mutating-constructor tripwire that enumerates constructors from the package's own
+  source, and a field-by-field classification of every wrapper type), and the two
+  adjacent findings it turned up are **pinned, not fixed**: an iceberg evades
+  `Config.MaxOrderQty` by exactly its hidden quantity, and `Config.MinOrderQty` refuses
+  a 90-lot iceberg shown 3 for a floor it exceeds 18×. Replication followers rebuild
+  icebergs from the same records and had been diverging from their primaries silently,
+  with no iceberg anywhere in `examples/`; that is repaired and now drilled.
+  [ICEBERG-DURABILITY.md](docs/ICEBERG-DURABILITY.md).
+
 - **A failing fill-or-kill no longer corrupts an iceberg it consumed.** A fill-or-kill
   that exhausted a resting iceberg's reserve and was then refused left that client's
   order with a **negative `FilledQty`**, its entire hidden reserve **displayed** in the
@@ -296,11 +358,14 @@ versions may include breaking changes).
   bound is stated here because a reader would otherwise assume it holds for both paths.
   A snapshot carries each iceberg's reserve and refill count; a journal does not, because
   `AppendIceberg` logs an order whose quantity has already been shrunk to the display
-  size, so a **log-only** recovery rebuilds every iceberg with an empty reserve and the
-  fixed path is never reached on it. That is pre-existing and unchanged by this release —
-  it reproduces identically on the previous build with no fill-or-kill involved — and it
-  is now pinned by `TestLogOnlyRecoveryLosesAnIcebergsReserve`, the first test covering
+  size, so a **log-only** recovery rebuilt every iceberg with an empty reserve and the
+  fixed path was never reached on it. That was pre-existing and unchanged by this release
+  — it reproduced identically on the previous build with no fill-or-kill involved — and it
+  was pinned by `TestLogOnlyRecoveryLosesAnIcebergsReserve`, the first test covering
   iceberg journal recovery at all. [PINNED-DEFECTS.md](docs/PINNED-DEFECTS.md) §13.7.
+  **Since fixed, above:** the record now states the client's total, so the sentence holds
+  on both paths for logs written by this build, and a log written before it is refused
+  rather than replayed small. The pin is inverted and keeps its name.
 
   The bump is worth a sentence of its own, because it nearly did not happen.
   `internal/semcheck` was **green** on both fixes: its corpus reached icebergs and
