@@ -3,10 +3,12 @@ package main
 import (
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/intrepidkarthi/orderbook/pkg/gateway"
 	"github.com/intrepidkarthi/orderbook/pkg/marketdata"
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
+	"github.com/intrepidkarthi/orderbook/pkg/observability"
 	"github.com/intrepidkarthi/orderbook/pkg/wal"
 )
 
@@ -46,6 +48,39 @@ type symbolBook struct {
 	// cycle deleted less than the budget asked for is logged when it CHANGES rather
 	// than every checkpoint tick. Touched only from checkpointLoop's goroutine.
 	lastRetainSkip string
+
+	// snapFailures counts checkpoints this book could not write. Nil when the book
+	// is not configured to checkpoint at all. It is the "why" beside the age gauge's
+	// "what": a stale age with a FLAT failure count is a checkpoint loop that is not
+	// running, which is a different fault with a different fix from one that is
+	// running and failing.
+	snapFailures *observability.Counter
+	// snapMTime is the modification time, in Unix nanoseconds, of the last snapshot
+	// file this process actually looked at — zero when it has never seen one.
+	//
+	// It exists so /readyz can answer without touching a filesystem. The gauge on
+	// /metrics stats the file every scrape and can afford to; readiness cannot, and
+	// the reason is what readiness DOES. A snapshot on a mount that hangs would make
+	// os.Stat block, the probe time out, and an orchestrator kill a book that is
+	// holding positions — turning a snapshot-storage problem into a trading outage
+	// and inviting exactly the restart a stale snapshot has been making expensive.
+	// That is the outcome docs/LAG-AND-SHED.md §7 exists to avoid, arrived at through
+	// the probe instead of through the status code.
+	//
+	// It caches the MTIME rather than the age, which is what makes it safe to let go
+	// stale: age is computed from it at read time, so a checkpoint loop that dies
+	// stops refreshing this and the age goes on climbing exactly as it should. A
+	// cached age would freeze at its last value and report a healthy venue forever.
+	snapMTime atomic.Int64
+	// recoveredInNs is how long this book took to recover, set once during NewServer
+	// and never again. NaN when there is no log to recover from.
+	//
+	// A gauge rather than a histogram because it is observed once per process: a
+	// histogram of one observation reports a quantile that IS the observation, in a
+	// bucket that rounds it, with a count of 1. It never moves, and it is not
+	// supposed to — the way to read it is max_over_time across restarts, which is
+	// where the signal actually is.
+	recoveredInNs float64
 }
 
 // bookSet is the venue's set of instruments, with the two lookups the gateway needs:

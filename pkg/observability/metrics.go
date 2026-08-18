@@ -73,6 +73,12 @@ type Collector struct {
 
 	histMu sync.Mutex
 	hists  map[string]*Histogram
+
+	// counters are the series that are NOT engine events: work the venue refused
+	// before the event stream existed. Registration takes the lock; the increment
+	// does not, because the caller keeps the handle. See Collector.Counter.
+	counterMu sync.Mutex
+	counters  map[string]*counterFamily
 }
 
 // NewCollector builds an empty collector.
@@ -82,6 +88,7 @@ func NewCollector() *Collector {
 		gauges:   map[string]gauge{},
 		families: map[string]gaugeFamily{},
 		hists:    map[string]*Histogram{},
+		counters: map[string]*counterFamily{},
 	}
 }
 
@@ -280,6 +287,115 @@ func (c *Collector) Histogram(name string) *Histogram {
 	return h
 }
 
+// Counter is a monotone count of something that is not an engine event.
+//
+// The engine's own counters live on the Collector and are fed from OnEvents. This
+// one exists for everything that never reaches the event stream: an order the
+// gateway refused before the matcher saw it, a mass cancel the queue would not
+// take. Those are counts of work the venue REFUSED, and until this type there was
+// nowhere to put them — see docs/LAG-AND-SHED.md §3.
+//
+// One atomic.Int64. The handle is resolved once, at registration, so an increment
+// is one atomic add on a pointer the caller already holds: no map, no hash, no
+// lock, no allocation. That matters because the path that increments hardest is
+// the shed path, which runs while the venue is shedding and has least to spare.
+type Counter struct{ v atomic.Int64 }
+
+// Add increases the counter. n is signed for the same reason atomic.Int64 is, and
+// callers pass 1; a negative n would produce a series that rate() reads as a reset,
+// which is a lie this type will not stop you telling.
+func (ctr *Counter) Add(n int64) { ctr.v.Add(n) }
+
+// Value reads the counter.
+func (ctr *Counter) Value() int64 { return ctr.v.Load() }
+
+// counterFamily is one metric name and every label set registered under it.
+type counterFamily struct {
+	help   string
+	series map[string]*counterSeries // keyed by rendered label set
+}
+
+type counterSeries struct {
+	rendered string
+	ctr      *Counter
+}
+
+// Counter registers (or returns) a monotone counter series and hands back the
+// handle to increment.
+//
+// Same name plus the same labels returns the SAME handle, exactly as
+// Histogram(name) does — registering twice is idempotent rather than a duplicate
+// series. Same name with different labels is another series in the same family,
+// rendered under one HELP and one TYPE line like a gauge family.
+//
+// This is deliberately NOT part of Snapshot. Snapshot is the fixed struct of engine
+// counters, and a map of maps bolted onto it would grow a frozen surface for a
+// convenience nothing needs: a caller either holds the handle or reads the
+// exposition, which is what an operator's monitoring does anyway.
+func (c *Collector) Counter(name, help string, labels ...Label) *Counter {
+	key := renderLabels(labels)
+	c.counterMu.Lock()
+	defer c.counterMu.Unlock()
+	fam, ok := c.counters[name]
+	if !ok {
+		fam = &counterFamily{help: help, series: map[string]*counterSeries{}}
+		c.counters[name] = fam
+	}
+	if s, ok := fam.series[key]; ok {
+		return s.ctr
+	}
+	s := &counterSeries{rendered: key, ctr: &Counter{}}
+	fam.series[key] = s
+	return s.ctr
+}
+
+// writeCounters emits every registered counter family: HELP and TYPE once per name,
+// one line per label set, both sorted so a scrape is byte-stable.
+func (c *Collector) writeCounters(w io.Writer) error {
+	c.counterMu.Lock()
+	names := make([]string, 0, len(c.counters))
+	for name := range c.counters {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	type rendered struct {
+		name, help string
+		lines      []string
+		values     []int64
+	}
+	out := make([]rendered, 0, len(names))
+	for _, name := range names {
+		fam := c.counters[name]
+		keys := make([]string, 0, len(fam.series))
+		for k := range fam.series {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		r := rendered{name: name, help: fam.help}
+		for _, k := range keys {
+			r.lines = append(r.lines, k)
+			r.values = append(r.values, fam.series[k].ctr.Value())
+		}
+		out = append(out, r)
+	}
+	c.counterMu.Unlock()
+
+	for _, r := range out {
+		if len(r.lines) == 0 {
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", r.name, r.help, r.name); err != nil {
+			return err
+		}
+		for i, labels := range r.lines {
+			if _, err := fmt.Fprintf(w, "%s%s %d\n", r.name, labels, r.values[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // Snapshot is the counter set at one instant, for tests and for anything that wants
 // the numbers without parsing an exposition format.
 type Snapshot struct {
@@ -374,6 +490,10 @@ func (c *Collector) WritePrometheus(w io.Writer) error {
 		for _, name := range names {
 			fmt.Fprintf(w, "orderbook_rejections_total{reason=%s} %d\n", quote(name), s.Rejections[name])
 		}
+	}
+
+	if err := c.writeCounters(w); err != nil {
+		return err
 	}
 
 	c.gaugeMu.RLock()
@@ -483,8 +603,10 @@ func quote(s string) string {
 //
 // Fixed buckets rather than a summary with quantiles, because quantiles cannot be
 // aggregated across instances and a venue that ever runs more than one process will
-// want to. The bucket boundaries span the range this engine actually operates in:
-// tens of nanoseconds for a cancel, milliseconds for a mass cancel or a recovery.
+// want to. The bucket boundaries span the range this engine actually operates in —
+// tens of nanoseconds for a cancel, milliseconds for a mass cancel or a recovery —
+// and, at the top, the range a degraded storage device operates in, because a
+// paging threshold above the highest bound is a threshold that can never fire.
 type Histogram struct {
 	buckets []atomic.Int64
 	count   atomic.Int64
@@ -500,6 +622,24 @@ var histogramBounds = []int64{
 	// measures client-observed latency with the same buckets and a tail that stopped
 	// at 25 ms would report every one of those as the same number.
 	100_000_000, 250_000_000,
+	// And past HERE is a storage device that has stopped behaving like one.
+	//
+	// These two exist for a specific alert: obgw_wal_sync_latency_ns pages at a p99
+	// above one second, because that p99 is the variable half of the venue's recovery
+	// point objective (docs/LAG-AND-SHED.md §5.4). With 250 ms as the top finite
+	// bound, a venue whose every fsync took two seconds reported a p99 of exactly
+	// 250000000 — both from Quantile here and from Prometheus's histogram_quantile,
+	// which returns the highest finite bound when the quantile lands in +Inf. The
+	// warn tier fired, the page tier could not, and the number an operator read
+	// during the incident was a quarter of a second when the truth was two.
+	//
+	// A threshold above the top bucket is not a strict threshold, it is a dead one,
+	// and a metric reading healthy while the thing it measures is the thing that is
+	// slow is worse than no metric at all. So the range is extended to cover the
+	// alert rather than the alert trimmed to fit the range. Five seconds is where an
+	// fsync stops being slow and starts being a failed device; beyond it the +Inf
+	// bucket and the exact _sum/_count mean carry the reading.
+	1_000_000_000, 5_000_000_000,
 }
 
 // NewHistogram builds an empty histogram.
@@ -523,6 +663,10 @@ func (h *Histogram) Sum() int64   { return h.sum.Load() }
 // Quantile estimates a quantile from the bucket counts. Bucketed, so it is an upper
 // bound within a bucket's width rather than an exact value — stated because a
 // histogram quantile presented as exact is a small lie that compounds.
+//
+// A reading equal to the top bound means "at least that", not "that": everything in
+// the +Inf bucket reports as the top bound. Sum()/Count() is exact at any magnitude
+// and is what to read when a quantile is pinned there.
 func (h *Histogram) Quantile(q float64) int64 {
 	total := h.count.Load()
 	if total == 0 {

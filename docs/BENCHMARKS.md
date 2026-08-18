@@ -366,6 +366,72 @@ test fixture, not a configuration.** If a deployment needs both small segments a
 clean tail, the fix is to pre-create the next segment ahead of need, which changes the
 crash matrix in [LOG-ROTATION.md](LOG-ROTATION.md) §3.3 and is not in this slice.
 
+### What timing the append costs the append
+
+`BenchmarkTimingOverhead`, `BenchmarkAppendWithoutTiming` and
+`BenchmarkAppendWithTiming` (`cmd/obgw`). The durability path is now instrumented —
+`obgw_wal_append_latency_ns` comes from a `timedLog` `CommandLog` decorator, on the
+matching goroutine — and the measurement's own cost is published rather than asserted,
+because the whole claim in [LAG-AND-SHED.md](LAG-AND-SHED.md) §9 rests on it being
+small.
+
+The measurement on its own, `-benchtime 2000000x -count 5`, Apple M4:
+
+| | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| two `time.Now()` reads + one `Observe` | 70.8 – 95.9 (median **82**) | **0** | **0** |
+
+Re-measured after the shared bucket range was extended to 5 s
+([LAG-AND-SHED.md](LAG-AND-SHED.md) §5.5, two more bounds so the sync histogram's
+paging threshold can be reached at all): **65.0 – 65.2 ns/op, 0 B/op, 0 allocs/op**
+over three runs of 500,000. `sort.Search` over nineteen bounds instead of seventeen is
+the same number of comparisons in practice, and the append benchmarks report **632 B/op
+and 6 allocs/op** on both sides exactly as before. The extra range costs two
+`atomic.Int64` per histogram and two lines of exposition.
+
+Against the append it wraps, `-benchtime 50000x -count 6`, `b.TempDir()` on APFS,
+steady-state runs (the first of each set pays for a cold file and is excluded):
+
+| | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| append, untimed | 1,282 | 632 | 6 |
+| append, timed | 1,344 | 632 | 6 |
+
+So roughly **5% of an append**, and the append-to-append difference is the noisier of
+the two measurements rather than the more authoritative one: the log file grows across
+a run and page-cache behaviour moves the baseline by more than the thing being
+measured. The isolated number is the one to trust and the one to re-run elsewhere.
+
+**Allocations are unchanged**, which is the part that is asserted rather than published
+(`TestAppendTimingAllocatesNothing`, and it holds under `-race` too): a `time.Time` and
+a `time.Duration` are values, nothing is boxed into an interface, and the bucket search
+is a `sort.Search` over nineteen constants followed by three atomic adds. The 5% is of
+the APPEND; the append is a small fraction of the group-committed write path, so the
+venue-level cost is well under half a percent, and the durable path is dominated by an
+fsync this measurement does not touch.
+
+Sampling was rejected. One-in-N would cut this and would lose the one event the
+histogram exists to catch: the 12.4 ms rotation above happens inside a single append,
+about every four minutes at the shipped segment size, and a 1-in-1,000 sample sees it
+approximately never.
+
+The number to be suspicious of is `time.Now()`. It is a vDSO read on Linux and a
+`mach_absolute_time` on Darwin; on some virtualised hosts it traps into the hypervisor,
+where two clock reads per append would not be 5% of an append. `BenchmarkTimingOverhead`
+run on that host is what would reveal it.
+
+Counter increments, from `BenchmarkCounterAdd` (`pkg/observability`), for the refusal
+path:
+
+| | ns/op | allocs/op |
+|---|---:|---:|
+| `Counter.Add` on a resolved handle | 3.1 | 0 |
+| the same increment through a map lookup per call | 127.2 | 5 |
+
+That difference is why `observability.Counter` resolves its label set at REGISTRATION.
+The path that increments hardest is the shed path, which runs while the venue is
+shedding and has least to spare.
+
 ### Against the spec targets (§7)
 
 | Metric | Target | Measured | |

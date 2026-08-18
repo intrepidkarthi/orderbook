@@ -149,9 +149,12 @@ Reading it honestly:
 - **16,985 `queue full` — 0.28% — is the venue at its limit,** briefly. The command
   queue sat near zero for the run and spiked past 2,000 twice. **See §1b: the rate this
   run sustained is not a property of the code, and it did not reproduce.**
-- **p99 of 250 ms is the top bucket, and the load generator is on the same machine.**
-  Treat the tail as an upper bound with the harness's own scheduling in it, not as a
-  venue figure. p50 of 5 ms through a real socket, a real protocol and an fsync-ing log
+- **p99 of 250 ms was the top bucket at the time of this run, and the load generator is
+  on the same machine.** Treat the tail as an upper bound with the harness's own
+  scheduling in it, not as a venue figure. (The shared bucket range now runs to 5 s —
+  see [LAG-AND-SHED.md](LAG-AND-SHED.md) §5.5 — so a rerun would report a real number
+  here rather than a pinned one. The figure above is not comparable to one taken after
+  that change.) p50 of 5 ms through a real socket, a real protocol and an fsync-ing log
   is the number to reason from.
 
 ### The log is the capacity constraint nobody had costed

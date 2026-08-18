@@ -4,7 +4,9 @@ Procedures for the failures this venue can actually have, written from the code 
 produces them. Each names the signal you will see first, what the code has already
 done by the time you look, what to do, and what will make it worse.
 
-**Every entry here is drilled in CI** — see `cmd/obgw/drills_test.go`. Each drill
+**Every entry here is drilled in CI** — see `cmd/obgw/drills_test.go`, which carries
+the index, and the signal-specific files beside it (`refusals_test.go`,
+`waltiming_test.go`, `snapshotsignals_test.go`). Each drill
 induces the real failure rather than a simulation of its symptoms, asserts the signal
 this page tells you to look for, and where a procedure is prescribed, runs it. The
 corrupt-snapshot drill really deletes the file and restarts, and checks the replayed
@@ -51,9 +53,37 @@ The numbers to watch, from `/metrics` on the admin listener.
 | `obgw_goroutines` | not tracking `obgw_connections` × 4 + a fixed set | A leaked session |
 | `obgw_open_files` | rising with flat connections | Leaked descriptors end the day outright: accept fails, and everyone already connected stays perfectly healthy |
 | `orderbook_phase` | ≠ 1 unexpectedly | The venue halted or went cancel-only without an operator doing it |
+| `obgw_refused_total{reason="overloaded"}` | **any increase** | The venue shed client orders. Queue depth should have crossed 0.75 first; if it did not, the burst outran the scrape or the matcher stalled |
+| `obgw_refused_total{reason="throttled"}` | 10× the trailing hour | Non-zero is normal at 1,000/s per account. The step change is the signal; a level threshold pages every time a client is onboarded |
+| `obgw_refused_total{reason="shutting_down"}` | any increase with no deployment in progress | Something is stopping this process and it is not you |
+| `obgw_refused_total{reason="halted"}` | any increase while `orderbook_phase` is 1 | A refusal for a halted book against a book reporting open: the stop-water mark went cancel-only between scrapes |
+| `obgw_login_refused_total{reason="not_authorised"}` | any sustained rate, or 10× the trailing hour | Somebody is guessing passwords, or a deployment is carrying stale credentials. Disjoint from `obgw_refused_total`: these peers never got a session, so nothing in that family moves for them |
+| `obgw_login_refused_total{reason="no_session"\|"bad_sequence"}` | any increase outside a restart window | Clients are losing their place in their own streams. After a restart it is expected and self-clearing; at other times a client is asking to resume from a sequence retention has dropped |
+| `obgw_shed_unreported_total` | **any increase** | A disconnected client's orders were left resting after the venue undertook to pull them. Nobody was told, because there was nobody to tell |
+| `obgw_wal_append_latency_ns` p99 | > 1 ms sustained 5 min | Normal is ~10 µs. Two orders of magnitude up means the page cache is not absorbing writes; still below a rotation's 12.4 ms, which must not trip it |
+| `obgw_wal_sync_latency_ns` p99 | > 100 ms; page at > 1 s | This IS the variable half of the recovery point objective. The published 20 ms window is the ticker, not the window. **The quantile saturates at the 5 s top bucket** — a reading of exactly `5000000000` means "at least that"; take `_sum`/`_count` for the true figure |
+| `obgw_wal_sync_latency_ns_count` | not advancing for 5 s while `orderbook_last_event_sequence` advances | The group-commit loop is gone. The venue is acknowledging orders it is not making durable, and nothing else says so |
+| *(both WAL histograms)* | — | **Venue-wide, merged across books.** At a multi-book venue nothing on this page says WHICH book's log is slow; no per-book latency series exists. Narrow it with `orderbook_wal_disk_free_bytes{symbol}` and the device, not with this page |
+| `orderbook_snapshot_age_seconds` | > 3× the checkpoint interval (90 s at the default); page at 10× | The recovery base is stale and every minute makes the next restart longer. The venue is still trading, deliberately |
+| `orderbook_snapshot_age_seconds` | `NaN` unexpectedly, or negative | `NaN`: started without `-snapshot`, so every restart replays the whole log. Negative: see [§ A negative snapshot age](#a-negative-snapshot-age) |
+| `obgw_snapshot_failures_total` | any increase | Why the age is climbing. The previous snapshot is still in force and retention still runs against it, so nothing is lost yet |
+| `rate(obgw_snapshot_duration_ns_sum[5m]) / 1e9` | > 0.25 | The fraction of wall time this process spends writing snapshots, across every book, computed directly. `_sum`/`_count` is a per-write mean and does NOT multiply by the book count, so it reads healthy at any number of books. At 1.0 the loop never completes a cycle and the configured interval is fiction |
+| `obgw_snapshot_duration_ns_count` | not advancing while `obgw_snapshot_failures_total` is flat and a snapshot path is configured | The checkpoint goroutine is not running, as opposed to running and failing. Same shape as the sync-count heartbeat, and the age gauge alone cannot tell the two apart |
+| `obgw_recovery_duration_ns` | > 30 s warn, > 120 s page, or > 2× the previous restart | The trend is the real alert: recovery cost is invisible until the restart you did not choose |
 
 `/readyz` returns 503 on the first two. `/healthz` deliberately does not — see
-[§ A stuck matching goroutine](#a-stuck-matching-goroutine).
+[§ A stuck matching goroutine](#a-stuck-matching-goroutine). It returns **200 with a
+degraded clause** for a stale snapshot, which is a decision rather than an omission —
+see [§ Checkpoints have stopped landing](#checkpoints-have-stopped-landing).
+
+The refusal counters are **not** the same population as `orderbook_rejections_total`
+and the two must never be added. `orderbook_rejections_total{reason}` counts what the
+BOOK refused, in engine words, for orders that reached the matcher.
+`obgw_refused_total{reason}` counts what the GATEWAY sent, in wire codes, including
+refusals that never reached a queue at all. They overlap where the gateway relays an
+engine error onto the wire, and neither is a total. If they diverge in the direction
+of the gateway, the venue is refusing work before the book sees it, which is what
+overload looks like.
 
 ---
 
@@ -703,6 +733,172 @@ features.
 
 ---
 
+## Checkpoints have stopped landing
+
+**Signal.** `orderbook_snapshot_age_seconds{symbol}` above 3× the checkpoint interval,
+`obgw_snapshot_failures_total{symbol}` incrementing, and `obgw: <symbol> checkpoint:
+<error>` in the log. `/readyz` returns **200** with a clause naming the book and the
+age:
+
+```
+ready: queue 0/8192, event sequence 41552 (degraded: BTC-USD checkpoint 412s old, 13 failures)
+```
+
+**What the code has done.** It kept trading, on purpose. Every acknowledged command is
+still in the log, the PREVIOUS snapshot is still valid, and recovery still produces the
+correct book. Retention deliberately still runs against that previous snapshot
+(`server.go`'s `retain` re-reads and verifies it rather than trusting the write that
+just failed), so nothing has been destroyed. What a failed checkpoint costs is
+**recovery time later** — the tail to replay grows, and with `-wal-retain` set the
+retained set eventually cannot be joined to the snapshot at all.
+
+**Why this does not fail readiness**, against the obvious symmetry with a WAL failure:
+a WAL failure means a command acknowledged NOW is not durable NOW, per command, and
+every second of continued trading adds to the set of orders the venue has lied about. A
+snapshot failure costs none of that. Readiness at a venue does not move traffic
+elsewhere — it stops this book receiving orders while it holds every position already
+in it, and it invites the orchestrator to restart the node, which is exactly the
+restart the failed checkpoint has been making more expensive. See
+[LAG-AND-SHED.md](LAG-AND-SHED.md) §7.
+
+**What to do.**
+
+1. Find out why the write failed. The commonest answer is space:
+   `orderbook_wal_disk_free_bytes`. The next is permissions on the snapshot's
+   directory.
+2. Fix it, and confirm the next tick lands: the age gauge drops back below the
+   interval and the failure counter stops moving.
+3. If you cannot fix it quickly, plan a restart while the age is still small. Recovery
+   cost is what is growing, and it grows for as long as this lasts.
+
+**What makes it worse.**
+
+- **Restarting into the stale base for no reason.** Restarting is the one operation
+  whose cost this failure is inflating. Do it deliberately or not at all.
+- **Disabling retention to "stop it deleting things".** Retention is not deleting
+  anything — its predicate needs a verified snapshot covering the segments it would
+  remove, so a frozen snapshot has already stopped it. It is the one thing still
+  bounding the disk once the checkpoint comes back.
+- **Adding a rule that takes the venue cancel-only after N failures.** That trades a
+  recovery-time problem for a certain trading outage, on a timer, unattended. The disk
+  path already does it when the disk actually runs out, which is the condition that
+  justifies it — see [§ The disk filled up](#the-disk-filled-up), which is where this
+  failure terminates if nothing is done.
+
+Drilled by `TestDrillCheckpointFailureKeepsTrading` and
+`TestSnapshotAgeClimbsWhenCheckpointsFail`.
+
+---
+
+## The group-commit loop has stopped
+
+**Signal.** `obgw_wal_sync_latency_ns_count` flat for more than five seconds while
+`orderbook_last_event_sequence` is still advancing. Nothing else moves: no error, no
+log line, `/readyz` green.
+
+**What the code has done.** Nothing, and that is the problem. `syncLoop` is a bare
+goroutine on a 20 ms ticker; if it is gone, the venue keeps accepting orders, keeps
+acknowledging them, keeps matching them, and stops making any of it durable. The
+latched `walFailed` path does **not** catch this: it catches a sync that FAILED, and
+this is a sync that never happened.
+
+The count is a heartbeat rather than a workload measure — it advances at about 50 per
+second on a completely idle venue, because the ticker fires whether or not anything is
+buffered. That is deliberate: a heartbeat that stopped when the market went quiet
+would stop exactly when nobody is watching.
+
+**Except under `-sync-every-command`,** where `syncLoop` is never started at all: the
+fsync happens inline with each command, so the count advances once per command and is
+zero on an idle venue. The alert still holds, because it is a conjunction — a flat
+count *while `orderbook_last_event_sequence` advances* — and in that mode a command
+that advanced the sequence must have synced. Only the "50 per second" reading changes.
+
+**What to do.** Take the node out of rotation and restart it. There is no in-place
+recovery: the goroutine cannot be restarted from outside, and every command
+acknowledged since the count froze may not be on disk. On the way back up, expect
+recovery to replay from the last successful sync.
+
+**What makes it worse.**
+
+- **Assuming `/readyz` would have caught it.** Readiness watches the queue and the
+  event sequence, and both are healthy here — the matcher is fine, the disk is fine,
+  and the only thing missing is the fsync.
+- **Waiting for `walFailed`.** It will not latch. See above.
+
+Drilled by `TestDrillTheGroupCommitLoopHasStopped`, which kills the goroutine for real
+and checks the count freezes while the event sequence keeps moving.
+
+---
+
+## Orders left resting after a disconnect
+
+**Signal.** `obgw_shed_unreported_total{op="cancel_on_disconnect"}` increased, with
+`obgw: cancel-on-disconnect for <account> on <symbol>: matching: runner command queue
+is full` in the log.
+
+**What the code has done.** A client with cancel-on-disconnect enabled lost its
+connection, the venue tried to pull its resting orders, and the command queue would not
+take the sweep. There is no client left to reject, so **nobody was told** — this is the
+one shed in the gateway that produces no wire message, and it is the most consequential
+one. Those orders are still in the book: owned by a session that no longer exists,
+still able to trade, cancellable only by an operator or a restart.
+
+That is the same class of harm as `obgw_publisher_dropped_total`. Not a delay, a loss.
+
+**What to do.**
+
+1. The log line names the account and the book. There will be one line per book.
+2. Reconcile that account's resting orders against the market-data feed — they are
+   live liquidity and they are quoting on the client's behalf.
+3. Cancel them by hand. The account cannot: its session is gone, and a new session's
+   mass cancel is the cleanest way to do it if the client can be asked to reconnect
+   and send one.
+4. Then find out why the queue was full. It will have been shedding client orders at
+   the same moment — check `obgw_refused_total{reason="overloaded"}` and
+   [§ A stuck matching goroutine](#a-stuck-matching-goroutine).
+
+**What makes it worse.** Assuming the sweep will be retried. It will not: the
+disconnect handler runs once, and there is nothing left holding the intent.
+
+Drilled by `TestCancelOnDisconnectDropIsCounted`, which asserts both halves — the
+counter moved, and the orders really are still resting.
+
+---
+
+## A negative snapshot age
+
+**Signal.** `orderbook_snapshot_age_seconds{symbol}` is below zero. Nothing else has
+changed and the venue is trading normally.
+
+**What the code has done.** Nothing, deliberately. The age is
+`time.Now() - stat(snapshot).ModTime()` and it is **not clamped at zero**. Clamping
+would report the freshest possible snapshot at exactly the moment the host's clock is
+wrong, which is the failure mode this whole page exists to avoid — a reading that looks
+healthy while the thing it measures is broken.
+
+**What to do.** Two causes, and they need opposite responses, so establish which one
+first:
+
+1. **This host's clock moved backwards.** Compare the host clock against a reference
+   (`chronyc tracking`, `timedatectl`, `ntpq -p`). If it has jumped, the snapshot age is
+   the least of it: **time-in-force deadlines and the audit trail read the same clock**.
+   A backwards jump can expire a DAY order early or late and can make the journal's
+   timestamps non-monotonic. Take the node out of rotation before correcting the clock,
+   because a step correction under load changes when orders expire.
+2. **The snapshot is on a network filesystem and the SERVER's clock is the one that is
+   wrong.** On NFS the mtime is stamped by the server, so a skewed pair produces a
+   persistently negative age with nothing wrong with this host at all. The tell is that
+   the offset is constant rather than a one-off jump, and that the host's own clock
+   checks out. Fix the pair's synchronisation; this venue has no signal that
+   distinguishes the two for you.
+
+**What makes it worse.** Reading it as a clock-offset metric. It is not one — a process
+cannot measure its own clock's error, and this venue has no external reference. A
+negative age says *something about time is wrong here*, not by how much and not whose.
+See [§ What has no runbook](#what-has-no-runbook).
+
+---
+
 ## What has no runbook
 
 Named because a gap you know about is worth more than a page that pretends otherwise.
@@ -715,6 +911,11 @@ Named because a gap you know about is worth more than a page that pretends other
   credential file and restarting is still the whole of the procedure, and it still
   drops every other session too. Replace `orderentry.Authenticator` before you need
   this.
-- **Clock disagreement.** No clock-synchronisation attestation and no procedure for a
-  host whose clock has jumped, which matters because time-in-force deadlines and the
-  audit trail both read it.
+- **Clock disagreement.** No clock-synchronisation attestation, and no clock-offset
+  metric — a process cannot measure its own clock's error without an external
+  reference, and this venue has none. What it now has is one partial signal and a
+  procedure for it: a negative `orderbook_snapshot_age_seconds` means time is wrong
+  somewhere, and [§ A negative snapshot age](#a-negative-snapshot-age) says what to do
+  about it. That is a detector for one direction of one kind of jump, and it is not a
+  substitute for clock attestation. Time-in-force deadlines and the audit trail both
+  read this clock and neither is covered.

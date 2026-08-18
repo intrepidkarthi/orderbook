@@ -455,6 +455,30 @@ below `-wal-min-free` (2 GiB) the venue warns and runs retention immediately; be
 flat while new orders — the largest source of log growth — are refused; and a sync
 that actually fails halts the book, latches until a restart, and fails readiness.
 
+**The recovery point objective is 20 ms PLUS the p99 of the fsync, and the second term
+is now measured.** This page and `pkg/wal`'s package comment both used to state the
+window as a constant, and 20 ms is the TICKER rather than the window: the group-commit
+loop is a single goroutine, so an fsync that takes 200 ms delays the next tick by
+200 ms and the venue's real recovery point quietly becomes 220 ms.
+`obgw_wal_sync_latency_ns` closes that: its p99 IS the variable half of the figure, it
+has an alert threshold on this page's companion (`RUNBOOKS.md`, > 100 ms, page at 1 s —
+and review caught that page tier sitting above the histogram's top bucket, where it
+could never have fired, so the bucket range was widened to reach it), the quantile
+saturates at 5 s where `_sum`/`_count` is the exact reading, and its `_count` is the
+only signal there is that the group-commit goroutine is still alive at all — `walFailed` latches on a sync that FAILED, and a sync that never
+HAPPENS moves nothing. See [LAG-AND-SHED.md](LAG-AND-SHED.md) §5.
+
+**A failed checkpoint is now defined too, and deliberately does not fail readiness.**
+It used to write one log line and change nothing observable. Now
+`orderbook_snapshot_age_seconds{symbol}` climbs, `obgw_snapshot_failures_total{symbol}`
+counts, and `/readyz` returns 200 with a clause naming the book and the age. A WAL
+failure means a command acknowledged NOW is not durable NOW; a snapshot failure means
+recovery will be slow LATER, and only one of those is a reason to stop a book that is
+holding positions. `obgw_recovery_duration_ns{symbol}` reports what the last restart of
+each book actually cost, so the arithmetic above stops being a benchmark and becomes a
+number this deployment can watch across restarts. See
+[LAG-AND-SHED.md](LAG-AND-SHED.md) §7 and §8.
+
 ### The financial stack — absent by design
 
 No fees or rebates. No clearing or settlement. No positions or margin — liquidation

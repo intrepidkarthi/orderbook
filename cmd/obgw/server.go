@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"path/filepath"
 	"sync"
@@ -255,6 +256,30 @@ type Server struct {
 	applyHist *observability.Histogram
 	admin     admin
 
+	// What the venue refused, and what it waits on — docs/LAG-AND-SHED.md.
+	//
+	// refused is indexed by wire reason code, resolved once at startup, so a refusal
+	// costs an array index and one atomic add rather than a map lookup under a lock
+	// on the path that runs hardest exactly when the venue has least to spare.
+	refused        [refusedSeriesCount]*observability.Counter
+	shedUnreported *observability.Counter
+	// loginRefused counts refusals taken BEFORE a session exists, which speak a
+	// different vocabulary (soup reject bytes, not wire reason codes) and so cannot
+	// be folded into refused above. Separate metric, not a fudged label — see
+	// docs/LAG-AND-SHED.md §4.6.
+	loginRefused map[byte]*observability.Counter
+	// The three histograms are venue-wide rather than per book, and deliberately:
+	// observability.Histogram has no label support, and a checkpoint's or an fsync's
+	// cost is mostly the DEVICE's, which every book on this node shares. Which book
+	// stopped is answered by the labelled gauges instead.
+	appendHist *observability.Histogram
+	syncHist   *observability.Histogram
+	snapHist   *observability.Histogram
+	// startedAt is what a snapshot age counts from when checkpointing is configured
+	// and no file has landed yet. Not what it counts from once one has — see
+	// Server.snapshotAgeSeconds.
+	startedAt time.Time
+
 	wal      *wal.Writer
 	ln       net.Listener
 	mdLn     net.Listener
@@ -283,6 +308,7 @@ type Server struct {
 // NewServer builds a server and its engine. With WALPath set it recovers from
 // disk first, then serves — which is the whole point of shipping a log.
 func NewServer(cfg Config) (*Server, error) {
+	started := time.Now()
 	cfg.applyDefaults()
 
 	reg := orderentry.NewRegistry(cfg.Incarnation, cfg.StreamRing)
@@ -307,6 +333,11 @@ func NewServer(cfg Config) (*Server, error) {
 	// there is no venue-wide recovery step and nothing a skewed set of restarts
 	// could violate (docs/MULTI-SYMBOL.md §4.4).
 	set := newBookSet()
+	// The durability histograms are registered only by a venue that has a log. A
+	// venue with none has nothing to time, and exporting two histograms that can
+	// only ever read zero would put two more families on a page §14 already worries
+	// is getting long.
+	var appendHist, syncHist *observability.Histogram
 	var manifest *matching.Manifest
 	if len(cfg.Symbols) > 1 {
 		if cfg.DataDir == "" {
@@ -369,7 +400,27 @@ func NewServer(cfg Config) (*Server, error) {
 			// venue with no log, which is also where a fresh one starts.
 			recoveredThrough int64
 		)
+		// recoveredIn is how long this book took to go from "we have a configuration"
+		// to "this book can run": the recovery read, BOTH adoptions, and opening the
+		// log for appending. NaN for a venue with no log, which did not recover —
+		// zero would read as "recovered instantly", which is the one answer that is
+		// never true. See registerGauges.
+		recoveredIn := math.NaN()
 		if walPath != "" {
+			if appendHist == nil {
+				appendHist = col.Histogram(walAppendLatencyMetric)
+				syncHist = col.Histogram(walSyncLatencyMetric)
+			}
+			// The clock starts HERE, not around wal.RecoverWithOptions alone. The
+			// operator's question is "how long was my venue down", and the two Adopts
+			// below are O(book): at 100 K orders they are not a rounding error on a
+			// 174 ms recovery. Measuring the narrow interval would produce a number
+			// reliably smaller than the truth, which is the worst kind of wrong for a
+			// figure that feeds a recovery time objective.
+			//
+			// It excludes process start, flag parsing and listener bind. Those are
+			// constant, and they are not what grows.
+			recoveryStart := time.Now()
 			// Recover with NO event sink attached. Replaying the log re-emits every
 			// historical event, and a publisher attached during recovery would fan a
 			// lifetime of executions at whoever connected next.
@@ -454,6 +505,7 @@ func NewServer(cfg Config) (*Server, error) {
 			if w, err = wal.OpenWith(walPath, cfg.walOptions()); err != nil {
 				return nil, fmt.Errorf("obgw: open wal %s: %w", symbol, err)
 			}
+			recoveredIn = float64(time.Since(recoveryStart).Nanoseconds())
 		}
 
 		eng.EventSink = sink
@@ -465,10 +517,17 @@ func NewServer(cfg Config) (*Server, error) {
 		// segfault on the first run with durability disabled.
 		rc := matching.RunnerConfig{Engine: eng, QueueSize: 8192, LastApplied: recoveredThrough}
 		if w != nil {
+			// timedLog goes INSIDE syncingLog, never outside. Outside, the append
+			// histogram would contain syncingLog's fsync and would be a copy of the
+			// sync histogram under a different name, in the one mode where durability
+			// matters most. See timedLog and TestAppendLatencyExcludesTheSync.
+			timed := &timedLog{inner: w, hist: appendHist}
 			if cfg.SyncEveryCommand {
-				rc.Log = &syncingLog{w: w}
+				// The group-commit loop does not run in this mode, so the decorator's
+				// own fsync is the only place sync latency can come from.
+				rc.Log = &syncingLog{w: w, inner: timed, hist: syncHist}
 			} else {
-				rc.Log = w
+				rc.Log = timed
 			}
 		}
 		// recovered is nil without a WAL, in which case NewRunnerFor builds a fresh
@@ -480,10 +539,22 @@ func NewServer(cfg Config) (*Server, error) {
 		// order of the session came to claim it covered none of it.
 		runner := matching.NewRunnerFor(recovered, rc)
 
+		// The failure counter is registered even for a book that never fails one,
+		// because a series that appears the first time it moves is a series no alert
+		// was written against. Age says the recovery base is stale; this says why.
+		var snapFailures *observability.Counter
+		if _, snapPath := cfg.paths(symbol); snapPath != "" {
+			snapFailures = col.Counter(snapshotFailuresMetric,
+				"Checkpoints that could not be written, per instrument. The PREVIOUS snapshot stays in force and "+
+					"retention still runs against it, so nothing is destroyed — what grows is the next restart. Alert on any increase.",
+				observability.Label{Name: "symbol", Value: symbol})
+		}
 		set.add(&symbolBook{
 			symbol: symbol, shardIndex: shardIndex,
 			runner: runner, feed: feed, wal: w,
-			gate: gateway.New(runner, gateway.Config{Rate: cfg.RatePerSec, Burst: cfg.Burst}),
+			gate:          gateway.New(runner, gateway.Config{Rate: cfg.RatePerSec, Burst: cfg.Burst}),
+			snapFailures:  snapFailures,
+			recoveredInNs: recoveredIn,
 		})
 	}
 	primary := set.first()
@@ -494,21 +565,42 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	srv := &Server{
-		cfg:       cfg,
-		books:     set,
-		manifest:  manifest,
-		auth:      auth,
-		wal:       primary.wal,
-		runner:    primary.runner,
-		gate:      primary.gate,
-		feed:      primary.feed,
-		metrics:   col,
-		applyHist: col.Histogram(applyLatencyMetric),
-		reg:       reg,
-		pub:       pub,
-		quit:      make(chan struct{}),
-		conns:     map[net.Conn]struct{}{},
+		cfg:        cfg,
+		books:      set,
+		manifest:   manifest,
+		auth:       auth,
+		wal:        primary.wal,
+		runner:     primary.runner,
+		gate:       primary.gate,
+		feed:       primary.feed,
+		metrics:    col,
+		applyHist:  col.Histogram(applyLatencyMetric),
+		appendHist: appendHist,
+		syncHist:   syncHist,
+		startedAt:  started,
+		reg:        reg,
+		pub:        pub,
+		quit:       make(chan struct{}),
+		conns:      map[net.Conn]struct{}{},
 	}
+	// The snapshot-duration histogram belongs to the checkpoint loop, so it is
+	// registered only by a venue that checkpoints at all.
+	for _, b := range set.all() {
+		if _, snapPath := cfg.paths(b.symbol); snapPath != "" {
+			srv.snapHist = col.Histogram(snapshotDurationMetric)
+			break
+		}
+	}
+	// Seed the readiness path's cached snapshot mtime before anything can probe.
+	//
+	// This is what makes the first /readyz after a restart honest: a venue recovered
+	// onto a base backdated two hours reports 7200 seconds on its first probe and is
+	// degraded immediately, rather than reporting the freshest possible reading at the
+	// moment it is at its most exposed.
+	for _, b := range set.all() {
+		srv.refreshSnapshotMTime(b)
+	}
+	srv.registerRefusalCounters()
 	srv.registerGauges()
 	return srv, nil
 }
@@ -707,7 +799,26 @@ func (s *Server) syncLoop() {
 				if b.wal == nil {
 					continue
 				}
-				if err := b.wal.Sync(); err != nil {
+				// Timed here rather than inside pkg/wal, and timed even when it
+				// fails: an fsync that returned an error still spent the time.
+				//
+				// The p99 of this histogram is not only a latency number. It is the
+				// VARIABLE HALF of the venue's published recovery point objective:
+				// this loop is one goroutine, so a sync that takes 200 ms delays the
+				// next tick by 200 ms and the real window is 20 ms + this, not 20 ms.
+				//
+				// Its _count is also the only heartbeat this goroutine has. walFailed
+				// latches on a sync that FAILS; a sync that never HAPPENS moves
+				// nothing, and the venue would go on acknowledging orders it was not
+				// making durable. The count advances at ~50/s on a completely quiet
+				// venue, which is the point — a heartbeat that stopped when the market
+				// went quiet would stop exactly when nobody is watching.
+				start := time.Now()
+				err := b.wal.Sync()
+				if s.syncHist != nil {
+					s.syncHist.Observe(time.Since(start))
+				}
+				if err != nil {
 					s.failDurability(b, err)
 				}
 			}
@@ -775,9 +886,33 @@ func (s *Server) checkpointLoop() {
 				if err != nil {
 					return // shutting down
 				}
+				// This times the WRITE and not the pause, and the omission is
+				// deliberate. b.runner.Checkpoint() above serialises the book on the
+				// MATCHING goroutine — that is the half that stops trading — but it is
+				// a synchronous send through the command queue, so a stopwatch around
+				// it from here would measure queue wait plus work. Under load the wait
+				// dominates, and an operator watching this rise would conclude their
+				// book had grown when in fact their queue had. Measuring the pause
+				// honestly means timing it inside dispatch, which needs a hook into
+				// pkg/matching this slice declines to add; what covers it meanwhile is
+				// obgw_message_apply_latency_ns, where a client actually feels it.
+				snapStart := time.Now()
 				if err := wal.WriteSnapshot(snapPath, snap); err != nil {
 					log.Printf("obgw: %s checkpoint: %v", b.symbol, err)
+					if b.snapFailures != nil {
+						b.snapFailures.Add(1)
+					}
+				} else if s.snapHist != nil {
+					s.snapHist.Observe(time.Since(snapStart))
 				}
+				// Refresh the readiness path's cached mtime from here, where a stat is
+				// already among friends. Unconditionally, including after a failure:
+				// the file that is still there is the base a restart would use, and its
+				// mtime is the age an operator has to be told about. If this loop dies
+				// the cache stops being refreshed, and because it holds an mtime rather
+				// than an age, the age it yields goes on climbing — which is precisely
+				// the alert.
+				s.refreshSnapshotMTime(b)
 				// Retention runs whether or not this checkpoint landed, and skipping it
 				// when the write failed was backwards: the write fails on a full disk, which
 				// is precisely when freeing segments is the only automatic thing left that
@@ -1040,7 +1175,10 @@ func (s *Server) handle(conn net.Conn) {
 	// venue that answers "no such account" faster than "wrong password" will tell
 	// anyone who asks which of its participants exist.
 	if !s.auth.Authenticate(req.Username, req.Password) {
-		_ = wire.WritePacket(conn, wire.PacketLoginRejected, []byte{wire.RejectNotAuthorised})
+		// Through rejectLogin, not straight to the socket: a refusal the page cannot
+		// see is a refusal that does not exist during the incident it matters in, and
+		// credential stuffing is exactly that incident.
+		s.rejectLogin(conn, wire.RejectNotAuthorised)
 		return
 	}
 
@@ -1055,7 +1193,7 @@ func (s *Server) handle(conn net.Conn) {
 			if errors.Is(err, orderentry.ErrNoSuchStream) {
 				code = wire.RejectNoSession
 			}
-			_ = wire.WritePacket(conn, wire.PacketLoginRejected, []byte{code})
+			s.rejectLogin(conn, code)
 			return
 		}
 	}
@@ -1518,7 +1656,7 @@ func (sess *session) cancel(payload []byte) {
 		return id, ok
 	})
 	if err != nil {
-		sess.reject(m.ClOrdID, orderentry.ReasonOverloaded)
+		sess.reject(m.ClOrdID, enqueueRefusalReason(err))
 	}
 }
 
@@ -1560,11 +1698,7 @@ func (sess *session) reduce(payload []byte) {
 		return sess.srv.reg.OrderIDFor(sess.account, m.ClOrdID)
 	})
 	if err != nil {
-		reason := orderentry.ReasonOverloaded
-		if errors.Is(err, matching.ErrShuttingDown) {
-			reason = orderentry.ReasonShuttingDown
-		}
-		sess.reject(m.ClOrdID, reason)
+		sess.reject(m.ClOrdID, enqueueRefusalReason(err))
 		return
 	}
 	go func() {
@@ -1642,11 +1776,7 @@ func (sess *session) replaceOrder(payload []byte) {
 		return sess.srv.reg.OrderIDFor(sess.account, m.OrigClOrdID)
 	})
 	if err != nil {
-		reason := orderentry.ReasonOverloaded
-		if errors.Is(err, matching.ErrShuttingDown) {
-			reason = orderentry.ReasonShuttingDown
-		}
-		sess.reject(m.Order.ClOrdID, reason)
+		sess.reject(m.Order.ClOrdID, enqueueRefusalReason(err))
 		return
 	}
 	go func() {
@@ -1690,11 +1820,7 @@ func (sess *session) massCancel(payload []byte) {
 	for _, b := range all {
 		done, err := b.runner.TryCancelAllAsync(sess.account)
 		if err != nil {
-			reason := orderentry.ReasonOverloaded
-			if errors.Is(err, matching.ErrShuttingDown) {
-				reason = orderentry.ReasonShuttingDown
-			}
-			sess.reject("", reason)
+			sess.reject("", enqueueRefusalReason(err))
 			return
 		}
 		dones = append(dones, done)
@@ -1770,6 +1896,26 @@ func (sess *session) pullBookIfRequested() {
 	for _, b := range sess.srv.books.all() {
 		if _, err := b.runner.TryCancelAllAsync(sess.account); err != nil {
 			log.Printf("obgw: cancel-on-disconnect for %s on %s: %v", sess.account, b.symbol, err)
+			// A SHED only, and the discrimination matters because the runbook entry
+			// for this counter says any increase means orders were left resting and
+			// must be reconciled by hand.
+			//
+			// ErrShuttingDown does leave the orders resting, and it is not that: the
+			// venue is closing for the day and those orders are supposed to come back
+			// after the restart. The quit check above closes most of that window, but
+			// a session whose read loop returned microseconds before quit closed still
+			// reaches here, and sending the on-call to reconcile a book on a clean
+			// deploy is how a page-on-any-increase counter stops being read.
+			//
+			// Everything else is counted. The venue undertook to pull this account's
+			// resting orders, the queue would not take the command, and the orders
+			// STAY in the book: owned by a session that no longer exists, still able
+			// to trade, cancellable only by an operator or a restart. Same class of
+			// harm as a dropped publisher batch — not a delay, a loss — which is why
+			// it gets its own counter rather than being folded in beside a throttle.
+			if !errors.Is(err, matching.ErrShuttingDown) {
+				sess.srv.countShedUnreported()
+			}
 		}
 	}
 }
@@ -1835,9 +1981,52 @@ func (sess *session) reportOpenOrders() {
 	sess.send(b)
 }
 
+// enqueueRefusalReason maps an enqueue failure onto the wire reason to send.
+//
+// One function rather than the same three-line switch at four call sites, because the
+// three-line switch was only correct at one of them. Every site used to start from
+// ReasonOverloaded and special-case a drain, so a cancel refused during a planned
+// restart was reported to the client as OVERLOAD — harmless while nothing counted it,
+// and the moment obgw_refused_total exists every clean deploy adds to the one series
+// in this family that PAGES ON ANY INCREASE.
+//
+// ErrNoResolver is neither condition. It means a caller passed a nil id resolver,
+// which is a bug in this process and not a statement about load, so it maps to
+// "other" and never to overloaded. It cannot happen today — every closure is
+// non-nil — and that is exactly why it has to be handled here rather than at
+// whichever site somebody remembers.
+func enqueueRefusalReason(err error) uint16 {
+	switch {
+	case errors.Is(err, matching.ErrShuttingDown):
+		return orderentry.ReasonShuttingDown
+	case errors.Is(err, matching.ErrNoResolver):
+		return orderentry.ReasonOther
+	default:
+		return orderentry.ReasonOverloaded
+	}
+}
+
 // reject reports that the command itself was refused, as distinct from an order
 // the engine looked at and declined.
 func (sess *session) reject(clOrdID string, reason uint16) {
+	// Counted HERE, at the one funnel every client-visible refusal already passes
+	// through, and counted BEFORE the encode.
+	//
+	// Here, because it makes the count complete by construction: a new ingress path
+	// cannot forget to count, since it cannot refuse without calling this. Counting
+	// at each `if err != nil` site instead is a list that goes stale the first time
+	// somebody adds one — the same failure docs/JOURNAL-COMPLETENESS.md §4.2 spends a
+	// section on for the command log.
+	//
+	// Before the encode, because a refusal the venue could not deliver — a failed
+	// encode below, or a send that drops the connection because the client stopped
+	// reading — is still a refusal, and the client is WORSE off for not hearing it,
+	// not better. The metric counts the decision, not the successful delivery.
+	//
+	// Not the same population as orderbook_rejections_total, which counts what the
+	// BOOK refused. They overlap where the gateway relays an engine error onto the
+	// wire, neither is a total, and adding them is meaningless.
+	sess.srv.countRefusal(reason)
 	b, err := wire.EncodeCmdReject(nil, wire.CmdReject{Version: wire.Version, ClOrdID: clOrdID, Reason: reason})
 	if err != nil {
 		return

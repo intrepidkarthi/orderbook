@@ -432,17 +432,21 @@ matching.TrailingEntry struct
 matching.TrailingEntry.Order *types.Order
 matching.TrailingEntry.State types.TrailingState
 matching.TrailingEntry.Trail int64
+observability.(*Collector).Counter(name, help string, labels ...Label) *Counter
 observability.(*Collector).Gauge(name, help string, fn func() float64)
 observability.(*Collector).GaugeFamily(name, help string, fn func() []Series)
 observability.(*Collector).Histogram(name string) *Histogram
 observability.(*Collector).OnEvents(evs []matching.Event)
 observability.(*Collector).Snapshot() Snapshot
 observability.(*Collector).WritePrometheus(w io.Writer) error
+observability.(*Counter).Add(n int64)
+observability.(*Counter).Value() int64
 observability.(*Histogram).Count() int64
 observability.(*Histogram).Observe(d time.Duration)
 observability.(*Histogram).Quantile(q float64) int64
 observability.(*Histogram).Sum() int64
 observability.Collector struct
+observability.Counter struct
 observability.Histogram struct
 observability.Label struct
 observability.Label.Name string

@@ -242,6 +242,19 @@ func (s *Server) readinessWith(depth, capacity int) (bool, string) {
 	if capacity > 0 && float64(depth)/float64(capacity) > readyQueueHighWater {
 		return false, fmt.Sprintf("behind: queue %d/%d", depth, capacity)
 	}
+	// A venue that cannot checkpoint keeps trading, keeps reporting READY, and says
+	// so here. That is a deliberate asymmetry with the WAL-failure branch above, not
+	// an oversight, and the distinction is worth learning: a WAL failure means
+	// commands acknowledged NOW are not durable; a snapshot failure means recovery
+	// will be slow LATER. Only one of those is a reason to stop trading.
+	//
+	// Readiness at a venue does not move traffic elsewhere — it stops this book
+	// receiving orders while it holds every position already in it, and it invites
+	// the orchestrator to restart the node, which is exactly the restart the failed
+	// checkpoint has been making more expensive. See docs/LAG-AND-SHED.md §7.
+	if degraded := s.checkpointDegradation(); degraded != "" {
+		return true, fmt.Sprintf("ready: queue %d/%d, event sequence %d (degraded: %s)", depth, capacity, seq, degraded)
+	}
 	return true, fmt.Sprintf("ready: queue %d/%d, event sequence %d", depth, capacity, seq)
 }
 
@@ -374,6 +387,49 @@ func (s *Server) registerGauges() {
 		})
 	c.Gauge("orderbook_wal_disk_free_bytes", "Free space on the filesystem holding the write-ahead log, sampled each checkpoint.",
 		func() float64 { return float64(s.walFree.Load()) })
+	// orderbook_ rather than obgw_, because this is a fact about the VENUE that
+	// anything able to see the directory could compute: it is the snapshot file's
+	// own mtime, not something this process remembers. Which is also why it survives
+	// a restart — a venue that has just recovered reports the true age of the base it
+	// recovered from, before its first checkpoint tick, and a process-local timer
+	// would report zero for a base two days old.
+	//
+	// Seconds, not nanoseconds, against the rest of this page's convention: its
+	// natural magnitude is minutes to hours, and a gauge reading 4.2e+12 is a number
+	// nobody reads correctly at three in the morning.
+	c.GaugeFamily(snapshotAgeMetric,
+		"Age of the on-disk snapshot per instrument, from its mtime. NaN when this venue was not asked to checkpoint; "+
+			"seconds since process start when it was and none has landed; negative when this host's clock went backwards.",
+		func() []observability.Series {
+			all := s.books.all()
+			out := make([]observability.Series, 0, len(all))
+			for _, b := range all {
+				out = append(out, observability.Series{
+					Labels: []observability.Label{{Name: "symbol", Value: b.symbol}},
+					Value:  s.snapshotAgeSeconds(b),
+				})
+			}
+			return out
+		})
+	// Books recover SERIALLY, in the configuration's symbol order, so sum() over
+	// this family is the venue's real recovery cost. That is why it is one labelled
+	// family rather than a per-book metric plus a separate venue total: two names for
+	// one number is how they drift.
+	c.GaugeFamily(recoveryDurationMetric,
+		"Nanoseconds this process spent recovering each book at startup: the log read, both adoptions and opening the "+
+			"log for appending. Books recover serially, so sum() is the venue's downtime. NaN where there was no log. "+
+			"It never moves; read max_over_time across restarts, and alert on 2x the previous one.",
+		func() []observability.Series {
+			all := s.books.all()
+			out := make([]observability.Series, 0, len(all))
+			for _, b := range all {
+				out = append(out, observability.Series{
+					Labels: []observability.Label{{Name: "symbol", Value: b.symbol}},
+					Value:  b.recoveredInNs,
+				})
+			}
+			return out
+		})
 
 	c.Gauge("obgw_connections", "Established client sockets across both edges.",
 		func() float64 { return float64(s.connCount()) })

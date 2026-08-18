@@ -96,7 +96,7 @@ one-line summary says *which part*.
 | M11 | Optimize matching data structures | **partial** | Profile-first discipline is followed and one measured index replacement landed (cancel 47.7 ns → 23.3 ns). Experiments 2, 3 and 5 are untouched, 4 is half done, and no alternative is kept behind an interface for A/B — which is what the milestone asks for. |
 | M12 | Control runtime and hardware behavior | **not started** | Established by grep: `GOMAXPROCS`, `LockOSThread`, `GOGC`, `GOMEMLIMIT` and `PGO` each appear exactly once in the repository, in this file. |
 | M13 | Capacity and operational evidence | **partial** | A real harness, a nightly hosted soak, and a 4 h × 3-book × 14.4 M-message run with flat goroutines and descriptors. No 24 h run, no reconnect storm, no slow reader, no clock drill, and the load carries only limit GTC and IOC. |
-| M14 | Observability and incident operations | **partial** | Sixteen metric families, alert thresholds written down, every runbook entry drilled in CI, and a reference dashboard. No lag metric of any kind, no structured logging, no trace ids, no machine-readable alert rules. |
+| M14 | Observability and incident operations | **partial** | Sixteen metric families, alert thresholds written down, every runbook entry drilled in CI, and a reference dashboard. The venue now counts what it REFUSED and times its own durability path, snapshots and recovery ([`LAG-AND-SHED.md`](LAG-AND-SHED.md)); replica, commit, feed and clock lag are still missing, as are structured logging, trace ids and machine-readable alert rules. |
 | M15 | Venue functions outside the matcher | **out of scope by design** | Deliberately not built here; see [`PRODUCTION-READINESS.md`](PRODUCTION-READINESS.md) §"The financial stack — absent by design". |
 
 Two things this table is careful not to do. It does not count a **declared refusal** as
@@ -1224,9 +1224,20 @@ not exist as a single artefact.
 
 ## M14 — Complete observability and incident operations
 
-> **Status: partial — the counters exist and every runbook entry is drilled; every
-> *lag* is missing, and so is the whole logging and alerting layer.** The pattern:
-> this venue can tell you what it did, and cannot tell you how far behind it is.
+> **Status: partial — the venue now counts what it refused and times what it waits on
+> LOCALLY; the lags that need another party are still missing, and so is the whole
+> logging and alerting layer.** The original diagnosis was one sentence — *this venue
+> can tell you what it did, and cannot tell you how far behind it is* — and half of it
+> has been answered. [`LAG-AND-SHED.md`](LAG-AND-SHED.md) built four signals: refusal
+> and shed counters, WAL append and sync latency, snapshot age/duration/failure, and
+> recovery duration, each with a threshold in [`RUNBOOKS.md`](RUNBOOKS.md) §"Alert
+> thresholds" and a drill that induces the real condition.
+>
+> What is still missing is the lag between this process and something ELSE: replica,
+> commit and feed lag all need a second party or a per-subscriber position this venue
+> does not export, and clock offset needs an external reference a process cannot be its
+> own source for. Those are named below and argued in
+> [`LAG-AND-SHED.md`](LAG-AND-SHED.md) §10 rather than left as a bare cross.
 
 Add metrics for:
 
@@ -1234,21 +1245,21 @@ Add metrics for:
 - ✅ accepted and rejected rate — `orderbook_orders_accepted_total`, `orderbook_orders_rejected_total`
 - ✅ reject reason — `orderbook_rejections_total{reason}`, with the exact label string pinned against the runbook by `TestDrillTheCeilingRejectionNamesItself` (`cmd/obgw/drills_test.go:355`)
 - ✅ queue occupancy — `orderbook_queue_depth` / `orderbook_queue_capacity`
-- ❌ queue-full events — **nothing anywhere counts a shed.** `TryEnqueue` returns `ErrQueueFull` at the gateway, which maps it to a wire reject and sends it; it never becomes a `matching.EventRejected`, and the collector counts reasons only off that event. The rate-gate refusal is invisible the same way
+- ✅ queue-full events — `obgw_refused_total{reason}`, seventeen wire-reason series counted in `session.reject`, the single funnel every refusal ON AN ESTABLISHED SESSION passes through, so it is complete by construction over that population. Includes the rate gate's throttles, which never reach a queue at all. Refusals taken BEFORE a session exists — failed logins and refused resumes — speak a different vocabulary and are counted separately by `obgw_login_refused_total{reason}`; review found them counted nowhere, behind a permanently-zero `not_authorised` series that read as evidence of the opposite ([`LAG-AND-SHED.md`](LAG-AND-SHED.md) §4.6). Plus `obgw_shed_unreported_total{op}` for the one shed that produces no wire message: a cancel-on-disconnect sweep the queue would not take, which leaves orders resting for a client that asked for them to be pulled ([`LAG-AND-SHED.md`](LAG-AND-SHED.md) §4)
 - ✅ apply latency — `obgw_message_apply_latency_ns`, buckets 100 ns–250 ms with quantiles
-- ❌ WAL append latency — the only `Observe` call sites in non-test code are the message-apply histogram and the client side of `cmd/obsoak`
-- ❌ WAL sync latency — same
-- ❌ commit lag
-- ❌ replica lag — readable only inside `examples/replication` (`primary.LogSeq()` versus `follower.Applied()`); `obgw` exports nothing
-- ❌ feed lag
+- ✅ WAL append latency — `obgw_wal_append_latency_ns`, from a `timedLog` `CommandLog` decorator in `cmd/obgw`. It never contains an fsync, which is the whole rule; the count is asserted equal to `Writer.Seq()` so a command kind cannot go silently untimed
+- ✅ WAL sync latency — `obgw_wal_sync_latency_ns`, containing nothing but the fsync. Its p99 **is** the variable half of the published recovery point objective, which was stated as a constant until this existed, and its `_count` is the only heartbeat the group-commit goroutine has ([`LAG-AND-SHED.md`](LAG-AND-SHED.md) §5)
+- ❌ commit lag — needs a durable sequence and an applied sequence that mean the same thing on both sides of a failover, which is M2 contract work. Deliberately deferred rather than guessed
+- ❌ replica lag — readable only inside `examples/replication` (`primary.LogSeq()` versus `follower.Applied()`); `obgw` has no replication topology, so a lag gauge exported from it would read zero forever, and a metric that is always green is worse than an absent one
+- ❌ feed lag — subscriber eviction is defined and drilled; the lag of a subscriber not yet evicted needs a per-subscriber position exported from `marketdata.Feed`, which is a per-connection cardinality question this page has not had to answer
 - ✅ publisher drops — `obgw_publisher_dropped_total`
-- ❌ snapshot age
-- ❌ snapshot duration — a failed checkpoint writes a log line and does not move a gauge or affect `/readyz`
-- ❌ recovery duration
+- ✅ snapshot age — `orderbook_snapshot_age_seconds{symbol}`, computed at scrape from the snapshot file's **mtime**, so it survives a restart and reports the true age of the base a venue just recovered from. `NaN` when the venue was not asked to checkpoint; negative, and not clamped, when the host's clock went backwards
+- ✅ snapshot duration — `obgw_snapshot_duration_ns` over `wal.WriteSnapshot`, plus `obgw_snapshot_failures_total{symbol}` where the log line already was. A failed checkpoint now moves both a gauge and a counter and adds a degraded clause to `/readyz` — which still returns **200**, deliberately ([`LAG-AND-SHED.md`](LAG-AND-SHED.md) §7). The matching-goroutine pause is still untimed and §6.2 says why
+- ✅ recovery duration — `obgw_recovery_duration_ns{symbol}`, spanning the recovery read, BOTH adoptions and opening the log, because the operator's question is how long the venue was down rather than how long `pkg/wal` took. Books recover serially, so `sum()` is the venue's downtime
 - ✅ disk usage — `orderbook_wal_disk_free_bytes`
 - ✅ WAL growth — `orderbook_wal_bytes`, `orderbook_wal_segments`, per-symbol series
 - ❌ GC pauses — `obgw_heap_bytes` is exported via `runtime/metrics`; nothing about pauses
-- ❌ clock offset — no metric and no signal of any kind
+- ❌ clock offset — a process cannot measure its own clock's error; it needs an NTP or PTP reference, which is a deployment integration rather than a metric. The nearest thing this venue has is a NEGATIVE `orderbook_snapshot_age_seconds`, which is not offered as a substitute
 - ✅ operation tail latency — quantiles off the apply histogram
 
 Also built and not on the list above: a **matcher-stall signal**
@@ -1269,14 +1280,28 @@ Add:
 
 Define degraded behavior for WAL failure, disk pressure, matcher stalls, replica lag, publisher overload, snapshot failure, authentication backend failure, clock skew, feed lag, and stale-primary reconnection.
 
-**Seven of the ten are defined and drilled in CI**: WAL failure (halts the book, fails
+**Eight of the ten are defined and drilled in CI**: WAL failure (halts the book, fails
 readiness first, latches), disk pressure (`diskfull_test.go:33`, `:134`), matcher
-stalls (`drills_test.go:223` — and `:272` proves a mass cancel is *not* one), publisher
-overload (`:310`), feed lag (subscriber eviction), stale-primary reconnection (D4), and
-replica lag (D6, though only inside the example). **Three are undefined**: snapshot
-failure (logged only), authentication backend failure (`Authenticator` has no failure
+stalls (`drills_test.go` — and the mass-cancel drill proves a sweep is *not* one),
+publisher overload, feed lag (subscriber eviction), stale-primary reconnection (D4),
+replica lag (D6, though only inside the example), and now **snapshot failure**: the
+venue keeps trading, keeps reporting ready, and says so in the readiness body, with the
+age gauge and the failure counter carrying the signal and
+[`RUNBOOKS.md`](RUNBOOKS.md) §"Checkpoints have stopped landing" carrying the
+procedure. That asymmetry with the WAL path is argued in
+[`LAG-AND-SHED.md`](LAG-AND-SHED.md) §7 and drilled by
+`TestDrillCheckpointFailureKeepsTrading`, which exists so nobody "fixes" it back.
+
+**Two are undefined**: authentication backend failure (`Authenticator` has no failure
 mode plumbed to readiness or metrics), and clock skew, for which
 [`RUNBOOKS.md`](RUNBOOKS.md) states there is no procedure.
+
+One failure that had no signal at all now has one and is worth naming separately,
+because nobody asked for it: **a group-commit loop that stopped**. `walFailed` latches
+on a sync that FAILED; a sync that never HAPPENS moved nothing, and the venue would go
+on acknowledging orders it was not making durable. A flat
+`obgw_wal_sync_latency_ns_count` against a live `orderbook_last_event_sequence` is that
+signal, and `TestDrillTheGroupCommitLoopHasStopped` kills the goroutine for real.
 
 ---
 

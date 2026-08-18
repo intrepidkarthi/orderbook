@@ -41,11 +41,19 @@
 //
 // Closing that window is the embedder's decision rather than this package's,
 // because the two answers differ by a factor of hundreds. cmd/obgw
-// group-commits every 20ms by default, so a crash loses at most that much, and
-// takes -sync-every-command for anyone who wants acknowledgement to follow
-// durability instead — correct, and roughly 210× the cost (docs/BENCHMARKS.md).
-// Sync before you acknowledge, or state your window. Do not assume this package
-// chose for you.
+// group-commits every 20ms by default and takes -sync-every-command for anyone
+// who wants acknowledgement to follow durability instead — correct, and roughly
+// 210× the cost (docs/BENCHMARKS.md). Sync before you acknowledge, or state your
+// window. Do not assume this package chose for you.
+//
+// State the window correctly, too. 20ms is the TICKER, not the window: the
+// group-commit loop is a single goroutine, so an fsync that takes 200ms delays
+// the next tick by 200ms and the real recovery point becomes 220ms with nothing
+// saying so. The honest figure is 20ms PLUS the p99 of the fsync itself, which
+// is why cmd/obgw exports obgw_wal_sync_latency_ns and alerts on its p99 — see
+// docs/LAG-AND-SHED.md §5.4. That histogram's p99 is the variable half of the
+// number, and until it existed the venue published a recovery point objective it
+// had no way to verify.
 //
 // The two failure modes are treated differently on purpose. A crash mid-write
 // leaves a torn tail — a short final record — which the reader stops at cleanly,

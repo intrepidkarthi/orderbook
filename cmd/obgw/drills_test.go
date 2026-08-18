@@ -51,6 +51,16 @@ import (
 //	                               TestResumeRefusesEvictedSequence (pkg/orderentry)
 //	Publisher dropping batches     TestDrillDroppedBatchesAreVisible
 //	Book at its order ceiling      TestDrillTheCeilingRejectionNamesItself
+//	Checkpoints stopped landing    TestDrillCheckpointFailureKeepsTrading,
+//	                               TestSnapshotAgeClimbsWhenCheckpointsFail
+//	                               (snapshotsignals_test.go)
+//	Group-commit loop stopped      TestDrillTheGroupCommitLoopHasStopped (waltiming_test.go)
+//	Orders left after a disconnect TestCancelOnDisconnectDropIsCounted (refusals_test.go)
+//	The shed nobody counted        TestDrillAShedIsCounted (refusals_test.go)
+//	A negative snapshot age        TestSnapshotAgeIsNaNWithoutASnapshotPath/a_backwards_clock…
+//	                               (snapshotsignals_test.go) — the signal. The procedure is
+//	                               a clock investigation off this host, which CI cannot run.
+//	Refused logins                 TestFailedLoginsAreCounted (refusals_test.go)
 
 // --- RUNBOOKS.md § A corrupt log record ---------------------------------------
 
