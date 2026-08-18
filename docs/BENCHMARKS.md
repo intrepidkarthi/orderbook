@@ -261,9 +261,19 @@ which is O(book) and untouched by this change.
 
 Three things fall out:
 
-1. **Allocation is flat in the covered prefix.** 2.0 MiB whether the prefix is 50,000
-   records or 500,000. Covered records are read into two reused buffers and never
-   decoded, so they allocate nothing at all.
+1. **Allocation is flat in the covered prefix.** Covered records are read into two
+   reused buffers and never decoded, so they allocate nothing at all.
+
+   The table above says 2.0 MiB, which is what this measured when the skip landed. It
+   is **2.26 MiB today**, and the flatness is what matters rather than the constant:
+   re-measured at `eff84e6`, allocation moves from 2,366,272 to 2,367,008 bytes across
+   a five-hundred-fold range of covered prefix, which is 0.03%. The rise was bisected
+   to one commit — `wal.Entry` gaining its `Phase` field, so every entry retained in
+   the thousand-record tail now carries it. That is the price of making a trading-phase
+   transition durable and it is worth paying; it is recorded here because a figure that
+   drifts without anyone saying so is how a benchmark table stops being evidence. The
+   rows above are left at their measured-on-the-day values rather than restated, since
+   they are a before-and-after of that change and not a claim about now.
 2. **Time fell by ~26× at half a million covered records**, to ~112 ns a record. The
    design that specified this predicted roughly half, from the mislabelled `ReadAll`
    row above. Taking the marginal cost between the 50,000- and 500,000-record rows,
