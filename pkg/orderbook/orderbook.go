@@ -197,11 +197,16 @@ func (ob *OrderBook) Add(order *types.Order) error {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
 
+	if order.ID != 0 {
+		if _, exists := ob.nodes.get(order.ID); exists {
+			return nil
+		}
+	}
+
 	if ob.nodes.len() >= ob.maxOrders {
 		return types.ErrOrderBookFull
 	}
 
-	ob.sequenceNum++
 	if order.ID == 0 {
 		ob.orderSeq++
 		order.ID = ob.orderSeq
@@ -209,6 +214,7 @@ func (ob *OrderBook) Add(order *types.Order) error {
 	if _, exists := ob.nodes.get(order.ID); exists {
 		return nil
 	}
+	ob.sequenceNum++
 
 	price := order.Price
 	var level *PriceLevel
