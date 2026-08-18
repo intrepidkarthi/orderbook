@@ -137,6 +137,61 @@ versions may include breaking changes).
 
 ### Fixed
 
+- **A failing fill-or-kill no longer corrupts an iceberg it consumed.** A fill-or-kill
+  that exhausted a resting iceberg's reserve and was then refused left that client's
+  order with a **negative `FilledQty`**, its entire hidden reserve **displayed** in the
+  open, a shown size larger than the order's own quantity, and its refill registration
+  dropped so it never reloaded again. Measured on the two-command reproduction: 9 total
+  / 3 displayed became `FilledQty -6`, `RemainingQty 9`, reserve 0, best ask `100:9`.
+  An iceberg exists to hide size; one rejected order from an unrelated account leaked
+  all of it, permanently.
+
+  The cause was two paths disagreeing about who owns the rewind. `reverseTrade` assumes
+  a maker still carries the fills a print made against it, and `IcebergOrder.Refill` is
+  the only code in the engine that breaks that: it resets `Quantity`, `FilledQty` and
+  `RemainingQty` on the *same* order object and re-adds it under the same id, so three
+  prints against three slices are three prints against one object whose counters
+  describe only the last. The code that breaks a precondition pays to restore it, so
+  the walk now **saves an iceberg's whole state the first time it is about to trade
+  against it** and the failure branch **restores it whole** — slice, fill counters,
+  status, reserve, refill counter and registry entry — with those prints never passed
+  to `reverseTrade` and their refill `ACCEPTED`s dropped alongside the reversed trades.
+  `reverseTrade` itself is unchanged; its precondition is now written on it.
+
+  A rejected fill-or-kill now leaves an iceberg exactly as it found it — with ±20% peak
+  jitter on a 30/5 iceberg, the state after `[iceberg, failed FOK, buy, buy, buy]` is
+  identical in every field to `[iceberg, buy, buy, buy]`. The published L2 aggregate and
+  the L3 stream both stop reporting size the book does not have.
+
+  **Queue position included**, and it took a second pass to get right. The restore
+  happens at the iceberg's *first* reversed print rather than ahead of the whole
+  reversal, so the slice re-enters its level exactly where an ordinary maker put back by
+  the same reversal would: behind everyone whose print came earlier, ahead of everyone
+  whose print came later. Restoring it up front instead — which is what the first cut of
+  this fix did — handed the iceberg time priority over makers that had been resting *in
+  front of* it, a change no counter, aggregate or event could witness because the level
+  keeps the same order ids and only their order is wrong. The bound that remains is the
+  one `reverseTrade` already had for every maker: a maker left resting mid-level by a
+  self-trade-prevention decrement keeps its place, and everything the walk removed
+  re-enters behind it.
+
+  **It is not retroactive.** `EngineSnapshot` carries each iceberg's reserve and refill
+  count, so an order already corrupted on a running venue survives a snapshot round
+  trip unrepaired — a snapshot is a state, not a program. The remedy is to cancel and
+  re-enter the order, and the corruption is recognisable: `FilledQty < 0`, or a
+  displayed size larger than the order's `Quantity`. Replay is a different matter and
+  is covered by the semantics bump below.
+
+  Nothing in the invariant suite caught this, which was the second half of the defect:
+  `filled + remaining == quantity` still held (−6 + 9 = 3), and the check only ever ran
+  on the order just submitted — the taker, the one order a reversal defect cannot be
+  on. `checkInvariants` is now a whole-book check that also asserts `filled >= 0`, that
+  a resting order has remaining size and an active status, and that each level's
+  maintained aggregate equals the orders actually resting there;
+  `FuzzExoticOrders` gained a fill-or-kill symbol in the same change, because an
+  invariant with no reachable input is decoration. Design, alternatives and sabotage
+  runs: [PINNED-DEFECTS.md](docs/PINNED-DEFECTS.md).
+
 - **`OrderBook.Add` no longer refuses a duplicate id when the book is full**, and no
   longer advances the book sequence for an add that changes nothing. The method
   documents duplicate ids as ignored, but it checked capacity and bumped
@@ -196,6 +251,69 @@ versions may include breaking changes).
 
 ### Changed
 
+- **A cascade-fired stop or trailing stop whose order the venue refuses now publishes a
+  `CANCELED` for that order after its `ACCEPTED`, and a consumer must apply it.** This
+  is a new event in a stream consumers reconstruct the book from; a consumer counting
+  `CANCELED` events will see more of them.
+
+  When a stop fires from inside another command's walk, `cascadeStops` announces its
+  order `TRIGGERED` and then `ACCEPTED` before settling it. If settling **refused** it —
+  a fill-or-kill that cannot fill — the refusal reached nobody: the terminal event fired
+  only on a cancelled status, and a cascade-fired order never reaches the submit path's
+  event composer, so both its status and its rejection reason were discarded. The
+  stream said an order entered the book and never said it left. Reproduced at six
+  commands: a consumer's reconstruction held `3@200:50` forever while the engine held
+  nothing, and `pkg/marketdata`'s L2 feed published 46 lots at 200 that the book did not
+  have.
+
+  The kind is `CANCELED` and not `REJECTED`, deliberately. `CANCELED`'s documented
+  meaning is already "order removed: cancelled, **or terminated without resting**",
+  every consumer already treats it as a delete and none treats a `REJECTED` as one — so
+  `REJECTED` here would ship a new rule for every consumer inside the patch whose whole
+  point is that consumers are already wrong about this order. The reason survives on the
+  event: `Order.Status` reads `REJECTED` and `Reason` carries `ErrFOKCannotFill`, which
+  `pkg/orderentry` turns into a client-facing cancel with a reason code — a message the
+  client whose contingent order was refused has never received before and should have.
+  Ordering is `TRIGGERED → ACCEPTED → (prints, dropped if reversed) → CANCELED`, in the
+  same batch; the `CANCELED` deliberately comes *after* the `ACCEPTED`, because before
+  it a reconstruction deletes an order it has not yet added and the phantom returns.
+
+  **One widening beyond the defect, named rather than discovered:** a cascade-fired
+  *market* order that finds no liquidity already ended cancelled and already published a
+  `CANCELED`; that event now carries `ErrMarketOrderNoLiquidity` where it previously
+  carried none. It is strictly more information on a field that is already optional.
+  [PINNED-DEFECTS.md](docs/PINNED-DEFECTS.md) §4.
+
+- **`matching.SemanticsVersion` is 1 → 2**, covering the two entries above (the iceberg
+  fix under *Fixed*, and the cascade `CANCELED` here). Only the iceberg fix is
+  replay-visible — a journal containing a fill-or-kill that failed after consuming at
+  least one full slice of a resting iceberg replays to a **different, and correct,** book
+  on this build, and `wal.Recover` will refuse a pre-upgrade segment whose records it is
+  about to apply. RUNBOOKS' "Upgrading across a semantics change" is the procedure,
+  unchanged. Registry row: [SEMANTICS-VERSION.md](docs/SEMANTICS-VERSION.md) §1.2.
+
+  That replay sentence holds for a recovery that starts from a **snapshot**, and the
+  bound is stated here because a reader would otherwise assume it holds for both paths.
+  A snapshot carries each iceberg's reserve and refill count; a journal does not, because
+  `AppendIceberg` logs an order whose quantity has already been shrunk to the display
+  size, so a **log-only** recovery rebuilds every iceberg with an empty reserve and the
+  fixed path is never reached on it. That is pre-existing and unchanged by this release —
+  it reproduces identically on the previous build with no fill-or-kill involved — and it
+  is now pinned by `TestLogOnlyRecoveryLosesAnIcebergsReserve`, the first test covering
+  iceberg journal recovery at all. [PINNED-DEFECTS.md](docs/PINNED-DEFECTS.md) §13.7.
+
+  The bump is worth a sentence of its own, because it nearly did not happen.
+  `internal/semcheck` was **green** on both fixes: its corpus reached icebergs and
+  reached stops and never crossed a fill-or-kill with either, so neither defect was in
+  the fingerprint and under Rule 22 neither could be bumped for. The corpus gained
+  thirteen appended commands first — a fill-or-kill that exhausts an iceberg's reserve
+  and fails, a follow-up buy proving the restored reserve still reloads, a stop fired by
+  a cascade whose order is refused, and a maker resting *in front of* an iceberg that the
+  same failing fill-or-kill sweeps, whose golden line names which of the two kept
+  priority — and the number moved on the strength of the thirteen golden lines that
+  appeared. Two coverage counters, `IcebergRestores` and `CascadeTerminals`, fail the
+  corpus guard if anyone removes them.
+
 - **A journal now declares which matcher wrote it, and recovery refuses rather than
   replaying it into a different book.** The three changes below alter what matching
   does with the same input, so a log recorded before them and recovered after them
@@ -206,7 +324,8 @@ versions may include breaking changes).
   was wrong in a way nothing downstream flagged. Spec, and the reasoning behind every
   rule: [SEMANTICS-VERSION.md](docs/SEMANTICS-VERSION.md).
 
-  **`matching.SemanticsVersion` is 1**, and it is neither a release version nor a
+  **`matching.SemanticsVersion` was introduced at 1** (it is **2** on this branch — see
+  the bump entry above), and it is neither a release version nor a
   format version. It identifies an equivalence class of BUILDS: two builds share a
   version if and only if, for every command sequence and every configuration, they
   produce the same trades, events, verdicts and book. A release version used as the
