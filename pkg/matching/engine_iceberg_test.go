@@ -1,6 +1,7 @@
 package matching
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -157,4 +158,83 @@ func slicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// --- two findings pinned, not fixed ------------------------------------------
+//
+// The iceberg-durability audit (docs/ICEBERG-DURABILITY.md §1.3) went looking for
+// the journal's copy of a defect and found two more consumers of the same cause:
+// types.NewIcebergOrder shrinks the order it is handed to the display size, so
+// everything downstream of the constructor — including this package's ingress size
+// caps — sees the SLICE where the client sent a TOTAL.
+//
+// They are pinned rather than fixed for the reason docs/PINNED-DEFECTS.md §9 gave
+// for declining the journal one: "should an iceberg's cap be its total or its
+// slice?" is a venue-policy question with its own answer to justify, real venues
+// differ, and changing what the engine accepts IS a matching-semantics change with a
+// corpus extension and a version bump behind it. None of that belongs in a
+// journal-format slice. A measured finding left unpinned is how it gets found a
+// third time.
+
+// TestIcebergEvadesTheMaxOrderSizeCap PINS a defect. It asserts today's behaviour on
+// purpose, and the sentence a fix has to come and delete is on the assertion itself.
+//
+// Config.MaxOrderQty is the fat-finger cap: the largest single order the venue will
+// accept. A plain sell of 9 with the cap at 5 is refused. The SAME NINE LOTS posted
+// as an iceberg showing 3 is accepted, because by the time checkOrderCaps sees the
+// order its Quantity is 3 — the cap is evaded by exactly the hidden quantity, which
+// is the quantity it exists to bound.
+func TestIcebergEvadesTheMaxOrderSizeCap(t *testing.T) {
+	cfg := DefaultConfig("BTC-USD")
+	cfg.MaxOrderQty = 5
+	e := NewEngine(cfg)
+
+	// The control: nine lots as an ordinary order, refused.
+	if res := e.Process(lim(t, "whale", types.SideSell, 100, 9)); res.Status != types.OrderStatusRejected {
+		t.Fatalf("a plain sell of 9 under MaxOrderQty=5 ended %s, want REJECTED — the control has "+
+			"broken, so this pin no longer measures what it claims to", res.Status)
+	}
+
+	// The same nine lots, shown three.
+	ib := iceberg(t, "whale", types.SideSell, 100, 9, 3)
+	res := e.ProcessIceberg(ib)
+	if res.Status == types.OrderStatusRejected {
+		t.Fatalf("an iceberg of 9 shown 3 was refused under MaxOrderQty=5. IF THIS IS NOW REJECTED THE " +
+			"DEFECT HAS BEEN FIXED: the cap has started seeing the client's TOTAL, and this test should " +
+			"be inverted keeping its name. docs/ICEBERG-DURABILITY.md §1.3 and §8")
+	}
+	if ib.Hidden != 6 {
+		t.Fatalf("the accepted iceberg holds %d in reserve, want 6 — the whole point of the pin is that "+
+			"the cap was evaded by exactly the hidden quantity", ib.Hidden)
+	}
+	if _, qty, ok := e.BestAsk(); !ok || qty != 3 {
+		t.Fatalf("the accepted iceberg shows %d at the offer, want 3", qty)
+	}
+}
+
+// TestIcebergIsRefusedForAMinimumItExceeds PINS the same cause pointing the other
+// way, and this one refuses an order that is far ABOVE the floor it is measured
+// against.
+//
+// Config.MinOrderQty rejects dust. An iceberg of 90 shown 3 is ninety lots of real
+// size — eighteen times the floor — and it is refused for being three.
+func TestIcebergIsRefusedForAMinimumItExceeds(t *testing.T) {
+	cfg := DefaultConfig("BTC-USD")
+	cfg.MinOrderQty = 5
+	e := NewEngine(cfg)
+
+	res := e.ProcessIceberg(iceberg(t, "whale", types.SideSell, 100, 90, 3))
+	if res.Status != types.OrderStatusRejected {
+		t.Fatalf("an iceberg of 90 shown 3 was accepted under MinOrderQty=5, status %s. IF THIS IS NOW "+
+			"ACCEPTED THE DEFECT HAS BEEN FIXED: the floor has started seeing the client's TOTAL, and "+
+			"this test should be inverted keeping its name. docs/ICEBERG-DURABILITY.md §1.3 and §8",
+			res.Status)
+	}
+	if !errors.Is(res.RejectionReason, types.ErrOrderBelowMinQty) {
+		t.Fatalf("the refusal reason is %v, want ErrOrderBelowMinQty — if it is refused for something "+
+			"else this pin is recording the wrong defect", res.RejectionReason)
+	}
+	if _, _, ok := e.BestAsk(); ok {
+		t.Fatal("the refused iceberg rested anyway")
+	}
 }

@@ -159,6 +159,15 @@ type Entry struct {
 	PegOffset  int64        `json:"peg_offset,omitempty"`  // KindPegged
 	Trail      int64        `json:"trail,omitempty"`       // KindTrailing
 
+	// TotalQty is a KindIceberg's total size — the quantity the client submitted, of
+	// which DisplayQty is shown at a time. It is deliberately the same number as
+	// Order.Quantity, and it is not redundant: a record written before this field
+	// existed carries Order.Quantity SHRUNK to the display size, and no reader can
+	// tell that from a record whose total genuinely equals its display. Presence is
+	// the discriminator, and a valid iceberg's total is always positive, so omitempty
+	// never drops it. See docs/ICEBERG-DURABILITY.md §3.
+	TotalQty int64 `json:"total_qty,omitempty"` // KindIceberg
+
 	// MarkPrice is the new mark/index reference of a KindSetMark, in ticks. It gets
 	// its own field rather than borrowing CancelID, which the Runner reuses as an
 	// int64 payload internally: the log is read by tooling and by humans, and a
@@ -1115,13 +1124,41 @@ func (w *Writer) AppendOCO(o *types.OCOOrder) (int64, error) {
 	return w.append(Entry{Kind: KindOCO, Order: o.Primary, StopOrder: o.Stop.Order, StopPrice: o.Stop.StopPrice})
 }
 
-// AppendIceberg logs a ProcessIceberg. Order.Quantity is the total and DisplayQty the
-// slice; without the slice size a replay would show the whole reserve.
+// AppendIceberg logs a ProcessIceberg as the CLIENT SENT IT: Order.Quantity is the
+// TOTAL and DisplayQty the slice shown at a time.
+//
+// That sentence has been the doc comment here for four releases and was not true for
+// any of them. types.NewIcebergOrder shrinks the order it is handed to the display
+// size and puts the remainder on the wrapper, so by the time a write-ahead log can
+// see it, ib.Order.Quantity is already the slice — and ib.Hidden was never written at
+// all. A replay rebuilt every iceberg with hidden = display - display = 0, and a
+// venue recovering from its journal alone came back with the client's reserve GONE.
+// docs/ICEBERG-DURABILITY.md.
+//
+// Two rules do the repair and both are load-bearing:
+//
+//   - The record states TotalRemaining — the hidden reserve plus the unfilled part
+//     of the visible slice — which at submit time, the only time a Runner logs one,
+//     is exactly the client's total. A write-ahead log records COMMANDS, and the
+//     command was "iceberg, nine lots, show three"; what it recorded instead was a
+//     post-constructor artifact of how this package represents that command.
+//   - It logs a COPY. The engine is about to match against that exact pointer, and a
+//     writer that "restored" the total on the live order would rest nine lots showing
+//     nine — this defect inverted and worse.
+//
+// TotalQty carries the same number a second time, on purpose: it is the witness that
+// a record was written by a build that knew the difference. See Entry.TotalQty and
+// ErrIcebergReserveUnknown.
 func (w *Writer) AppendIceberg(ib *types.IcebergOrder) (int64, error) {
 	if ib == nil {
 		return w.Seq(), nil
 	}
-	return w.append(Entry{Kind: KindIceberg, Order: ib.Order, DisplayQty: ib.DisplayQty})
+	total := ib.TotalRemaining()
+	rec := *ib.Order
+	rec.Quantity = total
+	rec.RemainingQty = total
+	rec.FilledQty = 0
+	return w.append(Entry{Kind: KindIceberg, Order: &rec, DisplayQty: ib.DisplayQty, TotalQty: total})
 }
 
 // AppendPegged logs a ProcessPegged.
@@ -1729,7 +1766,20 @@ func restoreEntry(eng *matching.Engine, e Entry) bool {
 			eng.ProcessOCO(o)
 		}
 	case KindIceberg:
-		if ib, err := types.NewIcebergOrder(e.Order.Fresh(), e.DisplayQty); err == nil {
+		// TotalQty when the record states it; otherwise Order.Quantity, which is what
+		// this arm has always used and what a hand-built record means by it. The
+		// fallback is not decoration: entryKindSamples writes {Order: qty 10,
+		// DisplayQty: 2} and expects a reserve of 8, because the total in Quantity is
+		// what any reader assumes the field means. A record that cannot state its
+		// total is refused by Recover before it reaches here unless an operator
+		// accepted the loss — see gateIcebergReserves.
+		total := e.TotalQty
+		if total == 0 {
+			total = e.Order.Quantity
+		}
+		o := e.Order.Fresh()
+		o.Quantity, o.RemainingQty = total, total
+		if ib, err := types.NewIcebergOrder(o, e.DisplayQty); err == nil {
 			eng.ProcessIceberg(ib)
 		}
 	case KindPegged:
@@ -1930,6 +1980,19 @@ type RecoverReport struct {
 	// routinely true in the field, the number has become a formality and the
 	// diagnosis is that the refusal is firing on cases it was designed not to.
 	SemanticsAccepted bool
+
+	// IcebergsWithoutReserve counts KindIceberg records IN THE REPLAY SET that could
+	// not state their hidden reserve. Records the snapshot covers are not counted,
+	// because they are not decoded (docs/BOUNDED-RECOVERY.md §5.2) and do not affect
+	// the recovered book — so this is legitimately 0 for a log holding a hundred of
+	// them behind its snapshot. Non-zero means either the recovery refused, or
+	// RecoverOptions.AcceptIcebergsWithoutReserve accepted the loss and the orders
+	// named in the refusal need cancelling.
+	IcebergsWithoutReserve int
+	// IcebergReserveLossAccepted reports that AcceptIcebergsWithoutReserve let those
+	// records through. This is the field to alert on: it should be true exactly once,
+	// on one upgrade, and never again — this build cannot write such a record.
+	IcebergReserveLossAccepted bool
 }
 
 // Recover rebuilds an engine from a snapshot plus the log tail after it: the
@@ -1969,6 +2032,12 @@ type RecoverReport struct {
 // present, and a MEANING has moved: records it is about to replay were written by a
 // build whose matching behaviour is not this one's. That is ErrSemanticsMismatch, and
 // RecoverWithOptions is where the deliberate override lives.
+//
+// And on a fifth, where the record is intact and INSUFFICIENT: a KindIceberg record
+// written before the journal carried an iceberg's total cannot state its hidden
+// reserve, and replaying it rebuilds the client's order at its display size with the
+// rest gone. That is ErrIcebergReserveUnknown; see iceberg_reserve.go and
+// docs/ICEBERG-DURABILITY.md §4.
 func Recover(config matching.Config, snapPath, walPath string) (*matching.Engine, error) {
 	eng, _, err := RecoverWithOptions(config, snapPath, walPath, RecoverOptions{})
 	return eng, err
@@ -1983,19 +2052,21 @@ func RecoverWithReport(config matching.Config, snapPath, walPath string) (*match
 
 // RecoverWithOptions is RecoverWithReport with the deliberate deviations named.
 //
-// The only deviation there is, and the only one this function will ever grow, is
-// RecoverOptions.AcceptSemantics: the list of matching semantics versions whose
-// records this recovery will replay besides this build's. Recover and
-// RecoverWithReport are this function with the zero options, which is the default and
-// refuses.
+// There are two, and each relaxes exactly one gate.
+// RecoverOptions.AcceptSemantics lists the matching semantics versions whose records
+// this recovery will replay besides this build's;
+// RecoverOptions.AcceptIcebergsWithoutReserve is how many iceberg records that cannot
+// state their reserve it may replay. Recover and RecoverWithReport are this function
+// with the zero options, which is the default and refuses both.
 //
-// It refuses if and only if it is about to APPLY a record from a segment whose
-// declared semantics is not this build's. A mismatched segment whose records are all
-// covered by the snapshot is read, CRC-verified, skipped, reported and never refused
-// — it contributes nothing to the recovered book, so refusing on it is refusing on a
-// file that could be deleted with no effect. That is the same move
+// Both gates fire if and only if recovery is about to APPLY the record in question.
+// A mismatched segment, or a lossy iceberg record, whose records are all covered by
+// the snapshot is read, CRC-verified, skipped, reported and never refused — it
+// contributes nothing to the recovered book, so refusing on it is refusing on a file
+// that could be deleted with no effect. That is the same move
 // docs/BOUNDED-RECOVERY.md §5.2 already made when it let the decode check travel with
-// the snapshot boundary. See docs/SEMANTICS-VERSION.md §3.
+// the snapshot boundary. See docs/SEMANTICS-VERSION.md §3 and
+// docs/ICEBERG-DURABILITY.md §4.
 func RecoverWithOptions(config matching.Config, snapPath, walPath string, opts RecoverOptions) (*matching.Engine, RecoverReport, error) {
 	rep := RecoverReport{Semantics: matching.SemanticsVersion}
 	// The snapshot first, always: a venue whose base is unreadable should say so
@@ -2068,12 +2139,26 @@ func RecoverWithOptions(config matching.Config, snapPath, walPath string, opts R
 	}
 	rep.Skipped = walk.skipped
 	rep.LogLastSeq = walk.lastSeq
+	// One pass, two questions. The second rides on the first because it is the same
+	// filter — the records this recovery is about to APPLY — and asking it here means
+	// it is answered before RestoreEngine and before a single command reaches the
+	// engine. See gateIcebergReserves.
+	var lossyIcebergs []Entry
 	for _, e := range walk.entries {
 		if e.Seq > after {
 			rep.Applied++
+			if e.Kind == KindIceberg && !statesItsTotal(e) {
+				lossyIcebergs = append(lossyIcebergs, e)
+			}
 		}
 	}
 	rep.SnapshotAhead = after > 0 && walk.present && walk.lastSeq < after
+	rep.IcebergsWithoutReserve = len(lossyIcebergs)
+	accepted, err := gateIcebergReserves(lossyIcebergs, after, opts)
+	if err != nil {
+		return nil, rep, err
+	}
+	rep.IcebergReserveLossAccepted = accepted
 
 	var eng *matching.Engine
 	if snap != nil {

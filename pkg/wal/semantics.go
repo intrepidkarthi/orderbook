@@ -61,6 +61,30 @@ type RecoverOptions struct {
 	// for this during an incident must not acquire a second, unrelated permission by
 	// accident.
 	AcceptSemantics []int
+
+	// AcceptIcebergsWithoutReserve is the number of KindIceberg records this recovery
+	// may replay that cannot state their hidden reserve — records written before the
+	// total was journalled. It must equal exactly the number found: naming 12 when
+	// the log holds 11 or 13 refuses and says so.
+	//
+	// It is a COUNT rather than a boolean for the reason AcceptSemantics is a list:
+	// a boolean goes into a unit file during one incident and stays for the life of
+	// the deployment, so the next occurrence — which this build cannot produce, and
+	// which therefore means a foreign writer or a downgrade — is accepted silently by
+	// a flag nobody remembers. A count goes stale the moment the log changes, and it
+	// makes the operator state a quantity they have read.
+	//
+	// A sequence LIST was the first design and was rejected on ergonomics: an archive
+	// replay with 2,000 such records would need 2,000 numbers pasted at 3am, and an
+	// operator who cannot use the safe form uses the unsafe one. What the count gives
+	// up is stated plainly — it asserts HOW MANY, not WHICH, so a different set of
+	// the same size would also pass. The class of damage is identical across the set,
+	// which is why that is acceptable here and would not be for ErrLogGap.
+	//
+	// It relaxes the iceberg gate and NOTHING ELSE — not ErrCorrupt, not ErrLogGap,
+	// not the floor check, not the semantics gate. See
+	// docs/ICEBERG-DURABILITY.md §4.3 and iceberg_reserve.go.
+	AcceptIcebergsWithoutReserve int
 }
 
 // accepts reports whether records declaring sem may be replayed by this build.

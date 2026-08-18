@@ -70,6 +70,7 @@ The numbers to watch, from `/metrics` on the admin listener.
 | `rate(obgw_snapshot_duration_ns_sum[5m]) / 1e9` | > 0.25 | The fraction of wall time this process spends writing snapshots, across every book, computed directly. `_sum`/`_count` is a per-write mean and does NOT multiply by the book count, so it reads healthy at any number of books. At 1.0 the loop never completes a cycle and the configured interval is fiction |
 | `obgw_snapshot_duration_ns_count` | not advancing while `obgw_snapshot_failures_total` is flat and a snapshot path is configured | The checkpoint goroutine is not running, as opposed to running and failing. Same shape as the sync-count heartbeat, and the age gauge alone cannot tell the two apart |
 | `obgw_recovery_duration_ns` | > 30 s warn, > 120 s page, or > 2× the previous restart | The trend is the real alert: recovery cost is invisible until the restart you did not choose |
+| `obgw_recovery_iceberg_reserve_unknown_total` | **any non-zero value** | Iceberg records were replayed that could not state their hidden reserve, so those client orders are resting at their display size with the rest of their quantity gone. This build cannot write such a record, so any value means an old log, a downgrade, a foreign writer or a hand-edited file — and it means somebody has to be phoned. Normal is 0 forever. See [§ An iceberg whose reserve was never journalled](#an-iceberg-whose-reserve-was-never-journalled) |
 
 `/readyz` returns 503 on the first two. `/healthz` deliberately does not — see
 [§ A stuck matching goroutine](#a-stuck-matching-goroutine). It returns **200 with a
@@ -244,6 +245,89 @@ wrote refuses with `wal: corrupt record: ... record 1 declares 1329747777 bytes`
 downgrade path in "A corrupt log record", not media damage. No version stamp can protect
 against builds written before the stamp; the protection begins at the release that
 introduced it and runs forward only.
+
+---
+
+## An iceberg whose reserve was never journalled
+
+**Signal.** The venue refuses to start:
+
+```
+wal: iceberg reserve unknown: 2 records this recovery would replay were written before
+the journal recorded an iceberg's total size, so their hidden reserve cannot be
+reconstructed.
+
+  sequence 610,433   order u17/ACME-8841   displays 3, total unknown
+  sequence 610,502   order u04/BLU-113     displays 50, total unknown
+  (the snapshot covers through 610,421; these are past it)
+```
+
+**What the code has done.** Nothing is corrupt and nothing is missing. Every record
+verifies, the set is contiguous, the snapshot is above the floor. The records are
+**insufficient**: for four releases `AppendIceberg` logged the order *after* the
+constructor had shrunk it to the display size, so a nine-lot iceberg shown three was
+journalled as `quantity 3, display 3` and the six hidden lots were never written down at
+all. Replaying such a record rebuilds the client's order as an ordinary order of its
+DISPLAY size.
+
+**Why it refuses rather than warning.** The damage is not confined to that order.
+Measured on `iceberg 9 shown 3, buy 9, sell 5`: a venue that lost the reserve prints two
+trades instead of three, **prints five lots the venue never printed**, and ends holding
+the opposite side of the book — because the buy that should have been filled by the
+reserve rests instead and is hit by the next order. Every command after a trade against
+one of these replays against a different book, which is not a condition a venue can
+announce and remediate afterwards. [ICEBERG-DURABILITY.md](ICEBERG-DURABILITY.md) §2.
+
+The gate is on the records recovery would **apply**, not on the files it can see. Such a
+record behind the snapshot boundary is read, verified, skipped and never refused, so a
+venue that checkpointed before the upgrade never meets this at all. `ReadAll` and `Open`
+never refuse either: the diagnostics must still show you the file.
+
+**What to do — the safe route, in order.**
+
+1. **Recover from a snapshot that covers the sequences named.** A snapshot carries
+   `Hidden` and `Refills` per iceberg, so those records fall behind the boundary and the
+   refusal does not apply. If the snapshot the venue has is older than them, and the
+   previous build is still running somewhere, take a checkpoint there.
+2. **If there is no such snapshot**, the totals are not on this venue's disk. Accept the
+   loss deliberately, with the exact count from the message:
+
+   ```
+   -wal-accept-iceberg-loss 2
+   ```
+
+   Then **cancel the orders the message named** and tell their owners to re-enter. They
+   are resting at a fraction of the size their owners believe they have.
+3. **If you capture inbound order entry**, the client's original `EnterIceberg` message
+   carries the total — the wire was never lossy, only the journal was. Reconstructing
+   from it is a manual repair, order by order, and there is no tool for it.
+
+**Starting the previous build does not help.** This is the one place the semantics
+runbook's habit is wrong: route 1 there is "put the old build back", and here the old
+build is the one that wrote these records and it reads them exactly the same way.
+
+**The count must be exact.** `-wal-accept-iceberg-loss 2` accepts a log holding two such
+records and refuses one holding one or three, naming the real number. That is on purpose:
+a boolean goes into a unit file during one incident and stays for the life of the
+deployment, and this build cannot produce such a record — so the *next* occurrence means
+a foreign writer, a downgrade or a hand-edited log, and it must not be accepted silently.
+It relaxes this gate and nothing else: not `wal: corrupt record`, not `wal: log gap`, not
+the retention floor, not the semantics gate. **Remove it after the next checkpoint
+lands.** `RecoverReport.IcebergReserveLossAccepted` and
+`obgw_recovery_iceberg_reserve_unknown_total` are the fields to alert on.
+
+**What the upgrade does NOT repair.** A venue that already recovered wrong before this
+build shipped is not reconstructable from anything it holds: the iceberg came back at
+display size, has since traded, and a snapshot taken afterwards faithfully carries the
+wrong reserve. Same shape as the semantics runbook's paragraph above — a state is not a
+program. Recognise one by an iceberg whose `Hidden` is 0 where the client's order was
+larger than its display size, or by a client's dispute. The remedy is to cancel and
+re-enter, and the client should be told.
+
+**Why `IcebergsWithoutReserve` can read 0 on a log full of them.** The count is over the
+records that would be REPLAYED. Records the snapshot covers are never decoded at all
+(see [BOUNDED-RECOVERY.md](BOUNDED-RECOVERY.md) §5.2) and do not affect the recovered
+book. `ReadAll` is the reader that sees everything.
 
 ---
 

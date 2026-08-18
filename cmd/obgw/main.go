@@ -116,31 +116,32 @@ func parseSemanticsList(list string) ([]int, error) {
 
 func main() {
 	var (
-		addr         = flag.String("addr", "127.0.0.1:9000", "order-entry listen address")
-		mdAddr       = flag.String("mdaddr", "", "market-data listen address (empty = no market-data feed)")
-		adminAddr    = flag.String("admin", "", "admin HTTP listen address for /metrics, /healthz and /readyz (empty = unobserved)")
-		symbol       = flag.String("symbol", "BTC-USD", "the instrument this gateway serves (one book)")
-		symbols      = flag.String("symbols", "", "comma-separated instruments; overrides -symbol and requires -datadir")
-		dataDir      = flag.String("datadir", "", "directory for the venue manifest and one log/snapshot per instrument (multi-symbol only)")
-		accounts     = flag.String("accounts", "", "comma-separated user:password pairs (VISIBLE IN ps OUTPUT — prefer -accounts-file)")
-		accountsFile = flag.String("accounts-file", "", "file of user:password or user:sha256:<64 hex> lines; # comments allowed")
-		hashSecret   = flag.Bool("hash-secret", false, "read a secret on stdin, print its sha256: credential-file form, and exit")
-		tlsCert      = flag.String("tls-cert", "", "PEM certificate; with -tls-key, wraps every listener in TLS")
-		tlsKey       = flag.String("tls-key", "", "PEM private key")
-		rate         = flag.Float64("rate", 1000, "per-account orders/second")
-		burst        = flag.Float64("burst", 200, "per-account burst allowance")
-		walPath      = flag.String("wal", "", "write-ahead log path (empty = no durability)")
-		snapPath     = flag.String("snapshot", "", "snapshot path, used with -wal to bound how much log a restart replays and parses")
-		ckpt         = flag.Duration("checkpoint", 30*time.Second, "checkpoint interval")
-		segBytes     = flag.Int64("wal-segment-bytes", 0, "rotate the log into a new segment at this size (0 = 128MiB, negative = never rotate)")
-		retainBytes  = flag.Int64("wal-retain", 0, "byte budget for the retained log; older segments are deleted once a verified snapshot covers them (0 = keep everything). A budget, not a bound: -wal-retain-segments floors it at (n+1) x -wal-segment-bytes, 640MiB at the defaults")
-		retainSegs   = flag.Int("wal-retain-segments", 0, "sealed segments to keep regardless of coverage (0 = 4). Checked after -wal-retain and wins, so it decides the smallest the retained set can be")
-		archiveDir   = flag.String("wal-archive", "", "copy each segment here before deleting it; without this, retention makes the newest snapshot the recovery point")
-		minFree      = flag.Int64("wal-min-free", 0, "low-water mark in bytes: below it, warn and run retention immediately (0 = 2GiB)")
-		minFreeStop  = flag.Int64("wal-min-free-stop", 0, "stop-water mark in bytes: below it, every book goes cancel-only (0 = 256MiB)")
-		profiling    = flag.Bool("pprof", false, "mount net/http/pprof on the admin listener (operator-only; a heap dump exposes everything the venue holds)")
-		syncEvery    = flag.Bool("sync-every-command", false, "fsync each command before applying it, so durability precedes acknowledgement (correct, and ~210x slower than the 20ms group commit)")
-		acceptSem    = flag.String("wal-accept-semantics", "", "comma-separated matching semantics versions whose records this recovery may replay besides this build's; 0 means a log written before the stamp existed. Use it only after reading the refusal, and remove it after the next checkpoint — see docs/RUNBOOKS.md \"Upgrading across a semantics change\"")
+		addr          = flag.String("addr", "127.0.0.1:9000", "order-entry listen address")
+		mdAddr        = flag.String("mdaddr", "", "market-data listen address (empty = no market-data feed)")
+		adminAddr     = flag.String("admin", "", "admin HTTP listen address for /metrics, /healthz and /readyz (empty = unobserved)")
+		symbol        = flag.String("symbol", "BTC-USD", "the instrument this gateway serves (one book)")
+		symbols       = flag.String("symbols", "", "comma-separated instruments; overrides -symbol and requires -datadir")
+		dataDir       = flag.String("datadir", "", "directory for the venue manifest and one log/snapshot per instrument (multi-symbol only)")
+		accounts      = flag.String("accounts", "", "comma-separated user:password pairs (VISIBLE IN ps OUTPUT — prefer -accounts-file)")
+		accountsFile  = flag.String("accounts-file", "", "file of user:password or user:sha256:<64 hex> lines; # comments allowed")
+		hashSecret    = flag.Bool("hash-secret", false, "read a secret on stdin, print its sha256: credential-file form, and exit")
+		tlsCert       = flag.String("tls-cert", "", "PEM certificate; with -tls-key, wraps every listener in TLS")
+		tlsKey        = flag.String("tls-key", "", "PEM private key")
+		rate          = flag.Float64("rate", 1000, "per-account orders/second")
+		burst         = flag.Float64("burst", 200, "per-account burst allowance")
+		walPath       = flag.String("wal", "", "write-ahead log path (empty = no durability)")
+		snapPath      = flag.String("snapshot", "", "snapshot path, used with -wal to bound how much log a restart replays and parses")
+		ckpt          = flag.Duration("checkpoint", 30*time.Second, "checkpoint interval")
+		segBytes      = flag.Int64("wal-segment-bytes", 0, "rotate the log into a new segment at this size (0 = 128MiB, negative = never rotate)")
+		retainBytes   = flag.Int64("wal-retain", 0, "byte budget for the retained log; older segments are deleted once a verified snapshot covers them (0 = keep everything). A budget, not a bound: -wal-retain-segments floors it at (n+1) x -wal-segment-bytes, 640MiB at the defaults")
+		retainSegs    = flag.Int("wal-retain-segments", 0, "sealed segments to keep regardless of coverage (0 = 4). Checked after -wal-retain and wins, so it decides the smallest the retained set can be")
+		archiveDir    = flag.String("wal-archive", "", "copy each segment here before deleting it; without this, retention makes the newest snapshot the recovery point")
+		minFree       = flag.Int64("wal-min-free", 0, "low-water mark in bytes: below it, warn and run retention immediately (0 = 2GiB)")
+		minFreeStop   = flag.Int64("wal-min-free-stop", 0, "stop-water mark in bytes: below it, every book goes cancel-only (0 = 256MiB)")
+		profiling     = flag.Bool("pprof", false, "mount net/http/pprof on the admin listener (operator-only; a heap dump exposes everything the venue holds)")
+		syncEvery     = flag.Bool("sync-every-command", false, "fsync each command before applying it, so durability precedes acknowledgement (correct, and ~210x slower than the 20ms group commit)")
+		acceptSem     = flag.String("wal-accept-semantics", "", "comma-separated matching semantics versions whose records this recovery may replay besides this build's; 0 means a log written before the stamp existed. Use it only after reading the refusal, and remove it after the next checkpoint — see docs/RUNBOOKS.md \"Upgrading across a semantics change\"")
+		acceptIceLoss = flag.Int("wal-accept-iceberg-loss", 0, "number of iceberg records this recovery may replay that cannot state their hidden reserve — records written before the total was journalled. It must EQUAL the number the refusal names; a stale count refuses. The orders it lets through come back at their display size and have to be cancelled — see docs/RUNBOOKS.md \"An iceberg whose reserve was never journalled\"")
 	)
 	flag.Parse()
 
@@ -188,6 +189,10 @@ func main() {
 	if cfg.WALAcceptSemantics, err = parseSemanticsList(*acceptSem); err != nil {
 		log.Fatalf("obgw: -wal-accept-semantics: %v", err)
 	}
+	if *acceptIceLoss < 0 {
+		log.Fatalf("obgw: -wal-accept-iceberg-loss %d: it is a COUNT of records, not a switch", *acceptIceLoss)
+	}
+	cfg.WALAcceptIcebergLoss = *acceptIceLoss
 	if auth.Count() == 0 {
 		log.Println("obgw: no accounts configured — every login will be rejected")
 	}
@@ -221,6 +226,16 @@ func main() {
 		log.Printf("obgw: -wal-accept-semantics %v — recovery will replay records written by a build whose "+
 			"matching behaviour is not this one's. Remove it once a checkpoint under this build has landed; "+
 			"until then every restart is replaying somebody else's rules.", cfg.WALAcceptSemantics)
+	}
+	if cfg.WALAcceptIcebergLoss > 0 {
+		// Said at every start, for the same reason the semantics one is: a count that
+		// lives quietly in a unit file is a count that will silently accept the NEXT
+		// such record — and this build cannot write one, so a next one means a foreign
+		// writer, a downgrade, or a hand-edited log.
+		log.Printf("obgw: -wal-accept-iceberg-loss %d — recovery will replay up to %d iceberg records "+
+			"whose hidden reserve was never journalled, rebuilding each as an ordinary order of its "+
+			"DISPLAY size. Cancel those orders, tell their owners to re-enter, and remove this flag "+
+			"once a checkpoint under this build has landed.", cfg.WALAcceptIcebergLoss, cfg.WALAcceptIcebergLoss)
 	}
 	if cfg.AdminAddr == "" {
 		log.Println("obgw: no -admin address — running unobserved; nothing reports queue depth, book size or a stalled matcher")

@@ -1067,14 +1067,33 @@ not reached at all. `CHANGELOG.md` carries the bound; §7.1 above does not, and 
 paragraph is the correction rather than an edit to it, per this document's rule about
 where corrections live.
 
-It is **pinned, not fixed**, in `pkg/wal/iceberg_reserve_pin_test.go` — the first test
+It was **pinned, not fixed**, in `pkg/wal/iceberg_reserve_pin_test.go` — the first test
 in the repository to cover iceberg WAL recovery at all — carrying the sentence a fix
-must come and delete. It is not fixed here for the reason §9 gives for everything else
+must come and delete. It was not fixed here for the reason §9 gives for everything else
 it declines: it is a journal-format question in another package (what a `KindIceberg`
 entry's `Quantity` field *means*, and what a build that meets an old log should do about
 it), with its own compatibility argument to make, and folding it into a matching fix
 would be exactly the "change wearing another change's clothes" this repository's
 semantics gate exists to prevent.
+
+**FIXED — 2026-08-18, in [`ICEBERG-DURABILITY.md`](ICEBERG-DURABILITY.md).** That
+compatibility argument is now written and carried out. `AppendIceberg` records a COPY of
+the order at the client's total plus `Entry.TotalQty`, a witness whose only job is to be
+absent in older records; `restoreEntry` uses the total when it is there and
+`Order.Quantity` when it is not; and a record that cannot state its total is **refused**
+by `Recover` when it would be replayed (`ErrIcebergReserveUnknown`,
+`-wal-accept-iceberg-loss N`) rather than rebuilt small. The pin above is inverted and
+keeps its name. What that document's audit added to this one's ledger: the same
+constructor mutation also lets an iceberg **evade `Config.MaxOrderQty`** and be
+**refused by `Config.MinOrderQty` for a floor it exceeds 18×**, both now pinned in
+`pkg/matching/engine_iceberg_test.go`, and it had been diverging every replication
+follower from its primary on the first iceberg with nothing in `examples/` exercising it
+(now `TestDrillD11_AnIcebergReplicatesWithItsReserve`).
+
+The bound `CHANGELOG.md` carries is therefore now historical: on a log-only replay under
+**this** build the reserve does exist, so §7.1's claim holds on both paths — for logs
+written by this build. A log written before it cannot state the reserve at all, which is
+why recovery refuses instead of quietly making the old sentence true again.
 
 ### 13.8 `REFERENCE-MATCHER.md` §7.1's argue-down rule fired, and the answer is "not yet"
 

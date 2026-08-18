@@ -36,6 +36,9 @@ const (
 	snapshotDurationMetric = "obgw_snapshot_duration_ns"
 	snapshotFailuresMetric = "obgw_snapshot_failures_total"
 	recoveryDurationMetric = "obgw_recovery_duration_ns"
+	// obgw_ rather than orderbook_: it is a fact only this process knows, because
+	// this process is what read the log and decided those records were insufficient.
+	icebergReserveUnknownMetric = "obgw_recovery_iceberg_reserve_unknown_total"
 )
 
 // shedCancelOnDisconnect is the one label value obgw_shed_unreported_total has

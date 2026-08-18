@@ -8,39 +8,34 @@ import (
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
 
-// TestLogOnlyRecoveryLosesAnIcebergsReserve PINS a defect. It asserts today's WRONG
-// behaviour, on purpose, and the sentence a fix has to come and delete is on the
-// assertion itself: if this test starts failing because the reserve came back, the
-// defect has been FIXED and this test should be inverted, keeping its name.
+// TestLogOnlyRecoveryLosesAnIcebergsReserve is an INVERTED PIN: it now asserts the
+// opposite of its name, and it keeps the name deliberately.
 //
-// A pin keeps its name after inversion for the reason
+// It used to pin a defect — to assert today's WRONG behaviour on purpose, with the
+// sentence a fix had to come and delete written on the assertion itself. That fix has
+// landed (docs/ICEBERG-DURABILITY.md), so the sentence is gone and every assertion is
+// turned over: the journalled record now states the total, the log-only recovery
+// rebuilds the reserve, and the buy of nine prints nine.
+//
+// The name survives the inversion for the reason
 // pkg/matching/differential_findings_test.go:12-17 gives: renaming it hides the
-// promise being kept.
+// promise being kept. A reader who finds this test by searching for the defect
+// finds the assertion that it cannot come back.
 //
-// THE DEFECT. types.NewIcebergOrder shrinks Order.Quantity to the DISPLAY size at
-// construction time (iceberg.go:34-41) and holds the rest in IcebergOrder.Hidden. By
-// the time anything can be journalled that has already happened, so AppendIceberg —
-// which logs ib.Order and ib.DisplayQty — writes `qty=3 display=3` for an order the
-// client sent as nine lots shown three. A replay rebuilds it with
-// NewIcebergOrder(entry.Order, entry.DisplayQty) and computes hidden = 3 - 3 = 0.
+// WHAT THE DEFECT WAS. types.NewIcebergOrder shrinks Order.Quantity to the DISPLAY
+// size at construction time (iceberg.go:34-41) and holds the rest in
+// IcebergOrder.Hidden. By the time anything can be journalled that has already
+// happened, so AppendIceberg — which logged ib.Order and ib.DisplayQty — wrote
+// `qty=3 display=3` for an order the client sent as nine lots shown three, and a
+// replay rebuilt it with hidden = 3 - 3 = 0. A recovery from the JOURNAL ALONE
+// reconstructed every iceberg on the venue with an empty reserve, and the client's
+// remaining size was not merely undisplayed — it was GONE. A recovery that started
+// from a snapshot was unaffected, which is what the other half of this file holds.
 //
-// So a recovery from the JOURNAL ALONE reconstructs every iceberg on the venue with
-// an empty reserve, and the client's remaining size is not merely displayed — it is
-// GONE. A recovery that starts from a snapshot is unaffected, because EngineSnapshot
-// carries Hidden and Refills per iceberg; the tail is then replayed onto a book that
-// already has the reserve.
-//
-// It is pre-existing — reproduced identically on the commit before
-// docs/PINNED-DEFECTS.md's two fixes, with no fill-or-kill involved anywhere — and it
-// is pinned rather than fixed because it is a question about what a KindIceberg
-// entry's Quantity field MEANS on the wire, and about what a build should do when it
-// meets a log written under the old meaning. That is a journal-compatibility argument
-// with its own document to write, not a rider on a matching fix.
-// docs/PINNED-DEFECTS.md §13.7 and §9.
-//
-// Its consequence for the matching fix that found it: on a log-only replay the reserve
-// never exists, so a fill-or-kill cannot consume a second slice and the restored-
-// iceberg path is not reached at all. CHANGELOG.md bounds the claim accordingly.
+// WHAT FIXED IT. AppendIceberg logs a COPY of the order stating the client's total,
+// plus Entry.TotalQty as the witness that a record was written by a build that knew
+// the difference — a record without it is refused by Recover rather than replayed
+// into a wrong book (ErrIcebergReserveUnknown). docs/PINNED-DEFECTS.md §13.7.
 func TestLogOnlyRecoveryLosesAnIcebergsReserve(t *testing.T) {
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "iceberg.wal")
@@ -70,6 +65,16 @@ func TestLogOnlyRecoveryLosesAnIcebergsReserve(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
+	// Rule 2: the writer logs a COPY. The engine is matching against that exact
+	// pointer, and a writer that restored the total on the LIVE order would rest nine
+	// lots showing nine — the defect inverted and worse.
+	if ib.Order.Quantity != 3 || ib.Order.RemainingQty != 3 || ib.Hidden != 6 {
+		t.Fatalf("AppendIceberg mutated the LIVE order: it now reads qty=%d remaining=%d hidden=%d, "+
+			"want 3, 3 and 6. The engine is matching against that pointer. "+
+			"docs/ICEBERG-DURABILITY.md §3.2 Rule 2",
+			ib.Order.Quantity, ib.Order.RemainingQty, ib.Hidden)
+	}
+
 	// What actually reached the journal. This is the root of it, asserted directly so
 	// a reader does not have to infer the cause from the symptom.
 	ents, err := ReadAll(walPath)
@@ -85,17 +90,23 @@ func TestLogOnlyRecoveryLosesAnIcebergsReserve(t *testing.T) {
 	if logged == nil {
 		t.Fatalf("no KindIceberg entry in %d journal entries", len(ents))
 	}
-	if logged.Order.Quantity != 3 || logged.DisplayQty != 3 {
-		t.Fatalf("the journalled iceberg reads qty=%d display=%d, want 3 and 3. IF THIS NOW READS "+
-			"qty=9 THE DEFECT HAS BEEN FIXED: AppendIceberg has started logging the TOTAL, a replay "+
-			"can compute the reserve, and this test should be inverted keeping its name. "+
-			"docs/PINNED-DEFECTS.md §13.7.", logged.Order.Quantity, logged.DisplayQty)
+	if logged.Order.Quantity != 9 || logged.Order.RemainingQty != 9 || logged.DisplayQty != 3 || logged.TotalQty != 9 {
+		t.Fatalf("the journalled iceberg reads qty=%d remaining=%d display=%d total=%d, want 9, 9, 3 and 9 — "+
+			"the order as the CLIENT SENT IT, plus the witness that says so. If qty is 3 the writer has "+
+			"gone back to logging the display slice and the reserve is being thrown away again; if total "+
+			"is 0 the witness is gone and a pre-fix record can no longer be told from a post-fix one. "+
+			"docs/ICEBERG-DURABILITY.md §3.",
+			logged.Order.Quantity, logged.Order.RemainingQty, logged.DisplayQty, logged.TotalQty)
 	}
 
-	// The symptom: recovery from the log alone.
+	// The symptom that was: recovery from the log alone.
 	recovered, err := Recover(matching.DefaultConfig("W"), "", walPath)
 	if err != nil {
 		t.Fatalf("Recover: %v", err)
+	}
+	if snap := recovered.TakeSnapshot(); len(snap.Icebergs) != 1 || snap.Icebergs[0].Hidden != 6 {
+		t.Fatalf("the log-only recovered engine holds %+v, want exactly one iceberg with Hidden 6",
+			snap.Icebergs)
 	}
 	buy, err := types.NewOrder("u2", "W", types.SideBuy, types.OrderTypeLimit, 100, 9, types.TIFGoodTillCancel)
 	if err != nil {
@@ -105,10 +116,11 @@ func TestLogOnlyRecoveryLosesAnIcebergsReserve(t *testing.T) {
 	for _, tr := range recovered.Process(buy).Trades {
 		got += tr.Quantity
 	}
-	if got != 3 {
-		t.Fatalf("a buy of 9 against the log-only recovered book printed %d lots, want 3 (the display "+
-			"slice, with no reserve behind it). IF THIS IS NOW 9 THE DEFECT HAS BEEN FIXED and this "+
-			"test should be inverted keeping its name. docs/PINNED-DEFECTS.md §13.7.", got)
+	if got != 9 {
+		t.Fatalf("a buy of 9 against the log-only recovered book printed %d lots, want 9. If this is 3, "+
+			"the record has stopped carrying the client's total and the reserve is gone again — every "+
+			"command after a trade against such an order replays against a different book. "+
+			"docs/ICEBERG-DURABILITY.md §2.", got)
 	}
 
 	// The control, in the same test so the two are never read apart: the SAME order on
@@ -124,6 +136,9 @@ func TestLogOnlyRecoveryLosesAnIcebergsReserve(t *testing.T) {
 	if want != 9 {
 		t.Fatalf("the LIVE engine printed %d lots for the same buy, want 9. The control has broken, so "+
 			"this test no longer measures what it claims to.", want)
+	}
+	if got != want {
+		t.Fatalf("the log-only recovered book printed %d lots where the live venue printed %d", got, want)
 	}
 }
 

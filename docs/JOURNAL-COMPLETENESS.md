@@ -352,6 +352,15 @@ and three tests over it:
    replayed, and a kind with a `Writer` method and no replay arm is a durable record
    that recovery silently discards.
 
+   > A sixth joined them later, and it exists because the fifth turned out to answer a
+   > narrower question than it looks like it answers: *recognised* is not *applied*.
+   > **`TestEveryWrapperRecordRebuildsItsOrder`** enumerates the same sentinel and
+   > requires every kind that carries a wrapper order to round-trip through a
+   > recovery **from the log alone**, compared against the live engine by trade tape
+   > and snapshot digest — because `KindIceberg` had an arm in `restoreEntry`, passed
+   > every guard above, and still rebuilt a nine-lot iceberg as a three-lot order.
+   > [`ICEBERG-DURABILITY.md`](ICEBERG-DURABILITY.md) §6 and §12.2.
+
 The `readOnly` reasons are strings rather than a bare boolean deliberately. A future
 author reclassifying a command has to write down why, and a reviewer gets a sentence to
 disagree with instead of a flipped flag.

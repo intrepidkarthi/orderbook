@@ -100,6 +100,16 @@ type Config struct {
 	// It names versions rather than being a boolean so it goes stale on the next
 	// bump; see wal.RecoverOptions.AcceptSemantics.
 	WALAcceptSemantics []int
+	// WALAcceptIcebergLoss is how many iceberg records recovery may replay that
+	// cannot state their hidden reserve, from -wal-accept-iceberg-loss. Zero is the
+	// default and refuses: such a record rebuilds a client's iceberg at its DISPLAY
+	// size with the rest gone, and every command after a trade against one replays
+	// against a different book.
+	//
+	// It is a count rather than a boolean so it goes stale the moment the log
+	// changes; see wal.RecoverOptions.AcceptIcebergsWithoutReserve and
+	// docs/ICEBERG-DURABILITY.md §4.3.
+	WALAcceptIcebergLoss int
 	// WALRetainSegments is how many sealed segments are kept regardless of coverage.
 	// Zero takes wal.DefaultMinSegments.
 	//
@@ -390,6 +400,10 @@ func NewServer(cfg Config) (*Server, error) {
 				return nil, fmt.Errorf("obgw: %s: %w", symbol, err)
 			}
 		}
+		// Counted here and exported below, registered even when it is zero: a series
+		// that appears the first time it moves is a series no alert was written
+		// against, and this one should read zero on every venue forever.
+		icebergsWithoutReserve := 0
 		var (
 			w         *wal.Writer
 			recovered *matching.Engine
@@ -427,7 +441,10 @@ func NewServer(cfg Config) (*Server, error) {
 			_, snapPath := cfg.paths(symbol)
 			var err error
 			var rep wal.RecoverReport
-			opts := wal.RecoverOptions{AcceptSemantics: cfg.WALAcceptSemantics}
+			opts := wal.RecoverOptions{
+				AcceptSemantics:              cfg.WALAcceptSemantics,
+				AcceptIcebergsWithoutReserve: cfg.WALAcceptIcebergLoss,
+			}
 			if recovered, rep, err = wal.RecoverWithOptions(eng, snapPath, walPath, opts); err != nil {
 				return nil, fmt.Errorf("obgw: recover %s: %w", symbol, err)
 			}
@@ -471,6 +488,18 @@ func NewServer(cfg Config) (*Server, error) {
 				log.Printf("obgw: %s matching semantics %d; snapshot declares %d, log segments declare %v — "+
 					"nothing from another matcher was replayed.",
 					symbol, rep.Semantics, rep.SnapshotSemantics, rep.LogSemantics)
+			}
+			icebergsWithoutReserve = rep.IcebergsWithoutReserve
+			if rep.IcebergsWithoutReserve > 0 {
+				// Loud, and it is the one recovery condition whose remediation is a
+				// phone call: these orders are on the book at a fraction of the size
+				// their owners think they have.
+				log.Printf("obgw: %s REPLAYED %d ICEBERG RECORDS WITH NO RESERVE. They were written before the "+
+					"journal recorded an iceberg's total size, so each came back as an ordinary order of its "+
+					"DISPLAY size and the rest of the client's quantity is gone. Cancel them, tell their owners "+
+					"to re-enter, force a checkpoint and remove -wal-accept-iceberg-loss. "+
+					"See docs/RUNBOOKS.md \"An iceberg whose reserve was never journalled\".",
+					symbol, rep.IcebergsWithoutReserve)
 			}
 			if rep.FellBack {
 				log.Printf("obgw: %s log record sequences are not the ones their segments' declared bases imply, "+
@@ -538,6 +567,22 @@ func NewServer(cfg Config) (*Server, error) {
 		// leaving the position at zero is how a checkpoint taken before the first
 		// order of the session came to claim it covered none of it.
 		runner := matching.NewRunnerFor(recovered, rc)
+
+		// Registered for every book whether or not it met the condition, for the same
+		// reason the failure counter below is: a series that appears the first time it
+		// moves is a series no alert was written against. This build cannot write a
+		// record that fails to state an iceberg's total, so any non-zero value means a
+		// log written by an older build, a downgrade, a foreign writer or a hand-edited
+		// file — and it means orders are resting at a fraction of the size their owners
+		// believe. Threshold row in docs/RUNBOOKS.md: normal 0, any non-zero is an
+		// action.
+		col.Counter(icebergReserveUnknownMetric,
+			"Iceberg records this process REPLAYED that could not state their hidden reserve, per instrument. "+
+				"Each one is a client order rebuilt at its display size with the rest of its quantity gone. "+
+				"Set once at startup and never again; normal is 0 and any other value is an action, because this "+
+				"build cannot produce such a record. Records a snapshot already covered are not counted — they do "+
+				"not affect the book. See docs/ICEBERG-DURABILITY.md.",
+			observability.Label{Name: "symbol", Value: symbol}).Add(int64(icebergsWithoutReserve))
 
 		// The failure counter is registered even for a book that never fails one,
 		// because a series that appears the first time it moves is a series no alert

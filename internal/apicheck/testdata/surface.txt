@@ -1100,6 +1100,7 @@ wal.Entry.Phase string
 wal.Entry.Seq int64
 wal.Entry.StopOrder *types.Order
 wal.Entry.StopPrice int64
+wal.Entry.TotalQty int64
 wal.Entry.TradeID int64
 wal.Entry.Trail int64
 wal.Entry.UserID string
@@ -1107,6 +1108,7 @@ wal.EntryKind type
 wal.ErrArchiveIsTheLog var
 wal.ErrBelowFloor var
 wal.ErrCorrupt var
+wal.ErrIcebergReserveUnknown var
 wal.ErrLogGap var
 wal.ErrNotALog var
 wal.ErrSemanticsMismatch var
@@ -1141,11 +1143,14 @@ wal.ReadAll(path string) ([]Entry, error)
 wal.ReadSnapshot(path string) (*matching.EngineSnapshot, error)
 wal.Recover(config matching.Config, snapPath, walPath string) (*matching.Engine, error)
 wal.RecoverOptions struct
+wal.RecoverOptions.AcceptIcebergsWithoutReserve int
 wal.RecoverOptions.AcceptSemantics []int
 wal.RecoverReport struct
 wal.RecoverReport.Applied int
 wal.RecoverReport.FellBack bool
 wal.RecoverReport.Floor int64
+wal.RecoverReport.IcebergReserveLossAccepted bool
+wal.RecoverReport.IcebergsWithoutReserve int
 wal.RecoverReport.LogLastSeq int64
 wal.RecoverReport.LogSemantics []int
 wal.RecoverReport.RetainedBytes int64

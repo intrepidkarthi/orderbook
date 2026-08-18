@@ -104,6 +104,9 @@ func TestTheMetricsPageStaysWellFormed(t *testing.T) {
 		snapshotDurationMetric: "histogram",
 		snapshotAgeMetric:      "gauge",
 		recoveryDurationMetric: "gauge",
+		// Registered even when it is zero, which is the whole point: an alert on a
+		// series that does not exist until the incident is an alert nobody wrote.
+		icebergReserveUnknownMetric: "counter",
 	} {
 		if got := types[name]; got != want {
 			t.Errorf("# TYPE %s %s, want %s — the TYPE line is the only machine-readable statement this "+

@@ -388,6 +388,90 @@ func TestDrillD7_ABustReplicates(t *testing.T) {
 	}
 }
 
+// TestDrillD11_AnIcebergReplicatesWithItsReserve — docs/ICEBERG-DURABILITY.md §1.3.
+//
+// D11 because it is a new drill rather than a variant of an existing one: the
+// numbering follows docs/REPLICATION.md §6, where D1-D10 are already spoken for.
+//
+// The audit that found the journal's lost iceberg reserve found this consumer of it
+// too: a follower rebuilds icebergs from the SAME records (Follower.tail calls
+// wal.RestoreAfter on each shipped entry), so a follower's book had been diverging
+// from its primary on the first iceberg, from the first record, with Digest()
+// reporting it and NOTHING EXERCISING IT — there was no iceberg anywhere in
+// examples/. This drill is that gap closed.
+//
+// It is deliberately not a resting-order test. The tape after the iceberg trades
+// against it, so the follower has to reproduce the REFILLS: a follower that rebuilt
+// the order at its display size prints one slice where the primary printed three, and
+// then holds a different book for every command after it.
+func TestDrillD11_AnIcebergReplicatesWithItsReserve(t *testing.T) {
+	const before, after = 20, 20
+
+	// A local interface rather than an addition to venue: only this drill needs it,
+	// and the same shape bustVenue uses.
+	type icebergVenue interface {
+		venue
+		ProcessIceberg(*types.IcebergOrder) *matching.MatchResult
+	}
+	drive := func(t *testing.T, v icebergVenue) {
+		t.Helper()
+		runTape(t, v, 1, before)
+		base, err := types.NewOrder("whale", "BTC-USD", types.SideSell, types.OrderTypeLimit, 101, 9,
+			types.TIFGoodTillCancel)
+		if err != nil {
+			t.Fatalf("NewOrder: %v", err)
+		}
+		ib, err := types.NewIcebergOrder(base, 3)
+		if err != nil {
+			t.Fatalf("NewIcebergOrder: %v", err)
+		}
+		v.ProcessIceberg(ib)
+		runTape(t, v, before+1, before+after)
+	}
+
+	p := newPrimary(t)
+	defer p.Close()
+	f, err := StartFollower("BTC-USD", p.Addr())
+	if err != nil {
+		t.Fatalf("StartFollower: %v", err)
+	}
+
+	drive(t, p.Runner)
+
+	// before + the iceberg + after: the iceberg is a journalled command like any
+	// other, so it occupies a log sequence of its own.
+	const total = before + 1 + after
+	if err := f.WaitApplied(total, 10*time.Second); err != nil {
+		t.Fatalf("follower never caught up: %v", err)
+	}
+
+	control := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
+	drive(t, control)
+	want := control.TakeSnapshot().Digest()
+
+	got, err := f.Digest()
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
+	if got != want {
+		t.Errorf("follower diverged from the control across an iceberg:\n  follower %s\n  control  %s\n"+
+			"A KindIceberg record that cannot state the client's total rebuilds the order at its DISPLAY "+
+			"size, and the follower is a second consumer of that record. docs/ICEBERG-DURABILITY.md §1.3",
+			got, want)
+	}
+	if snap, err := p.Runner.Checkpoint(); err != nil || snap.Digest() != want {
+		t.Errorf("primary and control disagree (err=%v) — the iceberg is not deterministic", err)
+	}
+
+	// And the drill proves something: the iceberg must still hold a reserve at the
+	// end, or the digests would agree for the trivial reason that nothing was hidden.
+	snap := control.TakeSnapshot()
+	if len(snap.Icebergs) != 1 || snap.Icebergs[0].Hidden <= 0 {
+		t.Fatalf("the control ends holding %+v — with no reserve left, this drill cannot tell a "+
+			"follower that replicates the reserve from one that never had it", snap.Icebergs)
+	}
+}
+
 // TestDrillD8_AMultiSymbolVenueReplicates — docs/MULTI-SYMBOL.md deliverable #6.
 //
 // Two symbols, two shards, two logs, two followers, one venue. The drill is
