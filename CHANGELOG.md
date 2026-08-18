@@ -90,6 +90,28 @@ versions may include breaking changes).
 
 ### Fixed
 
+- **`OrderBook.Add` no longer refuses a duplicate id when the book is full**, and no
+  longer advances the book sequence for an add that changes nothing. The method
+  documents duplicate ids as ignored, but it checked capacity and bumped
+  `sequenceNum` *before* looking up a caller-assigned id, so the same duplicate was
+  silently ignored below capacity and rejected with `ErrOrderBookFull` at it — a
+  documented contract whose outcome depended on unrelated capacity state.
+
+  Reported and fixed by [@Taz33m](https://github.com/Taz33m) in
+  [#8](https://github.com/intrepidkarthi/orderbook/issues/8) /
+  [#9](https://github.com/intrepidkarthi/orderbook/pull/9). Both halves were
+  reproduced against `main` before merging, and the strengthened
+  `TestDuplicateAddIgnored` fails against the unfixed code with the reported error.
+
+  **Not a semantics bump, and the fingerprint is what decided that.** The changed
+  branch needs a duplicate *caller-assigned* id, and `pkg/matching` never produces
+  one: it re-adds an order only after removing it (`reverseTrade` restoring a maker,
+  an iceberg refilling its visible slice), so the duplicate arm is unreachable from
+  the engine. `internal/semcheck` stayed green across the merge, which is the
+  enforcement declining to fire on a change it should not — the false-positive half
+  of [SEMANTICS-VERSION.md](docs/SEMANTICS-VERSION.md) §5, exercised by an outside
+  contribution rather than by a sabotage run.
+
 - **A rejected fill-or-kill no longer moves `LastTradePrice`.** The three defects the
   reference matcher found were pinned rather than repaired, because each had more than
   one defensible answer; [DIFFERENTIAL-FINDINGS.md](docs/DIFFERENTIAL-FINDINGS.md) is
