@@ -9,6 +9,53 @@ versions may include breaking changes).
 
 ### Added
 
+- **The venue counts what it refuses and times what makes an order durable.** Sixteen
+  metric families already said what the venue *did*; nothing said what it *dropped*,
+  and the durability path was untimed.
+
+  `obgw_refused_total{reason}` counts every refusal at `session.reject` — the single
+  funnel all fifty refusal sites already pass through — and increments **before** the
+  encode, so the counter can never claim a rejection the client did not get. Measured
+  equal end to end: 51,568 counted against 51,568 `CmdReject`s received.
+  `obgw_login_refused_total{reason}` is separate because a failed login is written
+  straight to the socket and never reaches that funnel.
+  `obgw_shed_unreported_total` counts the shed with nobody left to tell: a disconnected
+  client's orders left resting because the cancel could not be queued. It cannot appear
+  in the refusal counter by construction, which is why it is its own series.
+
+  `obgw_wal_append_latency_ns` and `obgw_wal_sync_latency_ns` are timed separately and
+  on the right side of the group commit. That boundary is the point — a sync latency
+  that is really an append latency reads healthy while fsync is the slow thing. The two
+  are 225× apart under `-sync-every-command` (17 µs against 3.9 ms), so they are
+  demonstrably not measuring each other. This is also the variable half of the recovery
+  point objective, which is `20 ms + p99 fsync` and not the 20 ms ticker alone;
+  corrected in `pkg/wal`'s package comment and PRODUCTION-READINESS.
+
+  `orderbook_snapshot_age_seconds{symbol}` reads the file's mtime rather than a
+  process-local timer, so a restarted venue cannot report a fresh checkpoint it never
+  took. `/readyz` reports the degradation without failing it: a venue that cannot
+  checkpoint but can still trade is not one to pull from rotation, and saying so is
+  different from staying silent. Plus `obgw_snapshot_duration_ns`,
+  `obgw_snapshot_failures_total{symbol}` and `obgw_recovery_duration_ns{symbol}`.
+
+  Thirteen threshold rows in [RUNBOOKS.md](docs/RUNBOOKS.md), each with a normal value,
+  a trouble value and an action, because a metric nobody has a threshold for is a
+  metric nobody looks at. Limitations sit next to their thresholds rather than in a
+  footnote: the WAL histograms are venue-wide and merged across books, and the sync
+  quantile saturates at its top bucket.
+
+  Cost: **82 ns and zero allocations** per timing — about 5% of an append, under 0.5%
+  of the group-committed write path. `TestZeroAllocHotPath` passes unmodified and
+  `internal/semcheck` is green without regeneration, which is what proves this slice
+  did not change matching. Design, thresholds and thirteen sabotage runs:
+  [LAG-AND-SHED.md](docs/LAG-AND-SHED.md).
+
+  **Two things adversarial review caught before they shipped.** A paging threshold of
+  1 s stood against a histogram whose top bucket was 250 ms, so that tier could never
+  fire and an operator would have read healthy through an arbitrarily slow disk — the
+  buckets now run to 5 s. And failed logins were invisible to a counter whose name
+  implied it covered refusals.
+
 - **A reference matcher, and a random-tape differential harness that compares it against
   the engine after every command.** This is milestone M9's central ask, which the last
   roadmap survey found did not exist in any form. Spec, and the record of what building
