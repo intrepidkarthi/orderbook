@@ -12,9 +12,17 @@ import "github.com/intrepidkarthi/orderbook/pkg/types"
 // a mirror book and compares it against the engine's own book after every one of
 // the 2,240 commands of its 16 tapes; TestEventStreamReconstructsBook does the same
 // over a hand-written scenario list, one per order class — limits, market and IOC
-// remainders, FOK reversal both plain and crossed with self-trade prevention,
-// post-only, stops both resting and cascade-fired, trailing stops, OCO in both
-// directions, iceberg refill and exhaustion, and all five STP modes.
+// remainders, FOK reversal plain, crossed with self-trade prevention, and crossed
+// with an iceberg whose reserve it exhausts, post-only, stops resting, cascade-fired,
+// and cascade-fired-then-refused, trailing stops, OCO in both directions, iceberg
+// refill and exhaustion, and all five STP modes.
+//
+// The last two of those are new, and they are new because an exclusion is not closed
+// by deleting the sentence that stated it. Each of the two paths this comment used to
+// exclude now has a scenario ON THE LIST THIS COMMENT CITES, and each fails against
+// the engine before its fix: the iceberg one with the mirror holding 100 lots and the
+// engine 300, the cascade one with the mirror holding a 50-lot phantom at 200 the
+// engine does not have.
 //
 // The citation moved because the scenario list ALONE proved this claim true while it
 // was false. None of its ~25 scenarios combined fill-or-kill with self-trade
@@ -25,24 +33,20 @@ import "github.com/intrepidkarthi/orderbook/pkg/types"
 // docs/DIFFERENTIAL-FINDINGS.md §4.6). The generated-path check is what would have
 // caught it without anyone predicting it.
 //
-// The claim is not unconditional and this comment will not say it is. It holds for
-// everything tier 1 reaches. It is NOT proven for a fill-or-kill that exhausts an
-// iceberg's reserve and then fails, which leaves the engine's own book holding an
-// order whose displayed size no stream can explain, because the engine is wrong
-// there rather than the stream (TestFailingFOKCorruptsAnIcebergsReserve pins it).
+// The claim is not unconditional and this comment will not say it is, but the two
+// exclusions it used to carry are gone rather than restated. A fill-or-kill that
+// exhausts an iceberg's reserve and then fails no longer leaves the engine holding an
+// order whose displayed size no stream can explain, and a stop fired by a cascade
+// whose order is then refused no longer ends in silence: emitTerminalIfDone closes it
+// out with a CANCELED carrying the reason. Both were pinned here, both are fixed, and
+// the tests that pinned them now assert the opposite under the same names
+// (TestFailingFOKCorruptsAnIcebergsReserve, TestCascadeFiredStopRejectedLeavesAPhantom;
+// docs/PINNED-DEFECTS.md). An exclusion left standing after its cause is gone is a lie
+// in the opposite direction.
 //
-// It is also NOT proven for a stop fired by a cascade whose order is then rejected.
-// cascadeStops announces the order TRIGGERED and ACCEPTED, settleInto rejects it, and
-// that rejection reaches nobody: emitTerminalIfDone fires only on Cancelled and a
-// cascade-fired order never reaches emitResult. The stream says an order entered the
-// book and never says it left, so a reconstruction holds it forever. Same shape as the
-// self-trade-prevention case fixed in this release, in a path the generated tape cannot
-// reach because stops are tier 2. Pinned, not fixed, by
-// TestCascadeFiredStopRejectedLeavesAPhantom.
-//
-// And it holds for a consumer that ignores an Accepted whose quantity is zero, which
-// is a condition on the READER rather than an exclusion from the claim, and is the
-// easier of the two to miss. Self-trade prevention under DECREMENT can empty an order
+// ONE condition remains, and it is a condition on the READER rather than an exclusion
+// from the claim: the claim holds for a consumer that ignores an Accepted whose
+// quantity is zero. Self-trade prevention under DECREMENT can empty an order
 // inside the command that created it, and the venue announces it anyway because it was
 // accepted before it was emptied. Nothing further is ever published about that order.
 // The mirror in runDiff applies this rule, which is why the generated-path check
@@ -174,10 +178,11 @@ type Event struct {
 //
 // A REJECTED command's batch is not necessarily one event. A rejection drops only
 // the events describing state the engine actually undid — the reversed prints of a
-// failed fill-or-kill — and everything else that walk did stands and is published
-// after the Rejected: a maker cancelled or shrunk by self-trade prevention, an
-// iceberg slice refilled, an OCO leg cancelled. A consumer must apply them.
-// docs/DIFFERENTIAL-FINDINGS.md §4.
+// failed fill-or-kill, and the Accepted announcing a refilled iceberg slice the same
+// failure put back — and everything else that walk did stands and is published after
+// the Rejected: a maker cancelled or shrunk by self-trade prevention, an OCO leg
+// cancelled. A consumer must apply them.
+// docs/DIFFERENTIAL-FINDINGS.md §4, docs/PINNED-DEFECTS.md §3.
 type EventSink interface {
 	OnEvents(events []Event)
 }

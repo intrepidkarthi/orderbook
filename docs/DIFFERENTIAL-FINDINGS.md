@@ -472,10 +472,25 @@ events: [REJECTED]
 
 `FilledQty` is **negative**. `checkInvariants` passes, because
 `Filled + Remaining == Quantity` still holds (−6 + 9 = 3) and `Remaining ≥ 0` still
-holds — a blind spot recorded in §7. The iceberg's entire reserve has been forced into
+holds — a blind spot [`PINNED-DEFECTS.md`](PINNED-DEFECTS.md) §5 later closed by
+making `checkInvariants` a whole-book check. The iceberg's entire reserve has been forced into
 the open by an order that was rejected, which destroys the one property an iceberg
 exists for. B1 would have to un-refill this; B2 makes no claim about it and does not
 make it worse.
+
+> **FIXED, 2026-08-18** — [`PINNED-DEFECTS.md`](PINNED-DEFECTS.md) §3. The refill path
+> now owns the rewind: the walk saves an iceberg's whole state the first time it is
+> about to trade against it and the fill-or-kill failure branch restores it whole —
+> slice, counters, status, reserve, refill counter and registry entry — with those
+> prints never passed to `reverseTrade` and their refill `ACCEPTED`s dropped alongside
+> the reversed trades. `reverseTrade` is unchanged; its precondition is now written on
+> it. The reproduction above ends `Quantity 3, FilledQty 0, RemainingQty 3, NEW,
+> reserve 6, refills 0, best ask 100:3, events [REJECTED]`, and
+> `TestFailingFOKCorruptsAnIcebergsReserve` asserts every one of those. **The count
+> below is therefore now three inverse operations, not four** — and that is honest
+> bookkeeping rather than a reopening of B1: the iceberg is restored because the
+> alternative destroys quantity nobody authorised, which is not true of an STP
+> cancellation the taker's own mode asked for.
 
 **An OCO's protective leg is already destroyed** — §4.1(iv). B1 would have to
 re-register a cancelled stop in the stop book and un-cancel it.
@@ -748,22 +763,17 @@ person.
 
 ## 7. What this deliberately does not do
 
-- **It does not fix the iceberg corruption in §4.4.** A fill-or-kill that exhausts an
-  iceberg's reserve and then fails leaves an order with `FilledQty = -6`, nine
-  displayed lots against a stated quantity of three, and an empty reserve. That is a
-  defect in `reverseTrade`'s interaction with the refill path, not in the event stream,
-  and B2 neither fixes nor worsens it. **It gets a pinning test in this slice**
-  (`TestFailingFOKCorruptsAnIcebergsReserve`) and its own future slice, because a
-  finding that is measured and left unpinned is how it gets found a third time.
+> Two of these bullets are **gone rather than crossed out**, because they are done: the
+> iceberg corruption of §4.4 and the missing `FilledQty ≥ 0` invariant were both closed
+> by [`PINNED-DEFECTS.md`](PINNED-DEFECTS.md) (2026-08-18), which also widened
+> `checkInvariants` to a whole-book check. A deferral left standing after its cause is
+> gone is a lie in the opposite direction, so it is deleted and this note says where it
+> went.
+
 - **It does not fix the OCO leg in §4.1(iv).** Same shape: a stranger's rejected
   fill-or-kill destroys a client's protective stop. Pinned by
-  `TestFailingFOKCancelsAnOCOStopLeg`, deferred with the iceberg, and both belong with
-  tier 2's exotics work where the model can finally hold an opinion about them.
-- **It does not add `FilledQty ≥ 0` to `checkInvariants`** — though it records that the
-  invariant suite passed on an order with `FilledQty = -6`, because
-  `Filled + Remaining == Quantity` and `Remaining ≥ 0` both still held. Adding the
-  assertion belongs with the fix it would catch, not with a slice that would then ship
-  a red suite.
+  `TestFailingFOKCancelsAnOCOStopLeg`, and it belongs with tier 2's exotics work where
+  the model can finally hold an opinion about it.
 - **It does not rewind the self-output guardrail's window counters** for reversed
   prints. A rejected fill-or-kill's reversed prints count toward `MaxTrades` and
   `MaxNotional` (`engine.go:1693-1710`) and can trip the venue into `Halted`. That is

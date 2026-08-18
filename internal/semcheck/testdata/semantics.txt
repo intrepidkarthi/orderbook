@@ -1,4 +1,4 @@
-semantics 1
+semantics 2
 # The behaviour fingerprint. See docs/SEMANTICS-VERSION.md §5.
 # scenario/pos kind command | verdict | T[trades] E[events] | state last mark bid ask counters | digest
 
@@ -1133,6 +1133,19 @@ conditional/0078 REPLACE     q2 B L 97x2 GTC <-76     | REJECTED:ORDER_NOT_FOUND
 conditional/0079 REDUCE      q1 <-76 to 1             | REJECTED:ORDER_NOT_FOUND     | T[] E[] | OPEN last=101 mark=0 bid=101:4 ask=106:5 n=11 oid=58 tid=25 eid=117 | 00deacaff89ebab8
 conditional/0080 CANCEL_ALL  q1                       | CANCELLED n=1                | T[] E[CANCELED#58/CANCELLED/0] | OPEN last=101 mark=0 bid=101:4 ask=106:5 n=10 oid=58 tid=25 eid=118 | b8268656999e220e
 conditional/0081 CANCEL      m1 <-0                   | REJECTED:ORDER_NOT_FOUND     | T[] E[] | OPEN last=101 mark=0 bid=101:4 ask=106:5 n=10 oid=58 tid=25 eid=118 | b8268656999e220e
+conditional/0082 ICEBERG     i2 S L 102x9 GTC disp3   | NEW                          | T[] E[ACCEPTED#59/NEW/0] | OPEN last=101 mark=0 bid=101:4 ask=102:3 n=11 oid=59 tid=25 eid=119 | 3d5d11807c2c7ab3
+conditional/0083 SUBMIT      t11 B L 102x20 FOK       | REJECTED:FOK_CANNOT_FILL     | T[] E[REJECTED#60/FOK_CANNOT_FILL/REJECTED/9] | OPEN last=101 mark=0 bid=101:4 ask=102:3 n=11 oid=60 tid=28 eid=120 | 726c75c036578a0c  # consumes every slice, cannot fill, and is reversed
+conditional/0084 SUBMIT      t12 B L 102x3 GTC        | FILLED                       | T[29:102x3 b61 s59 m59 t61 B seq29] E[ACCEPTED#61/FILLED/3 TRADE#61/102x3 ACCEPTED#59/NEW/0] | OPEN last=102 mark=0 bid=101:4 ask=102:3 n=11 oid=61 tid=29 eid=123 | 27fb81b871b5c4f4  # the restored reserve still refills
+conditional/0085 CANCEL      i2 <-82                  | CANCELLED                    | T[] E[CANCELED#59/CANCELLED/0] | OPEN last=102 mark=0 bid=101:4 ask=106:5 n=10 oid=61 tid=29 eid=124 | e24c9dfd65206aff
+conditional/0086 STOP        s5 B L 200x50 FOK stop@105 | PENDING_TRIGGER              | T[] E[ACCEPTED#62/PENDING_TRIGGER/0] | OPEN last=102 mark=0 bid=101:4 ask=106:5 n=10 oid=62 tid=29 eid=125 | 423d694788c67606  # its own order cannot fill
+conditional/0087 SUBMIT      k1 S L 105x1 GTC         | NEW                          | T[] E[ACCEPTED#63/NEW/0] | OPEN last=102 mark=0 bid=101:4 ask=105:1 n=11 oid=63 tid=29 eid=126 | 5eff05573f8d14cd
+conditional/0088 SUBMIT      k2 B L 105x1 GTC         | FILLED                       | T[30:105x1 b64 s63 m63 t64 B seq30] E[ACCEPTED#64/FILLED/1 TRADE#64/105x1 TRIGGERED#62/REJECTED/9 ACCEPTED#62/REJECTED/9 CANCELED#62/FOK_CANNOT_FILL/REJECTED/9] | OPEN last=105 mark=0 bid=101:4 ask=106:5 n=10 oid=64 tid=33 eid=131 | c38764d83b608e7c  # prints at 105, firing a stop that is refused
+conditional/0089 SUBMIT      q9 S L 103x5 GTC         | NEW                          | T[] E[ACCEPTED#65/NEW/0] | OPEN last=105 mark=0 bid=101:4 ask=103:5 n=11 oid=65 tid=33 eid=132 | ee92d344ecc85b9d  # rests ahead of the iceberg
+conditional/0090 ICEBERG     i3 S L 103x9 GTC disp3   | NEW                          | T[] E[ACCEPTED#66/NEW/0] | OPEN last=105 mark=0 bid=101:4 ask=103:8 n=12 oid=66 tid=33 eid=133 | 5ab4d0f620f8e9df
+conditional/0091 SUBMIT      t13 B L 103x20 FOK       | REJECTED:FOK_CANNOT_FILL     | T[] E[REJECTED#67/FOK_CANNOT_FILL/REJECTED/14] | OPEN last=105 mark=0 bid=101:4 ask=103:8 n=12 oid=67 tid=37 eid=134 | 5a8d40f91513587f  # takes the maker and every slice, cannot fill, and is reversed
+conditional/0092 SUBMIT      t14 B L 103x1 GTC        | FILLED                       | T[38:103x1 b68 s65 m65 t68 B seq38] E[ACCEPTED#68/FILLED/1 TRADE#68/103x1] | OPEN last=103 mark=0 bid=101:4 ask=103:7 n=12 oid=68 tid=38 eid=136 | 17c202a28c229b0c  # prints against whichever order kept priority
+conditional/0093 CANCEL      q9 <-89                  | CANCELLED                    | T[] E[CANCELED#65/CANCELLED/1] | OPEN last=103 mark=0 bid=101:4 ask=103:3 n=11 oid=68 tid=38 eid=137 | 0f9527859f97cf35
+conditional/0094 CANCEL      i3 <-90                  | CANCELLED                    | T[] E[CANCELED#66/CANCELLED/0] | OPEN last=103 mark=0 bid=101:4 ask=106:5 n=10 oid=68 tid=38 eid=138 | 5eacee360c2a68e2
 
 == guarded (fifo, stp=CANCEL_NEWEST, maxOrders=100000, shard=0)
 guarded/0000 SUBMIT      g1 S L 100x5 GTC         | NEW                          | T[] E[ACCEPTED#1/NEW/0] | OPEN last=0 mark=0 bid=- ask=100:5 n=1 oid=1 tid=0 eid=1 | ebca7a3bc8b807e9
@@ -1148,17 +1161,19 @@ guarded/0009 SUBMIT      g5 B L 95x2 GTC          | REJECTED:TOO_MANY_ORDERS    
 guarded/0010 CANCEL_ALL  g5                       | CANCELLED n=3                | T[] E[CANCELED#7/CANCELLED/0 CANCELED#8/CANCELLED/0 CANCELED#9/CANCELLED/0] | OPEN last=100 mark=0 bid=150:2 ask=- n=1 oid=10 tid=1 eid=14 | 270711b39630f886
 
 == coverage
-commands: BUST=3 CANCEL=124 CANCEL_ALL=26 CANCEL_ONLY=12 EXPIRE_DUE=1 HALT=19 ICEBERG=1 OCO=2 PEGGED=3 REDUCE=70 REPLACE=59 RESUME=34 SET_MARK=2 SET_PHASE=12 STOP=4 SUBMIT=760 TRAILING=1
-events: ACCEPTED=419 REJECTED=407 TRADE=156 CANCELED=130 TRIGGERED=5 REPLACED=10 HALTED=16 RESUMED=24 CANCEL_ONLY=17 BUSTED=1
-verdicts: BUSTED=1 CANCELLED=90 FILLED=83 NEW=215 OK=80 PARTIALLY_FILLED=8 PENDING_TRIGGER=3 REDUCED=7 REJECTED=646
-rejections: ALREADY_BUSTED=1 DUPLICATE_CLIENT_ORDER_ID=1 FOK_CANNOT_FILL=39 INVALID_EXPIRY=1 INVALID_QUANTITY=2 MARKET_NO_LIQUIDITY=10 NEW_ORDERS_HALTED=178 ORDER_BELOW_MIN_QTY=1 ORDER_EXCEEDS_MAX_QTY=1 ORDER_NOT_FOUND=225 POST_ONLY_WOULD_CROSS=14 PRICE_OUTSIDE_BAND=1 TOO_MANY_ORDERS=1 TRADING_HALTED=170 UNKNOWN_TRADE=1
-orderTypes: LIMIT=402 MARKET=27
-timeInForce: DAY=1 FOK=21 GTC=361 GTD=1 IOC=45
+commands: BUST=3 CANCEL=127 CANCEL_ALL=26 CANCEL_ONLY=12 EXPIRE_DUE=1 HALT=19 ICEBERG=3 OCO=2 PEGGED=3 REDUCE=70 REPLACE=59 RESUME=34 SET_MARK=2 SET_PHASE=12 STOP=5 SUBMIT=767 TRAILING=1
+events: ACCEPTED=429 REJECTED=409 TRADE=159 CANCELED=134 TRIGGERED=6 REPLACED=10 HALTED=16 RESUMED=24 CANCEL_ONLY=17 BUSTED=1
+verdicts: BUSTED=1 CANCELLED=93 FILLED=86 NEW=219 OK=80 PARTIALLY_FILLED=8 PENDING_TRIGGER=4 REDUCED=7 REJECTED=648
+rejections: ALREADY_BUSTED=1 DUPLICATE_CLIENT_ORDER_ID=1 FOK_CANNOT_FILL=41 INVALID_EXPIRY=1 INVALID_QUANTITY=2 MARKET_NO_LIQUIDITY=10 NEW_ORDERS_HALTED=178 ORDER_BELOW_MIN_QTY=1 ORDER_EXCEEDS_MAX_QTY=1 ORDER_NOT_FOUND=225 POST_ONLY_WOULD_CROSS=14 PRICE_OUTSIDE_BAND=1 TOO_MANY_ORDERS=1 TRADING_HALTED=170 UNKNOWN_TRADE=1
+orderTypes: LIMIT=412 MARKET=27
+timeInForce: DAY=1 FOK=23 GTC=369 GTD=1 IOC=45
 stpModes: ALLOW=41 CANCEL_BOTH=44 CANCEL_NEWEST=33 CANCEL_OLDEST=39 DECREMENT=32
-policies: fifo=893 prorata=240
-trades 140
+policies: fifo=906 prorata=240
+trades 143
 auctionTrades 16
 uncrosses 4
-triggers 5
-refills 2
+triggers 6
+refills 3
 busts 1
+icebergRestores 2
+cascadeTerminals 1

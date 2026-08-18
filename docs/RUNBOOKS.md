@@ -228,6 +228,17 @@ remembers adding, and the venue serves a wrong book with no signal anywhere. If 
 yourself needing it on every restart, the log has an unreplayed pre-stamp tail: take one
 checkpoint under the new build and it goes away permanently.
 
+**What the upgrade does NOT repair, at semantics 2.** A snapshot is a state, not a
+program, so a fix does not reach the state it was taken from. Semantics 2 fixes a
+failing fill-or-kill corrupting a resting iceberg
+([PINNED-DEFECTS.md](PINNED-DEFECTS.md)), and an iceberg already corrupted on a running
+venue comes back **unrepaired** through a snapshot round trip: `EngineSnapshot` faithfully
+carries the reserve and refill count it had. Recognise one by `FilledQty < 0` on a
+resting order, or a displayed size larger than that order's own `Quantity`; the remedy is
+to cancel and re-enter it, and the client should be told. Replaying the *commands* under
+the new build produces the correct book, which is the difference between the two routes
+above — route 1–3 keeps the old state, the override recomputes it.
+
 **The related message that is not this.** An OLDER build pointed at a log this one
 wrote refuses with `wal: corrupt record: ... record 1 declares 1329747777 bytes` — the
 downgrade path in "A corrupt log record", not media damage. No version stamp can protect

@@ -393,6 +393,26 @@ type Engine struct {
 	// been told was finished.
 	pending []Event
 
+	// icebergSaves is the whole pre-walk state of every iceberg the CURRENT
+	// fill-or-kill walk is about to trade against, one entry per distinct order.
+	//
+	// It exists because reverseTrade has a precondition — the maker still carries
+	// the fills the print made against it — and the refill path is the only code in
+	// the engine that breaks it: types.IcebergOrder.Refill resets Quantity,
+	// FilledQty and RemainingQty on the SAME *types.Order and re-adds it under the
+	// same id, so three prints against three slices are three prints against one
+	// object whose counters describe only the last of them. The code that breaks a
+	// precondition pays to restore it, so the walk saves and the fill-or-kill
+	// failure branch restores, rather than teaching the shared reversal primitive
+	// about one order type. docs/PINNED-DEFECTS.md §3.3.
+	//
+	// Lifetime, in one line so it is not distributed over settleInto's seven return
+	// paths: truncated to zero at the top of each fill-or-kill walk in match and
+	// matchProRata, and read only by settleInto's fill-or-kill failure branch, which
+	// runs immediately after that walk with nothing between them that could start
+	// another.
+	icebergSaves []icebergSave
+
 	// client-order-id dedup (near-term replay guard): a ring of the most recent
 	// (user,clientID) keys plus a set for O(1) lookup.
 	dedupSeen map[string]struct{}
@@ -745,9 +765,10 @@ func toMatchResult(order *types.Order, dst []types.Trade, status types.OrderStat
 // A REJECTED order's batch is not empty. The rule is that a rejection drops only
 // the events describing state the engine actually UNDID, and the only place that
 // undoes anything is settleInto's fill-or-kill branch, which removes its own
-// reversed trades from e.pending before returning. Everything else the walk did —
-// a maker cancelled or shrunk by self-trade prevention, an iceberg slice refilled,
-// an OCO leg cancelled — stands, so it is announced here, after the REJECTED.
+// reversed trades — and the ACCEPTEDs of the iceberg refills it put back — from
+// e.pending before returning. Everything else the walk did — a maker cancelled or
+// shrunk by self-trade prevention, an OCO leg cancelled — stands, so it is
+// announced here, after the REJECTED.
 //
 // This used to clear e.pending wholesale on a rejection, under the sentence "a
 // rejection means nothing happened". That sentence was false: a fill-or-kill taker
@@ -842,12 +863,33 @@ func (e *Engine) emitReplaced(order *types.Order) {
 }
 
 // emitTerminalIfDone closes out an order that settled without resting — a stop
-// fired by a cascade whose remainder was cancelled rather than booked.
-func (e *Engine) emitTerminalIfDone(order *types.Order) {
-	if e.sink == nil || order.Status != types.OrderStatusCancelled {
+// fired by a cascade whose remainder was cancelled rather than booked, or whose
+// order the venue REFUSED. reason is what settleInto returned, and is nil when the
+// ending carried none.
+//
+// A cascade-fired order is announced TRIGGERED and then ACCEPTED before it settles
+// (cascadeStops), and it never reaches emitResult, so this is the only place its
+// ending can be published. It used to fire on Cancelled alone, which left a refused
+// order — a fill-or-kill that could not fill — announced as having entered the book
+// and never announced as leaving it: the engine held nothing and every consumer
+// rebuilding L3 held the order forever. docs/PINNED-DEFECTS.md §4.
+//
+// The kind is EventCanceled and not EventRejected on purpose. EventCanceled already
+// means "order removed: cancelled, or terminated without resting", every consumer
+// already treats it as a delete and none treats a REJECTED as one — so REJECTED
+// here would ship a new rule for every consumer inside the very patch whose point is
+// that consumers are already wrong about this order. The "why" is not lost: the
+// event carries the Order (whose Status reads REJECTED) and the Reason.
+func (e *Engine) emitTerminalIfDone(order *types.Order, reason error) {
+	if e.sink == nil {
 		return
 	}
-	e.pending = append(e.pending, Event{Kind: EventCanceled, OrderID: order.ID, UserID: order.UserID, Order: order})
+	if order.Status != types.OrderStatusCancelled && order.Status != types.OrderStatusRejected {
+		return
+	}
+	e.pending = append(e.pending, Event{
+		Kind: EventCanceled, OrderID: order.ID, UserID: order.UserID, Order: order, Reason: reason,
+	})
 }
 
 // flushPending publishes any batch built outside a submit path — the standalone
@@ -989,7 +1031,29 @@ func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trad
 	case types.TIFFillOrKill:
 		// All-or-nothing: if it didn't fully fill, unwind every trade and reject.
 		if !order.IsFilled() {
+			// An iceberg the walk refilled is put back WHOLE — slice, counters,
+			// status, reserve, refill counter and registry entry — instead of
+			// having its prints inverted, because the refill has already rewound
+			// the counters those prints moved and reverseTrade would add every
+			// reversed quantity onto the rewind. docs/PINNED-DEFECTS.md §3.3.
+			//
+			// The restore happens INSIDE this loop, at the iceberg's FIRST print,
+			// and its later prints are then skipped: the restore has accounted for
+			// them. Position in the loop is not a detail — it is queue position. A
+			// reversal walks the prints in the order they were made, so a maker
+			// re-added at its own print re-enters behind every maker whose print
+			// came earlier and ahead of every maker whose print came later, which
+			// is the level's original order. Restoring every iceberg up front
+			// instead put it back ahead of makers that had been resting in FRONT of
+			// it, handing a client priority its rejected counterparty had no right
+			// to give away. docs/PINNED-DEFECTS.md §13.6.
 			for i := start; i < len(dst); i++ {
+				if s := e.savedIceberg(dst[i].MakerOrderID); s != nil {
+					if !s.restored {
+						e.restoreIceberg(s)
+					}
+					continue
+				}
 				e.reverseTrade(dst[i], makerOrders)
 			}
 			// The reversal is only total once the reference price goes back too.
@@ -1004,11 +1068,16 @@ func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trad
 			}
 			// Drop the events describing what was just undone, and ONLY those. A
 			// rejection is not "nothing happened": this walk may have cancelled a
-			// maker under self-trade prevention, shrunk one, refilled an iceberg or
-			// cancelled an OCO leg, and none of that is being reversed. Those
-			// events survive the rejection and are published after it (emitResult).
+			// maker under self-trade prevention, shrunk one or cancelled an OCO
+			// leg, and none of that is being reversed. Those events survive the
+			// rejection and are published after it (emitResult).
 			// docs/DIFFERENTIAL-FINDINGS.md §4.
-			e.pending = dropReversedTrades(e.pending, pendStart)
+			//
+			// A refill's ACCEPTED is the one addition to that list, and it is on
+			// the same rule rather than an exception to it: the refill IS being
+			// reversed now, so announcing a slice that no longer exists would tell
+			// a consumer about state the engine has undone.
+			e.pending = e.dropReversedTrades(e.pending, pendStart)
 			order.Status = types.OrderStatusRejected
 			return dst[:start], types.OrderStatusRejected, types.ErrFOKCannotFill
 		}
@@ -1056,14 +1125,19 @@ func (e *Engine) cascadeStops(dst []types.Trade) []types.Trade {
 			// "a stop fired" is the event a risk system actually wants to see.
 			e.emitTriggered(s.Order)
 			e.emitAdd(s.Order) // the stop is now a live order; announce it before it trades
-			dst, _, _ = e.settleInto(s.Order, dst)
-			e.emitTerminalIfDone(s.Order)
+			var reason error
+			dst, _, reason = e.settleInto(s.Order, dst)
+			// The verdict this cascade-fired order reached is announced here or
+			// nowhere: there is no emitResult behind cascadeStops, and discarding
+			// the reason left a refused order live on every consumer's book.
+			e.emitTerminalIfDone(s.Order, reason)
 		}
 		for _, ts := range trailing {
 			e.emitTriggered(ts.Order)
 			e.emitAdd(ts.Order)
-			dst, _, _ = e.settleInto(ts.Order, dst)
-			e.emitTerminalIfDone(ts.Order)
+			var reason error
+			dst, _, reason = e.settleInto(ts.Order, dst)
+			e.emitTerminalIfDone(ts.Order, reason)
 		}
 	}
 	return dst
@@ -1311,6 +1385,9 @@ func (e *Engine) match(taker *types.Order, dst []types.Trade) ([]types.Trade, ma
 	var makerOrders map[int64]*types.Order
 	trackMakers := taker.TimeInForce == types.TIFFillOrKill
 	start := len(dst)
+	if trackMakers {
+		e.icebergSaves = e.icebergSaves[:0]
+	}
 
 	for taker.RemainingQty != 0 {
 		var maker *types.Order
@@ -1374,6 +1451,13 @@ func (e *Engine) match(taker *types.Order, dst []types.Trade) ([]types.Trade, ma
 			}
 		}
 
+		// An iceberg maker's state is saved before the first print against it, so a
+		// failed fill-or-kill can put back what the refill below is about to
+		// overwrite. Guarded on a venue having icebergs at all, so the common path
+		// costs one length test per print.
+		if trackMakers && len(e.icebergOrders) > 0 {
+			e.saveIceberg(maker.ID)
+		}
 		qty := min(taker.RemainingQty, maker.RemainingQty)
 		dst = e.executeTrade(taker, maker, maker.Price, qty, dst)
 		if trackMakers {
@@ -1617,6 +1701,9 @@ func (e *Engine) matchProRata(taker *types.Order, dst []types.Trade) ([]types.Tr
 	var makerOrders map[int64]*types.Order
 	trackMakers := taker.TimeInForce == types.TIFFillOrKill
 	start := len(dst)
+	if trackMakers {
+		e.icebergSaves = e.icebergSaves[:0]
+	}
 	// Only the four PREVENTING modes partition a level. ALLOW says there is no
 	// self-match to prevent, so the taker's own orders take part in the allocation
 	// exactly as anyone else's do — which is what ALLOW already does under
@@ -1670,6 +1757,11 @@ func (e *Engine) matchProRata(taker *types.Order, dst []types.Trade) ([]types.Tr
 					a := allocs[i]
 					if a <= 0 {
 						continue
+					}
+					// See the same call in match: the refill below rewinds the
+					// counters reverseTrade would otherwise unwind twice.
+					if trackMakers && len(e.icebergOrders) > 0 {
+						e.saveIceberg(maker.ID)
 					}
 					dst = e.executeTrade(taker, maker, price, a, dst)
 					if trackMakers {
@@ -1903,9 +1995,127 @@ func (e *Engine) ForceTrade(taker, maker *types.Order, price, qty int64) (*types
 	return &tr, nil
 }
 
+// icebergSave is one iceberg's whole state at the moment a fill-or-kill walk was
+// first about to trade against it: everything Refill overwrites, plus the registry
+// entry it may delete.
+//
+// It is a SAVE and not an inverse, because an inverse is not well defined on its
+// own: under IcebergPeakJitter a slice size is derived from (Order.ID, refills), so
+// undoing one refill means restoring the counter AND the size AND the status AND
+// the registry entry. That is the save; writing an inverse that needs the save is
+// writing the save twice. docs/PINNED-DEFECTS.md §3.3.
+type icebergSave struct {
+	ib        *types.IcebergOrder
+	quantity  int64
+	filled    int64
+	remaining int64
+	status    types.OrderStatus
+	hidden    int64
+	refills   int64
+	// restored is set when the reversal loop has reached this iceberg's first
+	// print and put it back. It is what makes the restore happen once and at the
+	// right moment: the loop skips this order's later prints, and
+	// dropReversedTrades reads it afterwards to drop exactly the refill ACCEPTEDs
+	// that describe slices which no longer exist.
+	restored bool
+}
+
+// saveIceberg records an iceberg maker's whole state the first time a fill-or-kill
+// walk is about to print against it. A maker that is not a registered iceberg
+// cannot be un-refilled underneath reverseTrade, so it is not saved.
+//
+// Taking the save at the FIRST PRINT rather than at the first refill is what makes
+// the restore total: by the refill the counters the save exists to protect have
+// already been overwritten. It is sound because a walk never both trades with and
+// self-trade-prevents the same maker — isSelfMatch is constant for a (taker, maker)
+// pair — so restoring an iceberg can never undo an STP decrement the taker's own
+// mode asked for. docs/PINNED-DEFECTS.md §3.6.
+func (e *Engine) saveIceberg(makerID int64) {
+	ib, ok := e.icebergOrders[makerID]
+	if !ok {
+		return
+	}
+	for i := range e.icebergSaves {
+		if e.icebergSaves[i].ib == ib {
+			return
+		}
+	}
+	e.icebergSaves = append(e.icebergSaves, icebergSave{
+		ib:        ib,
+		quantity:  ib.Order.Quantity,
+		filled:    ib.Order.FilledQty,
+		remaining: ib.Order.RemainingQty,
+		status:    ib.Order.Status,
+		hidden:    ib.Hidden,
+		refills:   ib.Refills(),
+	})
+}
+
+// savedIceberg returns the save this walk took for orderID, or nil if orderID does
+// not name an iceberg this walk printed against. A non-nil answer is the signal that
+// this print must NOT reach reverseTrade: the restore accounts for every print
+// against the order, and reversing one again would add reversed quantity onto
+// counters the refill already rewound.
+func (e *Engine) savedIceberg(orderID int64) *icebergSave {
+	for i := range e.icebergSaves {
+		if e.icebergSaves[i].ib.Order.ID == orderID {
+			return &e.icebergSaves[i]
+		}
+	}
+	return nil
+}
+
+// restoreIceberg puts one iceberg back as it was — displayed slice, fill counters,
+// status, reserve, refill counter and registry entry — and marks the save spent.
+//
+// Called from the reversal loop at the iceberg's FIRST print, so the slice re-enters
+// its level exactly where reverseTrade would have re-added an ordinary maker
+// consumed at that moment. Everything about the order is restored EXCEPT queue
+// position, which follows reverseTrade's rule rather than an iceberg-only one: a
+// re-added order goes to the back of what is in the level at that instant. For a
+// failing fill-or-kill that reached the whole level, that reproduces the level's
+// original order; where a self-trade-prevention decrement left an untouched maker
+// resting mid-level, the restored orders re-enter behind it, which is what an
+// ordinary maker already does. docs/PINNED-DEFECTS.md §8.
+//
+// The resting slice is REMOVED before the saved one is added rather than mutated in
+// place, because the walk may have inherited a half-consumed slice and re-added a
+// fresh one: the node resting under this id contributes its own quantity to its
+// level's aggregate, and only a remove-then-add makes that aggregate agree with the
+// order again.
+func (e *Engine) restoreIceberg(s *icebergSave) {
+	_, _ = e.book.Remove(s.ib.Order.ID)
+	s.ib.Order.Quantity = s.quantity
+	s.ib.Order.FilledQty = s.filled
+	s.ib.Order.RemainingQty = s.remaining
+	s.ib.Order.Status = s.status
+	s.ib.Hidden = s.hidden
+	s.ib.RestoreRefills(s.refills)
+	e.icebergOrders[s.ib.Order.ID] = s.ib
+	_ = e.book.Add(s.ib.Order)
+	s.restored = true
+}
+
+// wasIcebergRestored reports whether orderID names an iceberg this walk restored
+// whole. Read only by dropReversedTrades, which runs after the reversal loop has
+// restored every save it took, to drop the ACCEPTED a refill published for a slice
+// that no longer exists.
+func (e *Engine) wasIcebergRestored(orderID int64) bool {
+	s := e.savedIceberg(orderID)
+	return s != nil && s.restored
+}
+
 // reverseTrade unwinds a single trade against a maker (FOK failure path),
 // restoring the maker's quantities, its resting level total, and re-adding it to
 // the book if it had been fully consumed.
+//
+// PRECONDITION: the maker still carries the fills this print made against it. It is
+// stated here because it is not free — types.IcebergOrder.Refill breaks it by
+// resetting the counters on the same order object mid-walk, and the fix for that is
+// on the refill side (restoreIceberg), never here. This is the shared
+// reversal primitive every future path inherits, so a special case for one order
+// type in it is a special case the bust path, a replication rewind and an auction
+// unwind would each have to know about. docs/PINNED-DEFECTS.md §3.3.
 func (e *Engine) reverseTrade(tr types.Trade, makerOrders map[int64]*types.Order) {
 	maker, ok := makerOrders[tr.MakerOrderID]
 	if !ok {
@@ -1937,17 +2147,22 @@ func (e *Engine) reverseTrade(tr types.Trade, makerOrders map[int64]*types.Order
 }
 
 // dropReversedTrades compacts pending in place from index from onward, keeping
-// every event kind except EventTrade and keeping the survivors in order.
+// the survivors in order and dropping exactly what the failure branch undid: every
+// EventTrade, and the EventAccepted a refill published for an iceberg that has just
+// been restored whole.
 //
-// It is the other half of reverseTrade: the trades a failed fill-or-kill unwound
-// must reach nobody, and everything else the same walk recorded must reach
-// everybody. Nothing before from is touched — that batch belongs to a caller
-// further out (cascadeStops settling a stop inside another command's walk), and
-// its prints stand.
-func dropReversedTrades(pending []Event, from int) []Event {
+// It is the other half of reverseTrade and restoreIceberg: what a failed
+// fill-or-kill unwound must reach nobody, and everything else the same walk
+// recorded must reach everybody. Nothing before from is touched — that batch
+// belongs to a caller further out (cascadeStops settling a stop inside another
+// command's walk), and its prints stand.
+func (e *Engine) dropReversedTrades(pending []Event, from int) []Event {
 	kept := pending[:from]
 	for _, ev := range pending[from:] {
 		if ev.Kind == EventTrade {
+			continue
+		}
+		if ev.Kind == EventAccepted && e.wasIcebergRestored(ev.OrderID) {
 			continue
 		}
 		kept = append(kept, ev)

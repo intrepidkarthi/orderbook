@@ -110,7 +110,25 @@ exists to leave behind.
 | Semantics | Build | What it means |
 |---:|---|---|
 | **0** | every build up to and including v0.25.0 | **Unknown.** Not "1", not "compatible", not anything. See §4 |
-| **1** | this release onward | The first stamped semantics. Includes the three changes in §1 — [`CHANGELOG.md`](../CHANGELOG.md) *Unreleased / Fixed*: "A rejected fill-or-kill no longer moves `LastTradePrice`"; *Unreleased / Changed*: "A `REJECTED` command's event batch may now carry further events" and "Under `ProRata`, a taker that meets its own resting liquidity is no longer skipped" — so it is *not* the semantics of the last released build |
+| **1** | v0.25.0 + the differential-findings slice | The first stamped semantics. Includes the three changes in §1 — [`CHANGELOG.md`](../CHANGELOG.md) *Unreleased / Fixed*: "A rejected fill-or-kill no longer moves `LastTradePrice`"; *Unreleased / Changed*: "A `REJECTED` command's event batch may now carry further events" and "Under `ProRata`, a taker that meets its own resting liquidity is no longer skipped" — so it is *not* the semantics of the last released build |
+| **2** | this release onward | The two fixes in [`PINNED-DEFECTS.md`](PINNED-DEFECTS.md) — [`CHANGELOG.md`](../CHANGELOG.md) *Unreleased / Fixed*: "A failing fill-or-kill no longer corrupts an iceberg it consumed"; *Unreleased / Changed*: "A cascade-fired order the venue refuses now publishes a `CANCELED`". Only the first is replay-visible; the second ships under the same number because the two are one commit and the golden moves for both |
+
+**Row 2 nearly did not exist, and the reason is worth the line.** `internal/semcheck`
+was **green** on both of those fixes with the corpus as it stood: the tier-2 script
+reached icebergs and reached stops, and never crossed a fill-or-kill with either. Under
+Rule 22 that is not "no bump needed", it is §5.5's boundary — *a behaviour the corpus
+never reaches is a behaviour nobody can bump for* — so the corpus gained thirteen
+commands first, and the number moved on the strength of the thirteen lines that
+appeared. `Coverage.IcebergRestores` and `Coverage.CascadeTerminals` exist so it cannot
+silently go back.
+
+Six of those thirteen were added *after* the first version of the fix, and they are the
+sharper illustration of the same rule. Review found that fix rewriting **queue order** at
+a level — a restored iceberg re-entering ahead of a maker that had been resting in front
+of it — with this fingerprint green, because the corpus's iceberg was alone at its price.
+A rejected order that reorders a level moves no aggregate and no event; it moves the
+maker id on the next print, and nothing in the corpus took that print.
+[`PINNED-DEFECTS.md`](PINNED-DEFECTS.md) §13.6.
 
 **This slice must ship in the same release as those three changes.** If it slips a
 release, semantics 0 comes to mean two genuinely different matchers — builds before the

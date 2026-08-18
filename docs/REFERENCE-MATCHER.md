@@ -940,11 +940,11 @@ not padded with mutations any test would catch.
 | 2 | Limit-buy crossing test `taker.Price < maker.Price` → `<=` (`engine.go:1289`) | trade count |
 | 3 | `executeTrade(taker, maker, taker.Price, …)` — print at the taker's price (`engine.go:1344`) | trade price |
 | 4 | `qty := min(taker.RemainingQty, maker.RemainingQty)` → `maker.RemainingQty` (`engine.go:1343`) | trade quantity; negative remaining |
-| 5 | Drop `e.book.UpdateOrderQuantity(maker.ID, qty)` on a partial fill (`engine.go:1367`) | **level aggregate only** — nothing else sees it |
+| 5 | Drop `e.book.UpdateOrderQuantity(maker.ID, qty)` on a partial fill (`engine.go:1367`) | ~~**level aggregate only** — nothing else sees it~~ → the whole-book `checkInvariants` (`level SELL 98 publishes 9 lots and the 1 orders resting there hold 4`), which the harness runs before it compares anything. See the note under this table |
 | 6 | `Reduce` removes and re-adds instead of shrinking in place (`engine.go:1821`) | **book rank only** |
 | 7 | `takerSTP` ignores the per-order `STPMode` and always returns the engine default (`engine.go:1389-1397`) | trades; events |
 | 8 | Drop `e.book.UpdateOrderQuantity(maker.ID, d)` in `decrement` (`engine.go:1405`) | level aggregate |
-| 9 | `reverseTrade` does not restore the maker's quantity (`engine.go:1778-1779`, `:1794`) | book quantity |
+| 9 | `reverseTrade` does not restore the maker's quantity (`engine.go:1778-1779`, `:1794`) | ~~book quantity~~ → the whole-book `checkInvariants` (`a resting order (41): rests with 0 remaining`), for the same reason as 5 |
 | 10 | Move `e.nextID(order)` below the admission checks (`engine.go:674`) | order id |
 | 11 | `reverseTrade` decrements `tradeSeq` (id reuse after a rejected FOK) | trade id |
 | 12 | `OrderBook.Remove` deletes from the index but not the level list (`orderbook.go:235`) | book membership; level aggregate |
@@ -960,6 +960,26 @@ assertions in §3.2 — the asymmetric level comparison, ranked rather than set 
 comparison, and the ordered event list. If any of those three mutations is caught
 by something cheaper, the corresponding assertion is over-engineered and should be
 argued down.
+
+**That rule has fired for mutation 5, and the answer is "not yet".** The strengthened
+whole-book `checkInvariants` ([`PINNED-DEFECTS.md`](PINNED-DEFECTS.md) §5) runs inside
+`TestDifferentialTape` after every command — deliberately, because "the book crossed
+after command 412" is a better failure message than a rank divergence with the same
+cause — and it now catches mutations 5 and 9 before any comparison against the model
+runs. Both are still caught, so nothing is broken; the *evidence* moved.
+
+The assertion is not removed here, and the reason is not sentiment: the two checks
+compare different things. The invariant compares the engine's level aggregate against
+the engine's **own** order list; the differential assertion compares it against an
+**independent implementation**. What the rule establishes is that mutation 5 no longer
+*justifies* the assertion — not that the assertion is unjustified. So this table loses
+mutation 5 as the level comparison's evidence and gains an open item: **find a mutation
+the asymmetric level comparison catches and the whole-book invariant does not, or argue
+the assertion down in the slice that fails to.** A search when this was recorded did not
+find one. The obvious candidate — a level dropped from the sorted price vector while its
+order still rests, which `OrderBook.Orders()` cannot see and the invariant is therefore
+blind to — turns out to be caught by `book-membership` and by the event mirror, not by
+the level comparison.
 
 ### 7.2 The mutations it must NOT flag
 

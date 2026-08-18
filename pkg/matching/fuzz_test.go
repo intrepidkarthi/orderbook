@@ -1,15 +1,35 @@
 package matching
 
 import (
+	"fmt"
 	"math/rand"
 	"testing"
 
+	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
 )
 
 // checkInvariants asserts the engine's core safety properties after an operation:
-// the resting book is never crossed, and the order just processed conserves
-// quantity (filled + remaining == original).
+// the resting book is never crossed, every order the engine still owns conserves
+// quantity in BOTH directions, anything resting is in a state that permits resting,
+// and each level's maintained aggregate agrees with the orders actually in it.
+//
+// It is a WHOLE-BOOK check and not a one-order check, and that is the load-bearing
+// half of it. A defect in a REVERSAL is by construction a defect in a maker; the
+// suite used to check only the order passed in, which is the taker — the one order
+// that cannot be the victim — and both callers that hammer the exotic surface pass
+// nil, so on that whole surface it asserted exactly one property and it was not
+// about quantity. A fill-or-kill that exhausted an iceberg's reserve and then failed
+// left a resting order with FilledQty -6 and nine displayed lots against a stated
+// quantity of three, and this function returned green.
+// docs/PINNED-DEFECTS.md §5.
+//
+// The four assertions are not one assertion written four ways, and each catches a
+// different member of the family: `filled + remaining == quantity` constrains
+// neither term's SIGN (-6 + 9 == 3 satisfies it); the sign checks say nothing about
+// the LEVEL that publishes the order, which the book maintains incrementally through
+// a `contributed` field that is deliberately not `order.RemainingQty`; and none of
+// them says a zero-remaining or cancelled order cannot be sitting in the book.
 func checkInvariants(t testingTB, e *Engine, o *types.Order) {
 	t.Helper()
 	if bid, _, okB := e.BestBid(); okB {
@@ -17,12 +37,63 @@ func checkInvariants(t testingTB, e *Engine, o *types.Order) {
 			t.Fatalf("book crossed: best bid %d >= best ask %d", bid, ask)
 		}
 	}
-	if o != nil && o.FilledQty+o.RemainingQty != o.Quantity {
-		t.Fatalf("quantity not conserved: filled %d + remaining %d != quantity %d",
-			o.FilledQty, o.RemainingQty, o.Quantity)
+	if o != nil {
+		checkOrderConserves(t, "the submitted order", o)
 	}
-	if o != nil && o.RemainingQty < 0 {
-		t.Fatalf("negative remaining quantity: %d", o.RemainingQty)
+
+	book := e.Book()
+	for _, r := range book.Orders() {
+		who := fmt.Sprintf("a resting order (%d)", r.ID)
+		checkOrderConserves(t, who, r)
+		// An order with nothing left, or one already cancelled, filled or rejected,
+		// satisfies conservation perfectly and has no business resting.
+		if r.RemainingQty <= 0 {
+			t.Fatalf("%s: rests with %d remaining", who, r.RemainingQty)
+		}
+		if !r.IsActive() {
+			t.Fatalf("%s: rests with status %s, which is not an active status", who, r.Status)
+		}
+	}
+
+	// The level's maintained TotalQty against the orders actually resting there. It
+	// is the only assertion that sees the engine disagreeing with itself about an
+	// order it has otherwise repaired.
+	depth := book.Count() + 1
+	for _, side := range []types.Side{types.SideBuy, types.SideSell} {
+		var levels []*orderbook.PriceLevel
+		if side == types.SideBuy {
+			levels = book.GetBidLevels(depth)
+		} else {
+			levels = book.GetAskLevels(depth)
+		}
+		for _, l := range levels {
+			var sum int64
+			orders := book.GetOrdersAtPrice(side, l.Price)
+			for _, r := range orders {
+				sum += r.RemainingQty
+			}
+			if sum != l.TotalQty {
+				t.Fatalf("level %s %d publishes %d lots and the %d orders resting there hold %d",
+					side, l.Price, l.TotalQty, len(orders), sum)
+			}
+		}
+	}
+}
+
+// checkOrderConserves is the per-order half: quantity is conserved and neither term
+// has gone negative. who names the order in the failure, because "which order" is
+// the whole difference between the old check and this one.
+func checkOrderConserves(t testingTB, who string, o *types.Order) {
+	t.Helper()
+	if o.FilledQty+o.RemainingQty != o.Quantity {
+		t.Fatalf("%s: quantity not conserved: filled %d + remaining %d != quantity %d",
+			who, o.FilledQty, o.RemainingQty, o.Quantity)
+	}
+	if o.RemainingQty < 0 {
+		t.Fatalf("%s: negative remaining quantity: %d", who, o.RemainingQty)
+	}
+	if o.FilledQty < 0 {
+		t.Fatalf("%s: negative filled quantity: %d", who, o.FilledQty)
 	}
 }
 
@@ -89,8 +160,26 @@ func FuzzEngine(f *testing.F) {
 // combination-order outage). It asserts invariants hold after every step (book
 // never crossed, quantity conserved) and that no exotic trips an unbounded
 // trigger loop (bounded by maxStopCascade, so the call must simply return).
+//
+// The FILL-OR-KILL symbol is half of one deliverable with the strengthened
+// checkInvariants above, and an invariant with no reachable input is decoration:
+// the alphabet used to draw no fill-or-kill at all, so nothing here could reach a
+// reversal, and the sign check would have sat green forever on the only target in
+// the repository that hammers icebergs. With both halves, against the engine before
+// docs/PINNED-DEFECTS.md §3's fix, this target fails from the seed corpus in a
+// fraction of a second on a twelve-byte input and nobody has to predict the defect.
 func FuzzExoticOrders(f *testing.F) {
 	f.Add([]byte{0x00, 0x5f, 0x05, 0x01, 0x63, 0x03, 0x03, 0x0a, 0x02})
+	// The regression seed: an iceberg buy of 10 shown 5 at 102, and a stranger's
+	// fill-or-kill sell of 12 at 101 that consumes both slices and then cannot fill.
+	// Against the engine before docs/PINNED-DEFECTS.md §3's fix it fails on
+	// `a resting order (5): negative filled quantity: -5`. Committed so the path is
+	// reached by a plain `go test` run and not only under -fuzz.
+	f.Add([]byte{0x01, 0x65, 0x04, 0x04, 0x64, 0x0b})
+	// And the input the fuzzer itself minimised to, kept because it is the artefact
+	// rather than a reconstruction: nobody predicted it, and it fails the unfixed
+	// engine on `a resting order (9): negative filled quantity: -1`.
+	f.Add([]byte("8xX1010010008021010"))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		e := NewEngine(DefaultConfig("FX"))
 		// Seed a two-sided book and a last trade price (=100) so stops/trailing
@@ -103,7 +192,7 @@ func FuzzExoticOrders(f *testing.F) {
 		for i := 0; i+2 < len(data); i += 3 {
 			price := int64(data[i+1])%200 + 1
 			qty := int64(data[i+2])%50 + 1
-			switch data[i] % 4 {
+			switch data[i] % 5 {
 			case 0: // sell stop
 				o, err := types.NewOrder("x", "FX", types.SideSell, types.OrderTypeMarket, 0, qty, types.TIFImmediateOrCancel)
 				if err == nil {
@@ -131,6 +220,22 @@ func FuzzExoticOrders(f *testing.F) {
 					side = types.SideSell
 				}
 				if o, err := types.NewOrder("x", "FX", side, types.OrderTypeMarket, 0, qty, types.TIFImmediateOrCancel); err == nil {
+					e.Process(o)
+				}
+			case 4: // fill-or-kill taker — the only draw that can reach a reversal
+				side := types.SideBuy
+				if qty%2 == 0 {
+					side = types.SideSell
+				}
+				// A DIFFERENT account from every other draw here, and that is the whole
+				// symbol rather than an incidental name. The exotics above are all "x",
+				// so an "x" fill-or-kill would meet "x"'s own iceberg, be stopped by
+				// self-trade prevention and never print — the reversal path would stay
+				// unreachable and this case would be decoration. The defect is a
+				// STRANGER's rejected order leaking a client's reserve, so the stranger
+				// has to exist. Measured: with "x" here, 1.3 million executions found
+				// nothing; with "y", a six-byte input does.
+				if o, err := types.NewOrder("y", "FX", side, types.OrderTypeLimit, price, qty, types.TIFFillOrKill); err == nil {
 					e.Process(o)
 				}
 			}

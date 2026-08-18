@@ -44,11 +44,22 @@ package matching
 //
 //	0  every build up to and including v0.25.0 — unknown, and NOT the semantics of
 //	   any build
-//	1  this release onward — includes the three matching changes in CHANGELOG.md's
-//	   Unreleased/Changed section (a rejected fill-or-kill no longer moves
-//	   LastTradePrice; a rejected command's batch carries the events describing state
-//	   that was not rolled back; pro-rata no longer skips a taker's own liquidity)
+//	1  includes the three matching changes CHANGELOG.md records under that heading (a
+//	   rejected fill-or-kill no longer moves LastTradePrice; a rejected command's
+//	   batch carries the events describing state that was not rolled back; pro-rata no
+//	   longer skips a taker's own liquidity)
+//	2  this release onward — a failing fill-or-kill no longer corrupts an iceberg it
+//	   consumed, and a cascade-fired order the venue refuses now publishes a CANCELED
+//	   (docs/PINNED-DEFECTS.md)
 //
 // It is an integer and only ever increases, so a refusal can say which direction the
 // mismatch runs and an operator can look up a range in the changelog.
-const SemanticsVersion = 1
+//
+// A note for the next person, because this constant nearly did not move for the
+// changes 2 records. internal/semcheck was GREEN on both of them: its corpus reached
+// icebergs and reached stops, and never crossed a fill-or-kill with either. A
+// behaviour the corpus cannot see is a behaviour Rule 22 will not let you bump for,
+// so the corpus was extended FIRST and the number moved on the strength of the seven
+// lines that appeared. If a change of yours leaves this file green, that is a fact
+// about the corpus and not about your change.
+const SemanticsVersion = 2

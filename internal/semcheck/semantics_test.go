@@ -371,6 +371,15 @@ func TestTheFingerprintReachesEveryDecidedBehaviour(t *testing.T) {
 		{"stop triggers", cov.Triggers},
 		{"iceberg refills", cov.Refills},
 		{"busts", cov.Busts},
+		// The two paths docs/PINNED-DEFECTS.md §6.1 measured the corpus was blind
+		// to. Both were zero on the corpus as it stood, which is precisely why
+		// neither of the two defects that slice fixed moved a line of the golden and
+		// neither could have been bumped for under Rule 22. These rows are the
+		// mechanical forcing function: whoever deletes those commands fails a test
+		// that says why, rather than quietly returning the fingerprint to its
+		// previous blindness.
+		{"fill-or-kill refusals across a resting iceberg", cov.IcebergRestores},
+		{"cascade-fired orders that ended without resting", cov.CascadeTerminals},
 	} {
 		if c.got == 0 {
 			t.Errorf("the corpus reached zero %s", c.name)

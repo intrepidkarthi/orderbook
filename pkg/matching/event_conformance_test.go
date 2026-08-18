@@ -335,6 +335,38 @@ func extraCases(t *testing.T) []conformanceCase {
 			e.ProcessStop(stopOrder(t, "s", types.SideSell, 3, 97)) // rests; fires when price falls
 			e.Process(cOrd(t, "t", types.SideSell, 96, 6))          // drives last price down to 96
 		}},
+		// A stop fired by a CASCADE whose own order the venue then REFUSES. This is
+		// the combination the list did not contain, and it is unreachable by the
+		// generated tape because stops are tier 2: cascadeStops announces the order
+		// TRIGGERED and ACCEPTED, settleInto rejects it, and the rejection used to
+		// reach nobody — emitTerminalIfDone fired only on Cancelled and a
+		// cascade-fired order never reaches emitResult. The mirror held a fifty-lot
+		// order at 200 that the engine did not have.
+		// docs/PINNED-DEFECTS.md §4.
+		{name: "cascade-fired stop the venue refuses", run: func(t *testing.T, e *Engine) {
+			seedWithLastPrice(t, e) // last = 100, bids at 100, 96 and 95
+			// A sell stop at 95, whose own order is a fill-or-kill priced where
+			// nothing can meet it, so firing it produces a REFUSAL and not a fill.
+			inner, err := types.NewOrder("s", "X", types.SideSell, types.OrderTypeLimit, 200, 50, types.TIFFillOrKill)
+			if err != nil {
+				t.Fatalf("NewOrder: %v", err)
+			}
+			st, err := types.NewStopOrder(inner, 95)
+			if err != nil {
+				t.Fatalf("NewStopOrder: %v", err)
+			}
+			e.ProcessStop(st) // rests: the market has not fallen to 95
+			if st.Order.Status != types.OrderStatusPendingTrigger {
+				t.Fatalf("the stop ended %s, want PENDING_TRIGGER — this scenario needs the cascade",
+					st.Order.Status)
+			}
+			// Sweeps down to a print at 95, which fires the stop on the way out.
+			e.Process(cOrd(t, "t", types.SideSell, 95, 11))
+			if inner.Status != types.OrderStatusRejected {
+				t.Fatalf("the cascade-fired order ended %s, want REJECTED — this scenario needs the "+
+					"refused path", inner.Status)
+			}
+		}},
 		{name: "post-only that would cross", run: func(t *testing.T, e *Engine) {
 			e.Process(cOrd(t, "a", types.SideBuy, 100, 5))
 			po, err := types.NewOrder("b", "X", types.SideSell, types.OrderTypeLimit, 100, 5, types.TIFGoodTillCancel)
@@ -359,6 +391,32 @@ func extraCases(t *testing.T) []conformanceCase {
 			}
 			e.ProcessIceberg(ib)
 			e.Process(cOrd(t, "t", types.SideSell, 100, 300))
+		}},
+		// A fill-or-kill that exhausts an ICEBERG's reserve and then fails. This is
+		// the other combination the list did not contain, and it is the reason
+		// event.go's claim carried an iceberg exclusion: the reversal used to leave
+		// the engine's own book holding an order whose displayed size no stream
+		// could explain, so the mirror and the engine disagreed with the engine at
+		// fault. It is unreachable by the generated tape because icebergs are
+		// tier 2, and a hand-written scenario is the only oracle there
+		// (docs/REFERENCE-MATCHER.md §2.4). A second maker rests at the same price
+		// so this also witnesses the restore's place in the queue.
+		// docs/PINNED-DEFECTS.md §3, §13.6.
+		{name: "fill-or-kill exhausts an iceberg's reserve and fails", run: func(t *testing.T, e *Engine) {
+			e.Process(cOrd(t, "mm2", types.SideBuy, 100, 200)) // rests first
+			ib, err := types.NewIcebergOrder(cOrd(t, "mm", types.SideBuy, 100, 300), 100)
+			if err != nil {
+				t.Fatalf("NewIcebergOrder: %v", err)
+			}
+			e.ProcessIceberg(ib)
+			fok, err := types.NewOrder("t", "X", types.SideSell, types.OrderTypeLimit, 100, 900, types.TIFFillOrKill)
+			if err != nil {
+				t.Fatalf("NewOrder: %v", err)
+			}
+			if res := e.Process(fok); res.Status != types.OrderStatusRejected {
+				t.Fatalf("the fill-or-kill ended %s, want REJECTED — this scenario needs the reversal",
+					res.Status)
+			}
 		}},
 	}
 }

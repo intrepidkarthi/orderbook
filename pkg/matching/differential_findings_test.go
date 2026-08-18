@@ -9,9 +9,11 @@ package matching
 // the argument that picked between the answers; this file is where the pins were
 // inverted once it did.
 //
-// The three tests whose names now say the OPPOSITE of what they assert
+// The five tests whose names now say the OPPOSITE of what they assert
 // (TestRejectedFOKStillMovesTheLastTradePrice here,
-// TestSTPCancelledMakerVanishesWithNoEvent here, and
+// TestSTPCancelledMakerVanishesWithNoEvent here,
+// TestFailingFOKCorruptsAnIcebergsReserve here,
+// TestCascadeFiredStopRejectedLeavesAPhantom here, and
 // TestProRataSelfSkipCrossesTheBook in differential_test.go) keep those names on
 // purpose. A pin is a promise to whoever changes the behaviour that they will have
 // to come to this file; renaming it after the change hides the promise being kept.
@@ -26,12 +28,17 @@ package matching
 // seeing the wall of divergences and reaching for the cheapest repair, which is to
 // relax the comparison.
 //
-// Two findings measured in the same slice are pinned rather than fixed at the
-// bottom of this file. They are real, they are not what this slice decided, and a
-// measured finding left unpinned is how it gets found a third time.
+// Findings measured but not decided are pinned rather than fixed at the bottom of
+// this file. They are real, they are not what the slice that measured them decided,
+// and a measured finding left unpinned is how it gets found a third time. Two of
+// the original four have since been redeemed (docs/PINNED-DEFECTS.md); the OCO leg
+// and the rejected taker's own fill counters are still pinned.
 
 import (
 	"errors"
+	"fmt"
+	"math/rand"
+	"slices"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -587,33 +594,47 @@ func TestRejectedFOKAnnouncesAStandingCancellation(t *testing.T) {
 	}
 }
 
-// --- pinned, not fixed -------------------------------------------------------
+// --- one finding still pinned ------------------------------------------------
 //
-// Two findings measured while deciding defect B. Neither is what this slice
-// decided, both are real, and each carries the sentence a fix must come and delete.
-// They belong with tier 2's exotics work, where internal/refmatch can finally hold
-// an opinion about icebergs and OCO — today it models neither, so only a
-// hand-written test can hold them at all.
+// TestFailingFOKCancelsAnOCOStopLeg below is what is left of the pair measured
+// while deciding defect B. The iceberg half of it is fixed, above; the OCO half is
+// real, is not what this slice decided, and carries the sentence a fix must come
+// and delete. It belongs with tier 2's exotics work, where internal/refmatch can
+// finally hold an opinion about OCO — today it models neither icebergs nor OCO
+// (docs/REFERENCE-MATCHER.md §2.4), so only a hand-written test can hold it at all.
 
-// TestFailingFOKCorruptsAnIcebergsReserve pins docs/DIFFERENTIAL-FINDINGS.md §4.4.
+// TestFailingFOKCorruptsAnIcebergsReserve used to pin
+// docs/DIFFERENTIAL-FINDINGS.md §4.4. It now asserts the opposite, and it keeps
+// every assertion it had — the FilledQty check and the displayed-size check are
+// both here, reversed — plus the fields the old test never looked at. The name is
+// kept so the pin is visibly the thing that was redeemed.
 //
-// A fill-or-kill that exhausts an iceberg's reserve and then fails leaves the order
-// with a NEGATIVE FilledQty, its whole hidden reserve forced into the open, and a
-// displayed size larger than its stated quantity. The walk consumes each slice,
-// refills from the reserve and re-adds the SAME order object; reverseTrade then adds
-// every reversed quantity back onto an object the refill has already rewound.
+// A fill-or-kill that exhausted an iceberg's reserve and then failed used to leave
+// the order with FilledQty -6, its whole hidden reserve forced into the open, a
+// displayed size three times its stated quantity, and no registration left to refill
+// from. The walk consumes each visible slice and refills from the reserve, which
+// resets Quantity, FilledQty and RemainingQty on the SAME order object; reverseTrade
+// then added every reversed quantity back onto counters the refill had already
+// rewound.
 //
-// checkInvariants passes on it, because filled + remaining == quantity still holds
-// (-6 + 9 == 3) and remaining >= 0 still holds. That blind spot is deliberate here:
-// adding FilledQty >= 0 to the invariant suite belongs with the fix it would catch,
-// not with a slice that would then ship a red suite.
+// The decision (docs/PINNED-DEFECTS.md §3.3) is that THE REFILL PATH OWNS THE
+// REWIND. The walk saves an iceberg's whole state the first time it is about to
+// trade against it and the failure branch restores it whole — slice, counters,
+// status, reserve, refill counter and registry entry — rather than inverting
+// anything, and the prints against a restored iceberg never reach reverseTrade at
+// all. reverseTrade is unchanged: it is the shared reversal primitive, and a special
+// case for one order type in it is a special case every future reversal path
+// inherits.
 //
-// This is a defect in reverseTrade's interaction with the refill path, not in the
-// event stream, and the event-stream fix in this slice neither repairs nor worsens
-// it. WHEN IT IS FIXED, this test inverts and the paragraph in
-// docs/DIFFERENTIAL-FINDINGS.md §7 that defers it is deleted.
+// The rejected command must leave NO TRACE. That is why this asserts the exact event
+// batch and the reserve's continued operation as well as the numbers: a restore that
+// repairs the counters and leaves the order out of e.icebergOrders passes every
+// arithmetic assertion and never refills again.
 func TestFailingFOKCorruptsAnIcebergsReserve(t *testing.T) {
-	e := NewEngine(DefaultConfig("I"))
+	sink := &findingSink{}
+	cfg := DefaultConfig("I")
+	cfg.EventSink = sink
+	e := NewEngine(cfg)
 
 	base, err := types.NewOrder("u1", "I", types.SideSell, types.OrderTypeLimit, 100, 9, types.TIFGoodTillCancel)
 	if err != nil {
@@ -624,6 +645,7 @@ func TestFailingFOKCorruptsAnIcebergsReserve(t *testing.T) {
 		t.Fatalf("NewIcebergOrder: %v", err)
 	}
 	e.ProcessIceberg(ib)
+	mark := len(sink.evs)
 
 	fok, err := types.NewOrder("u2", "I", types.SideBuy, types.OrderTypeLimit, 100, 12, types.TIFFillOrKill)
 	if err != nil {
@@ -633,20 +655,396 @@ func TestFailingFOKCorruptsAnIcebergsReserve(t *testing.T) {
 		t.Fatalf("the fill-or-kill ended %s, want REJECTED", res.Status)
 	}
 
-	if base.FilledQty >= 0 {
-		t.Fatalf("the iceberg's FilledQty is %d. If it is no longer negative the defect "+
-			"docs/DIFFERENTIAL-FINDINGS.md §4.4 records has been FIXED — invert this test, delete the "+
-			"deferral in §7, and consider adding FilledQty >= 0 to checkInvariants in the same commit.",
-			base.FilledQty)
+	if base.FilledQty != 0 {
+		t.Fatalf("the iceberg's FilledQty is %d, want 0. A negative value is the defect "+
+			"docs/DIFFERENTIAL-FINDINGS.md §4.4 recorded: reverseTrade adding reversed quantity back onto "+
+			"counters the refill already rewound. docs/PINNED-DEFECTS.md §3.", base.FilledQty)
 	}
-	_, qty, ok := e.BestAsk()
-	if !ok || qty <= base.Quantity {
-		t.Fatalf("the best ask shows %d lots (present %t) against a stated quantity of %d; this test is "+
-			"pinned to the state where the whole reserve has been forced into the open",
-			qty, ok, base.Quantity)
+	if base.Quantity != 3 || base.RemainingQty != 3 {
+		t.Fatalf("the restored slice is quantity %d / remaining %d, want 3 / 3", base.Quantity, base.RemainingQty)
 	}
-	// The one thing that IS fixed: whatever the engine leaves behind, it no longer
-	// leaves it behind silently. The refilled slice's re-entry is announced.
+	if base.Status != types.OrderStatusNew {
+		t.Fatalf("the restored slice's status is %s, want NEW — the state it was in before the "+
+			"rejected command", base.Status)
+	}
+	if ib.Hidden != 6 {
+		t.Fatalf("the hidden reserve holds %d lots, want 6. An iceberg exists to hide size, and a "+
+			"stranger's rejected order emptying the reserve into the open is the whole defect", ib.Hidden)
+	}
+	if ib.Refills() != 0 {
+		t.Fatalf("the refill counter reads %d, want 0. Under IcebergPeakJitter the counter seeds the "+
+			"next slice's size, so a restore that leaves it advanced re-derives a size a watcher has "+
+			"already seen", ib.Refills())
+	}
+	if _, registered := e.icebergOrders[base.ID]; !registered {
+		t.Fatalf("order %d is no longer registered as an iceberg; the walk deleted it when the reserve "+
+			"ran dry and the restore did not put it back, so it can never refill again", base.ID)
+	}
+	price, qty, ok := e.BestAsk()
+	if !ok || price != 100 || qty != base.Quantity {
+		t.Fatalf("the best ask shows %d:%d (present %t) against a stated quantity of %d; the level must "+
+			"publish exactly what it published before the rejected command", price, qty, ok, base.Quantity)
+	}
+	if e.OrderCount() != 1 {
+		t.Fatalf("the book holds %d orders, want 1", e.OrderCount())
+	}
+	if got := e.LastTradePrice(); got != 0 {
+		t.Fatalf("last trade price is %d after a rejected fill-or-kill, want 0", got)
+	}
+	batch := sink.evs[mark:]
+	if len(batch) != 1 || batch[0].Kind != EventRejected {
+		t.Fatalf("the rejected command published %v, want exactly [REJECTED]. The two extra ACCEPTEDs "+
+			"are the refills, and a refill that has been undone must not be announced: they carry the "+
+			"restored quantity, so a mirror agrees with the engine and nothing else in the tree "+
+			"notices. docs/PINNED-DEFECTS.md §11 row 4.", kindsFrom(batch))
+	}
+	checkInvariants(t, e, nil)
+
+	// And the reserve must still WORK. This is the assertion a restore that repairs
+	// the numbers and leaves the order deregistered fails, and it is the only one.
+	after, err := types.NewOrder("u3", "I", types.SideBuy, types.OrderTypeLimit, 100, 3, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	res := e.Process(after)
+	if len(res.Trades) != 1 || res.Trades[0].Quantity != 3 {
+		t.Fatalf("the follow-up buy printed %+v, want one trade of 3", res.Trades)
+	}
+	if ib.Hidden != 3 || ib.Refills() != 1 {
+		t.Fatalf("after the restored slice was consumed the reserve holds %d with %d refills, want 3 "+
+			"and 1 — the restored iceberg did not reload", ib.Hidden, ib.Refills())
+	}
+	if _, qty, ok := e.BestAsk(); !ok || qty != 3 {
+		t.Fatalf("the reloaded slice shows %d lots (present %t), want 3", qty, ok)
+	}
+	checkInvariants(t, e, nil)
+}
+
+// TestFailingFOKRestoresAPartiallyConsumedIcebergSlice is docs/PINNED-DEFECTS.md
+// §3.1's second reproduction, and it is the one that moves the LEVEL AGGREGATE
+// independently of the order.
+//
+// The walk here inherits a slice somebody else has already taken a lot out of, and
+// it is stopped by self-trade prevention rather than by an empty book. That makes
+// the restore a remove-then-add rather than a write: the node resting under the
+// iceberg's id contributes its own quantity to its level's total (the book's
+// `contributed` field, deliberately not order.RemainingQty), so a restore that
+// writes the saved counters onto the order in place leaves the order reading 2 lots
+// and its level publishing 3.
+//
+// That half-fix passes every other assertion in this tree — measured — which is what
+// makes this test load-bearing rather than a second copy of the one above.
+func TestFailingFOKRestoresAPartiallyConsumedIcebergSlice(t *testing.T) {
+	e := NewEngine(DefaultConfig("I2"))
+
+	base, err := types.NewOrder("u1", "I2", types.SideSell, types.OrderTypeLimit, 100, 9, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	ib, err := types.NewIcebergOrder(base, 3)
+	if err != nil {
+		t.Fatalf("NewIcebergOrder: %v", err)
+	}
+	e.ProcessIceberg(ib)
+
+	// One lot out of the displayed slice, so the state the walk saves is a PARTIALLY
+	// consumed one that the walk itself did not create.
+	nibble, err := types.NewOrder("u3", "I2", types.SideBuy, types.OrderTypeLimit, 100, 1, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	e.Process(nibble)
+
+	// u2's own liquidity behind the iceberg, so u2's fill-or-kill is stopped by
+	// self-trade prevention with the refilled slice still resting.
+	behind, err := types.NewOrder("u2", "I2", types.SideSell, types.OrderTypeLimit, 100, 5, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	e.Process(behind)
+
+	if base.Quantity != 3 || base.FilledQty != 1 || base.RemainingQty != 2 {
+		t.Fatalf("setup: the slice is %d/%d/%d, want quantity 3 filled 1 remaining 2",
+			base.Quantity, base.FilledQty, base.RemainingQty)
+	}
+	if _, qty, ok := e.BestAsk(); !ok || qty != 7 {
+		t.Fatalf("setup: the ask level publishes %d (present %t), want 7", qty, ok)
+	}
+
+	fok, err := types.NewOrder("u2", "I2", types.SideBuy, types.OrderTypeLimit, 100, 20, types.TIFFillOrKill)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	fok.STPMode = string(STPCancelNewest)
+	if res := e.Process(fok); res.Status != types.OrderStatusRejected {
+		t.Fatalf("the fill-or-kill ended %s, want REJECTED — this test needs the rejected path", res.Status)
+	}
+
+	if base.Quantity != 3 || base.FilledQty != 1 || base.RemainingQty != 2 {
+		t.Fatalf("the restored slice is %d/%d/%d, want quantity 3 filled 1 remaining 2 — exactly what it "+
+			"held before the rejected command", base.Quantity, base.FilledQty, base.RemainingQty)
+	}
+	if base.Status != types.OrderStatusPartiallyFilled {
+		t.Fatalf("the restored slice's status is %s, want PARTIALLY_FILLED", base.Status)
+	}
+	if ib.Hidden != 6 || ib.Refills() != 0 {
+		t.Fatalf("the reserve holds %d with %d refills, want 6 and 0", ib.Hidden, ib.Refills())
+	}
+	if _, qty, ok := e.BestAsk(); !ok || qty != 7 {
+		t.Fatalf("the ask level publishes %d lots (present %t), want 7. If the order reads 2 and the "+
+			"level publishes one more than it should, the restore wrote the saved counters onto the "+
+			"resting node instead of removing it first. docs/PINNED-DEFECTS.md §5.2(3).", qty, ok)
+	}
+	checkInvariants(t, e, nil)
+}
+
+// levelIDs renders a price level as a consumer of queue priority reads it: the
+// resting order ids, in the order they will trade.
+func levelIDs(e *Engine, side types.Side, price int64) []int64 {
+	orders := e.Book().GetOrdersAtPrice(side, price)
+	out := make([]int64, 0, len(orders))
+	for _, o := range orders {
+		out = append(out, o.ID)
+	}
+	return out
+}
+
+// TestFailingFOKRestoresAnIcebergAtItsOwnPlaceInTheQueue is docs/PINNED-DEFECTS.md
+// §13.6, and it is the one assertion the two tests above cannot make: their iceberg
+// is ALONE at its price, so any restore order at all looks right.
+//
+// The reversal walks a failed fill-or-kill's prints in the order they were made, and
+// re-adding each consumed maker at its own print is what puts a level back in the
+// order it was in. A restore that runs before that loop instead re-enters every
+// iceberg it touched AHEAD of makers that were resting in FRONT of it — a client who
+// sent nothing gains priority over a client who was there first, paid for by a third
+// party's rejected order. It is not visible in fill counters, in level aggregates, in
+// the event batch or in the fingerprint corpus, because the id SET is right and only
+// the ORDER is wrong; the next print names the wrong maker.
+//
+// Measured before the fix at docs/PINNED-DEFECTS.md §13.6: the level came back
+// [iceberg, older maker] and a one-lot buy printed against the iceberg. The engine
+// before EITHER change put it back [older maker, iceberg], so this is a property the
+// fix had to preserve rather than one it introduced.
+func TestFailingFOKRestoresAnIcebergAtItsOwnPlaceInTheQueue(t *testing.T) {
+	e := NewEngine(DefaultConfig("I3"))
+
+	// The older maker rests FIRST, so the iceberg behind it has no claim on priority.
+	first, err := types.NewOrder("u3", "I3", types.SideSell, types.OrderTypeLimit, 100, 5, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	e.Process(first)
+
+	base, err := types.NewOrder("u1", "I3", types.SideSell, types.OrderTypeLimit, 100, 9, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	ib, err := types.NewIcebergOrder(base, 3)
+	if err != nil {
+		t.Fatalf("NewIcebergOrder: %v", err)
+	}
+	e.ProcessIceberg(ib)
+
+	before := levelIDs(e, types.SideSell, 100)
+	if len(before) != 2 || before[0] != first.ID || before[1] != base.ID {
+		t.Fatalf("setup: the level is %v, want [%d %d]", before, first.ID, base.ID)
+	}
+
+	// 5 + 3 + 3 + 3 = 14 lots against a 20-lot fill-or-kill: everything at the level
+	// is consumed, the reserve runs dry, and the order still cannot fill.
+	fok, err := types.NewOrder("u2", "I3", types.SideBuy, types.OrderTypeLimit, 100, 20, types.TIFFillOrKill)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	if res := e.Process(fok); res.Status != types.OrderStatusRejected {
+		t.Fatalf("the fill-or-kill ended %s, want REJECTED — this test needs the rejected path", res.Status)
+	}
+
+	after := levelIDs(e, types.SideSell, 100)
+	if len(after) != 2 || after[0] != first.ID || after[1] != base.ID {
+		t.Fatalf("the level came back %v, want %v. A rejected order rewrote queue priority: the "+
+			"restored iceberg (%d) is now ahead of a maker (%d) that was resting in front of it, so "+
+			"the next print at this price names the wrong maker. The restore must happen at the "+
+			"iceberg's FIRST print inside the reversal loop, not before it. "+
+			"docs/PINNED-DEFECTS.md §13.6.", after, before, base.ID, first.ID)
+	}
+	// The whole point of the order type, asserted in the same test as the ordering:
+	// a fix that gets the queue right and leaves the reserve in the open has fixed
+	// nothing. 5 + 3, not 5 + 9.
+	if _, qty, ok := e.BestAsk(); !ok || qty != 8 {
+		t.Fatalf("the ask level publishes %d lots (present %t), want 8 — the older maker's 5 and the "+
+			"iceberg's 3-lot slice. If it reads 14 the reserve is standing in the open.", qty, ok)
+	}
+	if ib.Hidden != 6 {
+		t.Fatalf("the hidden reserve holds %d lots, want 6", ib.Hidden)
+	}
+	checkInvariants(t, e, nil)
+
+	// The consequence, stated as the venue states it: who does the next lot trade
+	// against.
+	next, err := types.NewOrder("u4", "I3", types.SideBuy, types.OrderTypeLimit, 100, 1, types.TIFGoodTillCancel)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	res := e.Process(next)
+	if len(res.Trades) != 1 {
+		t.Fatalf("the follow-up buy printed %d trades, want 1", len(res.Trades))
+	}
+	if res.Trades[0].MakerOrderID != first.ID {
+		t.Fatalf("the next lot printed against maker %d, want %d — the order that was first in the "+
+			"queue before a stranger's rejected fill-or-kill", res.Trades[0].MakerOrderID, first.ID)
+	}
+}
+
+// TestRejectedFOKPreservesEveryLevelsQueueOrder is the generated half of the test
+// above: the hand-written scenario names one shape, and this one says the property
+// holds over shapes nobody chose.
+//
+// The property: after a fill-or-kill the venue REFUSED, every price level holds the
+// same order ids in the same order as before the command. That is queue priority, and
+// it is the one part of a reversal that no aggregate, no counter and no event batch
+// can witness — the id set stays right while the order goes wrong.
+//
+// The generator is deliberately narrow, and each exclusion is a case where a rejected
+// command legitimately changes a level: every account is distinct, so no self-trade
+// prevention fires (a DECREMENT leaves an untouched maker resting mid-level while the
+// reversal re-adds behind it); no OCO, whose leg a rejected fill-or-kill does cancel
+// by design (TestFailingFOKCancelsAnOCOStopLeg); and FIFO allocation, because
+// pro-rata prints within a level in allocation order rather than arrival order.
+// Inside those bounds a refusal must be invisible.
+func TestRejectedFOKPreservesEveryLevelsQueueOrder(t *testing.T) {
+	// Deterministic and committed: the same 60 tapes run on every `go test`, so this
+	// is a regression test and not a lottery.
+	for seed := int64(1); seed <= 60; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		e := NewEngine(DefaultConfig("QP"))
+		var refusals int
+
+		for step := range 40 {
+			price := int64(95 + rng.Intn(11))
+			qty := int64(1 + rng.Intn(12))
+			side := types.SideBuy
+			if rng.Intn(2) == 0 {
+				side = types.SideSell
+			}
+			user := fmt.Sprintf("m%d", step) // a distinct account per command
+
+			switch rng.Intn(4) {
+			case 0: // an iceberg, the order type whose restore this is about
+				total := qty + int64(1+rng.Intn(9))
+				o, err := types.NewOrder(user, "QP", side, types.OrderTypeLimit, price, total, types.TIFGoodTillCancel)
+				if err != nil {
+					continue
+				}
+				ib, err := types.NewIcebergOrder(o, qty)
+				if err != nil {
+					continue
+				}
+				e.ProcessIceberg(ib)
+			case 1, 2: // plain resting liquidity
+				o, err := types.NewOrder(user, "QP", side, types.OrderTypeLimit, price, qty, types.TIFGoodTillCancel)
+				if err != nil {
+					continue
+				}
+				e.Process(o)
+			default: // the taker under test
+				// Oversized on purpose: most of these cannot fill, which is the
+				// path this test exists for.
+				o, err := types.NewOrder(user, "QP", side, types.OrderTypeLimit, price, qty*4, types.TIFFillOrKill)
+				if err != nil {
+					continue
+				}
+				bidsBefore := make(map[int64][]int64)
+				asksBefore := make(map[int64][]int64)
+				for p := int64(95); p <= 105; p++ {
+					bidsBefore[p] = levelIDs(e, types.SideBuy, p)
+					asksBefore[p] = levelIDs(e, types.SideSell, p)
+				}
+
+				if res := e.Process(o); res.Status != types.OrderStatusRejected {
+					continue
+				}
+				refusals++
+
+				for p := int64(95); p <= 105; p++ {
+					for _, c := range []struct {
+						side   types.Side
+						before []int64
+					}{{types.SideBuy, bidsBefore[p]}, {types.SideSell, asksBefore[p]}} {
+						got := levelIDs(e, c.side, p)
+						if !slices.Equal(got, c.before) {
+							t.Fatalf("seed %d, command %d: the refused fill-or-kill rewrote level %s %d "+
+								"from %v to %v. A rejected command must leave queue priority exactly as it "+
+								"found it. docs/PINNED-DEFECTS.md §13.6.", seed, step, c.side, p, c.before, got)
+						}
+					}
+				}
+				checkInvariants(t, e, nil)
+			}
+		}
+		if refusals == 0 {
+			t.Fatalf("seed %d produced no refused fill-or-kill, so it asserted nothing. The generator "+
+				"has drifted away from the path this test exists for.", seed)
+		}
+	}
+}
+
+// TestRejectedFOKKeepsItsOwnFillCounters pins docs/PINNED-DEFECTS.md §9's third
+// bullet: the family's remaining member, measured in the same slice that fixed two
+// of them and deliberately not fixed here.
+//
+// A fill-or-kill for 12 prints 9 against three makers, cannot fill, and has all nine
+// prints reversed. Every maker gets its quantity and its place back and no trade
+// reaches a consumer — and the TAKER walks away holding FilledQty 9 and
+// RemainingQty 3, on an order that ended REJECTED, with those numbers published on
+// its REJECTED event for every consumer to read.
+//
+// It is pinned rather than fixed because it is a much wider consumer-visible change
+// than either fix in this slice: it moves the payload of EVERY rejected fill-or-kill
+// that printed, on a path internal/semcheck's corpus reaches forty times. WHEN IT IS
+// FIXED, this test fails; invert it, and delete this paragraph's claim from
+// docs/PINNED-DEFECTS.md §9.
+func TestRejectedFOKKeepsItsOwnFillCounters(t *testing.T) {
+	sink := &findingSink{}
+	cfg := DefaultConfig("K")
+	cfg.EventSink = sink
+	e := NewEngine(cfg)
+
+	for _, user := range []string{"m1", "m2", "m3"} {
+		maker, err := types.NewOrder(user, "K", types.SideSell, types.OrderTypeLimit, 100, 3, types.TIFGoodTillCancel)
+		if err != nil {
+			t.Fatalf("NewOrder: %v", err)
+		}
+		e.Process(maker)
+	}
+	mark := len(sink.evs)
+
+	fok, err := types.NewOrder("t", "K", types.SideBuy, types.OrderTypeLimit, 100, 12, types.TIFFillOrKill)
+	if err != nil {
+		t.Fatalf("NewOrder: %v", err)
+	}
+	res := e.Process(fok)
+	if res.Status != types.OrderStatusRejected {
+		t.Fatalf("the fill-or-kill ended %s, want REJECTED", res.Status)
+	}
+	if _, qty, ok := e.BestAsk(); !ok || qty != 9 {
+		t.Fatalf("the makers were not fully restored (best ask %d lots, present %t)", qty, ok)
+	}
+
+	if fok.FilledQty != 9 || fok.RemainingQty != 3 {
+		t.Fatalf("the rejected taker holds filled %d / remaining %d. If it now reads 0 / 12 the finding "+
+			"docs/PINNED-DEFECTS.md §9 records has been FIXED — invert this test and delete that bullet.",
+			fok.FilledQty, fok.RemainingQty)
+	}
+	batch := sink.evs[mark:]
+	if len(batch) != 1 || batch[0].Kind != EventRejected || batch[0].Order == nil {
+		t.Fatalf("the rejected command published %v, want exactly [REJECTED]", kindsFrom(batch))
+	}
+	if batch[0].Order.FilledQty != 9 {
+		t.Fatalf("the REJECTED event carries FilledQty %d; this test is pinned to the state where a "+
+			"consumer is told a refused order filled nine lots it did not keep", batch[0].Order.FilledQty)
+	}
 	checkInvariants(t, e, nil)
 }
 
@@ -706,32 +1104,36 @@ func TestFailingFOKCancelsAnOCOStopLeg(t *testing.T) {
 	}
 }
 
-// TestCascadeFiredStopRejectedLeavesAPhantom pins a defect of the same family as §9(b),
-// found by adversarial review of the fix for it rather than by the generated tape.
+// TestCascadeFiredStopRejectedLeavesAPhantom used to pin the defect of the same
+// family as §9(b) that adversarial review of the fix for it turned up. It now
+// asserts the opposite, and the name is kept so the pin is visibly the thing that
+// was redeemed.
 //
-// A stop fires inside cascadeStops. Its order is emitted TRIGGERED and ACCEPTED, then
-// settleInto rejects it — a fill-or-kill that cannot fill. That rejection reaches
-// nobody: emitTerminalIfDone fires only on OrderStatusCancelled, never on Rejected, and
-// a cascade-fired order never reaches emitResult, so its status and its return value are
-// both discarded. The stream has announced an order that entered the book and will never
-// say it left.
+// A stop fires inside cascadeStops. Its order is emitted TRIGGERED and ACCEPTED,
+// then settleInto rejects it — a fill-or-kill that cannot fill. That rejection used
+// to reach nobody: emitTerminalIfDone fired only on OrderStatusCancelled, and a
+// cascade-fired order never reaches emitResult, so its status and its return value
+// were both discarded. The stream said an order entered the book and never said it
+// left, so a consumer reconstructing the book held a fifty-lot phantom at 200
+// forever — and pkg/marketdata's L2 feed published forty-six lots the book did not
+// have.
 //
-// A consumer reconstructing the book from the stream therefore holds a fifty-lot phantom
-// at 200 forever. That is the same shape as the STP-cancelled maker this slice fixed, in
-// a path the generated tape cannot reach, because stops are tier 2
-// (docs/REFERENCE-MATCHER.md §2.4).
+// The decision (docs/PINNED-DEFECTS.md §4.3) widens emitTerminalIfDone to fire on
+// Rejected as well as Cancelled, carrying the reason settleInto returned. Routing
+// cascade-fired orders through emitResult instead would announce a filled one twice
+// and publish a batch mid-command; delaying the ACCEPTED until after settleInto
+// would put the stop's own trades before the event that introduces the order, which
+// is the exact failure emitAdd's comment records.
 //
-// It is PINNED and not fixed, for the reason the other three were: the fix is a real
-// change to how a cascade reports a rejected order, it interacts with replay, and it
-// deserves its own commit rather than riding along inside another. When it is fixed this
-// test fails; invert it, and remove the exclusion the EventKind comment states.
-//
-// It is pre-existing. At the commit before this slice the same sequence produced TWO
-// divergences; the STP fix removed one and this is the one that remains.
+// The kind stays CANCELED rather than REJECTED, and the assertions below are about
+// that choice: a mirror deletes on CANCELED and not on REJECTED, the CANCELED must
+// come AFTER the ACCEPTED or the mirror deletes an order it has not yet added, and
+// the reason must survive so a client is told why a contingent order was refused.
 func TestCascadeFiredStopRejectedLeavesAPhantom(t *testing.T) {
 	cfg := DefaultConfig("A")
 	mirror := newMirror()
-	cfg.EventSink = mirror
+	sink := &findingSink{}
+	cfg.EventSink = MultiSink{mirror, sink}
 	e := NewEngine(cfg)
 
 	seed := func(user string, side types.Side, price, qty int64) {
@@ -764,6 +1166,7 @@ func TestCascadeFiredStopRejectedLeavesAPhantom(t *testing.T) {
 
 	seed("m2", types.SideSell, 120, 4)
 	seed("m3", types.SideSell, 95, 1)
+	mark := len(sink.evs)
 
 	// Trades at 95, which fires the stop, whose fill-or-kill is then rejected.
 	trigger, err := types.NewOrder("t2", "A", types.SideBuy, types.OrderTypeLimit, 95, 1, types.TIFGoodTillCancel)
@@ -773,10 +1176,40 @@ func TestCascadeFiredStopRejectedLeavesAPhantom(t *testing.T) {
 	e.Process(trigger)
 
 	got, want := mirror.resting(), engineResting(e)
-	if len(got) == len(want) {
-		t.Fatalf("the stream now reconstructs the book across a rejected cascade-fired stop "+
-			"(mirror %v, engine %v). That is the fix this test was waiting for: invert it, and "+
-			"remove the exclusion pkg/matching/event.go states for this case.", got, want)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("the stream does not reconstruct the book across a rejected cascade-fired stop\n"+
+			"  mirror: %v\n  engine: %v\nA consumer holding an order the venue refused is the defect "+
+			"docs/PINNED-DEFECTS.md §4 records.", got, want)
 	}
-	t.Logf("pinned: mirror %v against engine %v — the rejected stop's order never leaves the stream's book", got, want)
+
+	batch := sink.evs[mark:]
+	accepted, canceled := -1, -1
+	for i, ev := range batch {
+		if ev.OrderID != inner.ID {
+			continue
+		}
+		switch ev.Kind {
+		case EventAccepted:
+			accepted = i
+		case EventCanceled:
+			canceled = i
+		}
+	}
+	if canceled < 0 {
+		t.Fatalf("nothing in the batch says the refused stop order %d left the book: %v",
+			inner.ID, kindsFrom(batch))
+	}
+	if accepted < 0 || canceled < accepted {
+		t.Fatalf("the CANCELED for order %d is at %d and its ACCEPTED at %d: %v. Before the ACCEPTED, a "+
+			"mirror deletes an order it has not yet added and then adds it, and the phantom comes back.",
+			inner.ID, canceled, accepted, kindsFrom(batch))
+	}
+	if !errors.Is(batch[canceled].Reason, types.ErrFOKCannotFill) {
+		t.Fatalf("the CANCELED carries reason %v, want ErrFOKCannotFill — the client whose contingent "+
+			"order was refused is told a cancellation happened and not why", batch[canceled].Reason)
+	}
+	if batch[canceled].Order == nil || batch[canceled].Order.Status != types.OrderStatusRejected {
+		t.Fatalf("the CANCELED carries order %+v; the kind means REMOVED and the status is what says the "+
+			"venue refused it. docs/PINNED-DEFECTS.md §4.3.", batch[canceled].Order)
+	}
 }

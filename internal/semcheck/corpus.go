@@ -342,6 +342,50 @@ func tierTwo() []Cmd {
 	s.add(Cmd{Kind: CancelAll, User: "q1"})
 	s.add(Cmd{Kind: Cancel, User: "m1", Target: askA})
 
+	// APPENDED, NEVER INSERTED. An insertion mid-script shifts every later line's
+	// order id, event id and digest and turns a reviewable diff into a thousand-line
+	// rewrite nobody reads. Appended, the diff is legible.
+	//
+	// These seven close the two blind spots docs/PINNED-DEFECTS.md §6.1 measured:
+	// the script above reaches icebergs and reaches stops, but no fill-or-kill in it
+	// ever meets an iceberg and no stop it fires ever fails — so neither of the two
+	// defects that slice fixed was in the fingerprint, and under Rule 22 neither
+	// could have been bumped for.
+
+	// A fill-or-kill that exhausts an iceberg's reserve and then fails.
+	ice2 := s.add(Cmd{Kind: Iceberg, User: "i2", Sell: true, Price: 102, Qty: 9, DisplayQty: 3})
+	s.add(Cmd{Kind: Submit, User: "t11", Price: 102, Qty: 20, TIF: types.TIFFillOrKill,
+		Note: "consumes every slice, cannot fill, and is reversed"})
+	// Not padding: this is the assertion that the RESTORED RESERVE STILL WORKS, and
+	// it is the line that moves if a restore repairs the numbers and leaves the
+	// iceberg deregistered.
+	s.add(Cmd{Kind: Submit, User: "t12", Price: 102, Qty: 3, Note: "the restored reserve still refills"})
+	s.add(Cmd{Kind: Cancel, User: "i2", Target: ice2})
+
+	// A stop fired by a CASCADE whose own order is then refused. The stop paths above
+	// all fire on arrival or fire and fill; this is the one that fires from inside
+	// another command's walk and is then turned away.
+	s.add(Cmd{Kind: Stop, User: "s5", Price: 200, Qty: 50, TIF: types.TIFFillOrKill, StopPrice: 105,
+		Note: "its own order cannot fill"})
+	s.add(Cmd{Kind: Submit, User: "k1", Sell: true, Price: 105, Qty: 1})
+	s.add(Cmd{Kind: Submit, User: "k2", Price: 105, Qty: 1, Note: "prints at 105, firing a stop that is refused"})
+
+	// And the QUEUE ORDER a refusal must not rewrite, which the four lines above
+	// cannot see: i2 is alone at 102, so any restore order at all produces the same
+	// digest, and a review of the same change found the ordering wrong with this
+	// fingerprint green. Here an older maker rests in FRONT of the iceberg at one
+	// price, a fill-or-kill takes them both and then fails, and the one-lot buy after
+	// it names the maker that kept priority — visible on the line as `m<id>`, and in
+	// the snapshot digest, which carries the book in price-then-time order.
+	// docs/PINNED-DEFECTS.md §13.6.
+	qFirst := s.add(Cmd{Kind: Submit, User: "q9", Sell: true, Price: 103, Qty: 5, Note: "rests ahead of the iceberg"})
+	ice3 := s.add(Cmd{Kind: Iceberg, User: "i3", Sell: true, Price: 103, Qty: 9, DisplayQty: 3})
+	s.add(Cmd{Kind: Submit, User: "t13", Price: 103, Qty: 20, TIF: types.TIFFillOrKill,
+		Note: "takes the maker and every slice, cannot fill, and is reversed"})
+	s.add(Cmd{Kind: Submit, User: "t14", Price: 103, Qty: 1, Note: "prints against whichever order kept priority"})
+	s.add(Cmd{Kind: Cancel, User: "q9", Target: qFirst})
+	s.add(Cmd{Kind: Cancel, User: "i3", Target: ice3})
+
 	return s.cmds
 }
 

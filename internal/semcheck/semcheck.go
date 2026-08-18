@@ -222,6 +222,26 @@ type Coverage struct {
 	Refills       int
 	Busts         int
 	Uncrosses     int
+	// IcebergRestores and CascadeTerminals are the two paths docs/PINNED-DEFECTS.md
+	// §6.1 measured the corpus was blind to, counted so it cannot go blind again.
+	// Both were zero before that slice extended tierTwo, which is exactly why
+	// neither of the defects it fixed moved a line of the golden.
+	//
+	// IcebergRestores counts a fill-or-kill REFUSED across a resting iceberg it was
+	// priced into, which left that iceberg's reserve and refill counter exactly as
+	// it found them. A restore is invisible by design — that is the property the fix
+	// delivers — so what is counted is the SETUP being reached and the iceberg
+	// coming back untouched, which is as much as the public API can see. The
+	// correctness assertion is the golden line; this is the guard that keeps the
+	// command in the corpus.
+	//
+	// CascadeTerminals counts a TRIGGERED and an ACCEPTED for one order id followed,
+	// in the same command, by a CANCELED for it — a stop fired from inside another
+	// command's walk whose own order then ended without resting. A stop that fires
+	// ON ARRIVAL cannot be counted here and must not be: emitResult puts its
+	// ACCEPTED before the TRIGGERED, which is how the two paths are told apart.
+	IcebergRestores  int
+	CascadeTerminals int
 }
 
 func newCoverage() *Coverage {
@@ -302,13 +322,19 @@ func run(sc Scenario, out *strings.Builder, cov *Coverage) error {
 	// command. Per-id maxima, because an iceberg that is exhausted or cancelled
 	// leaves the snapshot and would otherwise take its count with it.
 	refills := map[int64]int64{}
+	// The previous command's snapshot, so a command can be compared against the
+	// state it found rather than only against the state it left. An iceberg RESTORE
+	// leaves no trace by design, so "unchanged across a refusal" is the only shape
+	// of it the public API can see at all.
+	var prev *matching.EngineSnapshot
 
 	for _, c := range sc.Script {
 		cov.Policies[policy]++
-		line, err := apply(sc.Name, eng, c, ids, printed, refills, rec, cov)
+		line, snap, err := apply(sc.Name, eng, c, ids, printed, refills, prev, rec, cov)
 		if err != nil {
 			return fmt.Errorf("%s: command %d (%s): %w", sc.Name, c.Pos, c.Kind.Name(), err)
 		}
+		prev = snap
 		out.WriteString(line)
 		out.WriteByte('\n')
 	}
@@ -340,7 +366,7 @@ var phaseOrder = []matching.EngineState{
 
 // apply issues one command and renders the whole of what the engine did about it.
 func apply(scenario string, eng *matching.Engine, c Cmd, ids map[int]int64, printed map[int][]int64,
-	refills map[int64]int64, rec *recorder, cov *Coverage) (string, error) {
+	refills map[int64]int64, prev *matching.EngineSnapshot, rec *recorder, cov *Coverage) (string, *matching.EngineSnapshot, error) {
 	var (
 		verdict string
 		trades  []*types.Trade
@@ -351,7 +377,7 @@ func apply(scenario string, eng *matching.Engine, c Cmd, ids map[int]int64, prin
 	case Submit:
 		o, err := buildOrder(c)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		res := eng.Process(o)
 		ids[c.Pos] = res.Order.ID
@@ -360,7 +386,7 @@ func apply(scenario string, eng *matching.Engine, c Cmd, ids map[int]int64, prin
 	case Replace:
 		repl, err := buildOrder(c)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		res, rerr := eng.Replace(ids[c.Target], c.User, repl)
 		if rerr != nil {
@@ -422,11 +448,11 @@ func apply(scenario string, eng *matching.Engine, c Cmd, ids map[int]int64, prin
 	case Stop:
 		o, err := buildOrder(c)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		s, err := types.NewStopOrder(o, c.StopPrice)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		res := eng.ProcessStop(s)
 		ids[c.Pos] = res.Order.ID
@@ -435,22 +461,22 @@ func apply(scenario string, eng *matching.Engine, c Cmd, ids map[int]int64, prin
 	case OCO:
 		primary, err := buildOrder(c)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		leg := c
 		leg.Sell = c.StopSell
 		leg.Price = c.StopPrice2
 		legOrder, err := buildOrder(leg)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		s, err := types.NewStopOrder(legOrder, c.StopPrice)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		pair, err := types.NewOCOOrder(primary, s)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		res := eng.ProcessOCO(pair)
 		ids[c.Pos] = res.Order.ID
@@ -459,11 +485,11 @@ func apply(scenario string, eng *matching.Engine, c Cmd, ids map[int]int64, prin
 	case Iceberg:
 		o, err := buildOrder(c)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		ib, err := types.NewIcebergOrder(o, c.DisplayQty)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		res := eng.ProcessIceberg(ib)
 		ids[c.Pos] = res.Order.ID
@@ -472,11 +498,11 @@ func apply(scenario string, eng *matching.Engine, c Cmd, ids map[int]int64, prin
 	case Pegged:
 		o, err := buildOrder(c)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		p, err := types.NewPeggedOrder(o, types.PegReference(c.PegRef), c.PegOffset)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		res := eng.ProcessPegged(p)
 		ids[c.Pos] = res.Order.ID
@@ -485,18 +511,18 @@ func apply(scenario string, eng *matching.Engine, c Cmd, ids map[int]int64, prin
 	case Trailing:
 		o, err := buildOrder(c)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		ts, err := types.NewTrailingStop(o, c.Trail)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		res := eng.ProcessTrailingStop(ts)
 		ids[c.Pos] = res.Order.ID
 		verdict, trades = resultVerdict(res), res.Trades
 
 	default:
-		return "", fmt.Errorf("no driver for kind %s", c.Kind.Name())
+		return "", nil, fmt.Errorf("no driver for kind %s", c.Kind.Name())
 	}
 
 	cov.Commands[c.Kind.Name()]++
@@ -519,6 +545,7 @@ func apply(scenario string, eng *matching.Engine, c Cmd, ids map[int]int64, prin
 			cov.Triggers++
 		}
 	}
+	cov.CascadeTerminals += cascadeTerminals(events)
 	cov.Trades += len(trades)
 	if len(trades) > 0 {
 		var out []int64
@@ -549,7 +576,86 @@ func apply(scenario string, eng *matching.Engine, c Cmd, ids map[int]int64, prin
 			refills[ib.OrderID] = ib.Refills
 		}
 	}
-	return renderLine(scenario, c, verdict, trades, auction, events, eng, snap), nil
+	if icebergRestored(c, verdict, prev, snap) {
+		cov.IcebergRestores++
+	}
+	return renderLine(scenario, c, verdict, trades, auction, events, eng, snap), snap, nil
+}
+
+// icebergRestored reports whether this command was a fill-or-kill REFUSED while
+// priced into a resting iceberg that came back with its reserve and refill counter
+// exactly as they were.
+//
+// It cannot assert the restore happened, and says so rather than pretending: the
+// restore's whole point is that a rejected command leaves no trace, so from outside
+// the engine "untouched" is the only shape it has. What this does assert is that the
+// corpus still REACHES the setup — an iceberg resting, a fill-or-kill crossing it,
+// a refusal — which is what the guard in semantics_test.go needs and what the
+// golden's own line then pins exactly.
+func icebergRestored(c Cmd, verdict string, prev, snap *matching.EngineSnapshot) bool {
+	if prev == nil || c.TIF != types.TIFFillOrKill || verdict != "REJECTED:FOK_CANNOT_FILL" {
+		return false
+	}
+	for _, was := range prev.Icebergs {
+		slice := restingOrder(prev, was.OrderID)
+		if slice == nil || (slice.Side == types.SideSell) == c.Sell {
+			continue
+		}
+		// The taker has to have been priced into it, or the walk never met it.
+		if c.Sell && c.Price > slice.Price {
+			continue
+		}
+		if !c.Sell && c.Price < slice.Price {
+			continue
+		}
+		for _, now := range snap.Icebergs {
+			if now.OrderID == was.OrderID && now.Hidden == was.Hidden && now.Refills == was.Refills {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func restingOrder(snap *matching.EngineSnapshot, id int64) *types.Order {
+	for _, o := range snap.Orders {
+		if o.ID == id {
+			return o
+		}
+	}
+	return nil
+}
+
+// cascadeTerminals counts the orders this command announced TRIGGERED, then
+// ACCEPTED, then CANCELED — a stop fired from inside another command's walk whose
+// own order ended without resting.
+//
+// The ordering test is what tells a cascade-fired stop from one that fires on
+// ARRIVAL, and it is not incidental: a stop that fires on arrival is announced
+// through emitResult, which composes the order's own ACCEPTED at the FRONT of the
+// batch, ahead of the TRIGGERED that emitTriggered recorded during the walk. So
+// requiring TRIGGERED before ACCEPTED excludes exactly the path this counter is not
+// about.
+func cascadeTerminals(events []matching.Event) int {
+	var n int
+	triggered := map[int64]bool{}
+	live := map[int64]bool{}
+	for _, e := range events {
+		switch e.Kind {
+		case matching.EventTriggered:
+			triggered[e.OrderID] = true
+		case matching.EventAccepted:
+			if triggered[e.OrderID] {
+				live[e.OrderID] = true
+			}
+		case matching.EventCanceled:
+			if live[e.OrderID] {
+				n++
+				live[e.OrderID] = false
+			}
+		}
+	}
+	return n
 }
 
 func buildOrder(c Cmd) (*types.Order, error) {
@@ -840,6 +946,7 @@ func renderCoverage(b *strings.Builder, cov *Coverage) {
 	writeCounts(b, "policies", cov.Policies)
 	fmt.Fprintf(b, "trades %d\nauctionTrades %d\nuncrosses %d\ntriggers %d\nrefills %d\nbusts %d\n",
 		cov.Trades, cov.AuctionTrades, cov.Uncrosses, cov.Triggers, cov.Refills, cov.Busts)
+	fmt.Fprintf(b, "icebergRestores %d\ncascadeTerminals %d\n", cov.IcebergRestores, cov.CascadeTerminals)
 }
 
 func writeCounts(b *strings.Builder, label string, m map[string]int) {
