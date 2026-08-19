@@ -137,6 +137,35 @@ versions may include breaking changes).
 
 ### Fixed
 
+- **A refused iceberg no longer makes the venue's own snapshot unloadable.**
+  `ProcessIceberg` registers the iceberg in the engine's registry *before* settling it —
+  the maker-side refill needs to find it there — and did not undo that when the settle
+  refused. `TakeSnapshot` then wrote an entry for an order that is not on the book, and
+  `LoadSnapshot` refuses such a snapshot outright with *"iceberg N has no resting
+  displayed slice"*. **One refused iceberg and the venue could never load a checkpoint
+  again** — not after further trading, not after a restart — and 1000 of them left 1000
+  rows in every snapshot, so the reject path grew memory per client.
+
+  It is pre-existing, reachable before this release through a dust iceberg or a halted
+  venue, and it is fixed **now** because the change above makes it the routine outcome of
+  its own headline rejection: an over-cap iceberg used to rest and is now refused. It
+  also landed on this release's own upgrade path — the runbook tells an operator to take
+  a checkpoint after accepting a semantics mismatch, and measured end to end, that
+  produced a venue that would not restart.
+
+  The repair is the invariant rather than the symptom: the registry holds icebergs whose
+  displayed slice is **resting**, so the entry is dropped whenever the command ends
+  without one. That covers a rejection for any reason — a halted venue, any of the five
+  caps, a band breach, a post-only that would cross, a fill-or-kill that cannot fill —
+  and the `CANCELLED` immediate-or-cancel remainder as well, which a
+  rejection-only repair would have left open.
+  [ICEBERG-ADMISSION.md](docs/ICEBERG-ADMISSION.md) §13.4.
+
+  Not fixed, and deliberately: the identical symptom reached through self-trade
+  prevention under `DECREMENT`, where a maker iceberg is removed without refilling. That
+  one destroys six lots of a client's order, and a loadable snapshot there would hide it
+  rather than repair it.
+
 - **A recovery from the journal alone no longer loses every iceberg's hidden reserve.**
   `types.NewIcebergOrder` shrinks the order it is handed to the display size and keeps
   the remainder on the wrapper, so by the time `AppendIceberg` could journal anything,
@@ -312,6 +341,69 @@ versions may include breaking changes).
   `TestRejectedFOKDoesNotFireAStop`, `TestRejectedFOKDoesNotMoveTheBand`.
 
 ### Changed
+
+- **The per-order size and notional caps measure the quantity the CLIENT submitted, so
+  an iceberg is judged by its total and not by the slice it displays.**
+  `matching.SemanticsVersion` moves **2 → 3**: a venue that sets any of these controls
+  and accepts icebergs now accepts a different set of orders, and a log written by an
+  older build will be refused on replay until an operator accepts the mismatch
+  ([SEMANTICS-VERSION.md](docs/SEMANTICS-VERSION.md) §1.2 row 3,
+  [RUNBOOKS.md](docs/RUNBOOKS.md) "An iceberg refused on replay by a cap that did not
+  exist for it").
+
+  `types.NewIcebergOrder` overwrites the order's `Quantity` with the display size before
+  anything downstream sees it, and `checkOrderCaps` read `order.Quantity`. With
+  `MaxOrderQty = 5` a plain sell of 9 was refused and **the same nine lots shown three
+  rested with six in reserve** — the fat-finger cap evaded by exactly the quantity the
+  venue cannot see, and evaded *at the client's option*, since anyone wanting to exceed
+  the cap sets `displayQty = MaxOrderQty`. The mirror was worse to receive: an iceberg
+  of 90 shown 3 was refused by a `MinOrderQty = 5` dust floor it was eighteen times
+  above.
+
+  An audit of every consumer of `order.Quantity` found **five** checks reading it, not
+  the two that were pinned: both quantity caps, both notional caps, and the int64
+  notional overflow guard — which has no configuration knob, which `Privileged` orders
+  do not bypass, and which its own comment calls an arithmetic invariant. Measured:
+  `1.84e17` lots at price 100 was `REJECTED:NOTIONAL_OVERFLOW` as a plain order and
+  **rested on the book** as an iceberg shown 3. All five now measure
+  `DisplayQty + Hidden` at submission — the same number the journal already records.
+  `MaxOrdersPerAccount` and the price band deliberately did **not** move, and are now
+  asserted rather than assumed: one counts orders (an iceberg is one order however many
+  slices it shows) and the other tests a price.
+
+  Nothing a market-data consumer sees has changed. `L2Feed` still publishes the
+  displayed slice and prints are still prints — publishing the total there would
+  announce every reserve on the venue, which is the failure mode a careless version of
+  this fix has. `pkg/marketdata` gained the assertion that says so, because the
+  sabotage that was supposed to catch a reserve leak was run and **nothing failed**:
+  there was no iceberg anywhere in that package's tests.
+
+  Two things adversarial review changed after the fix was written, both recorded where
+  they went wrong rather than quietly corrected. **The exemption that lets a refill skip
+  admission is a separate method, not a reserved quantity.** It was first built as
+  `admitQty <= 0` and then as a named `-1`, and both are the same mistake: there is no
+  `int64` an order cannot carry, and `pkg/wal` replays a decoded record's order
+  directly, so an order of quantity exactly `-1` skipped every cap and rested on the
+  book at `-1` lots — a regression introduced by the fix for a regression, missed by a
+  guard that looped over `{0, -5}`. **And the fingerprint could not see the notional
+  half at all**: reverting it alone left `internal/semcheck` byte-identical, so the
+  corpus gained a `notional` scenario and three rejection kinds it had never reached.
+
+  Spec, the audit, four decisions and eighteen sabotage runs:
+  [ICEBERG-ADMISSION.md](docs/ICEBERG-ADMISSION.md).
+
+- **Admission no longer runs again when an iceberg refills**, which repairs a defect no
+  pin covered: the refill loop re-judged each refilled slice against the ingress
+  controls and threw the verdict away. Measured with `MinOrderQty = 2`, ten lots of
+  depth and an aggressive iceberg of 10 shown 3: nine lots traded, the tenth was refused
+  inside the engine for being below the dust floor, no event was published, nothing
+  rested — and the client was told `FILLED`. A lot of a client's order evaporated. The
+  rule is that the ingress size, notional and account controls run when a **command**
+  arrives, and a refill is not a command; the maker-side refill has never run them at
+  all, so the two refill paths now agree. The visible consequence is that a refilled
+  slice smaller than `MinOrderQty` rests: it is the tail of an order the venue already
+  accepted, and refusing an order's own tail leaves the client holding a quantity the
+  venue will neither trade nor return.
 
 - **A cascade-fired stop or trailing stop whose order the venue refuses now publishes a
   `CANCELED` for that order after its `ACCEPTED`, and a consumer must apply it.** This
