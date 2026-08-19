@@ -1090,6 +1090,20 @@ constructor mutation also lets an iceberg **evade `Config.MaxOrderQty`** and be
 follower from its primary on the first iceberg with nothing in `examples/` exercising it
 (now `TestDrillD11_AnIcebergReplicatesWithItsReserve`).
 
+**Those two are FIXED — 2026-08-19, in [`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md),
+and it was five checks rather than two.** The size caps, the two notional caps and the
+`int64` notional overflow guard all measured an iceberg's displayed slice;
+`checkOrderCaps` now takes the quantity the CLIENT submitted, supplied by the command
+entry point that knows it, and `ProcessIceberg` passes `ib.TotalRemaining()` captured
+before the first settle. A refill is not a command and is not re-admitted
+(`settleRefill`), which closes a third defect no pin covered: under `MinOrderQty = 2` the
+tail lot of a 10-lot iceberg was refused inside the refill loop and the refusal
+discarded. `matching.SemanticsVersion` is 3 and the corpus gained two scenarios' worth of
+commands, because a change to what a control measures that the fingerprint cannot see is
+a change nobody can bump for. **Both test names above are kept and now assert the
+opposite of what they say** — that is this repository's mechanism for a redeemed pin, so
+a reader who greps for the name lands on the fix rather than on nothing.
+
 The bound `CHANGELOG.md` carries is therefore now historical: on a log-only replay under
 **this** build the reserve does exist, so §7.1's claim holds on both paths — for logs
 written by this build. A log written before it cannot state the reserve at all, which is

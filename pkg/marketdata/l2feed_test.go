@@ -241,3 +241,42 @@ func TestL2FeedAgreesUnderARandomTape(t *testing.T) {
 		t.Fatal("the tape left an empty book; it is not exercising the feed")
 	}
 }
+
+// TestL2FeedPublishesOnlyAnIcebergsDisplayedSlice is the reserve-leak guard, and it
+// exists because it was measured missing.
+//
+// docs/ICEBERG-ADMISSION.md §9 opens by saying what a careless fix to the engine's
+// admission controls would break: those controls now measure an iceberg's TOTAL,
+// and a fix that "made the rest of the venue consistent" with them would publish
+// the reserve to every subscriber and delete the order type. §11 row 11 is the
+// sabotage that was supposed to catch that — make L2Feed.remember publish the whole
+// quantity instead of the resting slice — and when it was run, nothing in this
+// package failed: there was no iceberg anywhere in pkg/marketdata's tests, so the
+// leak had no assertion standing in front of it.
+//
+// This is that assertion. The L2 aggregate is what every subscriber sees, and it
+// must show three lots of a ninety-lot order.
+func TestL2FeedPublishesOnlyAnIcebergsDisplayedSlice(t *testing.T) {
+	e, f := newFeedEngine(t)
+
+	o := mkOrder(t, "whale", types.SideSell, types.OrderTypeLimit, 100, 90, types.TIFGoodTillCancel)
+	ib, err := types.NewIcebergOrder(o, 3)
+	if err != nil {
+		t.Fatalf("NewIcebergOrder: %v", err)
+	}
+	e.ProcessIceberg(ib)
+
+	assertAgrees(t, f, e, "after an iceberg rests")
+	if got := f.Levels(types.SideSell); len(got) != 1 || got[0].Qty != 3 {
+		t.Fatalf("the L2 feed publishes %v for a 90-lot iceberg showing 3, want one level of 3 — "+
+			"publishing anything larger announces the hidden reserve to every subscriber and deletes "+
+			"the order type", got)
+	}
+
+	// And through a refill: the reserve must not surface when the slice reloads.
+	e.Process(mkOrder(t, "taker", types.SideBuy, types.OrderTypeLimit, 100, 3, types.TIFGoodTillCancel))
+	assertAgrees(t, f, e, "after the displayed slice is consumed and refilled")
+	if got := f.Levels(types.SideSell); len(got) != 1 || got[0].Qty != 3 {
+		t.Fatalf("after a refill the L2 feed publishes %v, want one level of 3", got)
+	}
+}

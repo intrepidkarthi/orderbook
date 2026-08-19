@@ -195,6 +195,25 @@ malformed type runs away. Plain limit / market cannot be disabled, preserving
 core liquidity. **To add:** nothing structural; maintain fuzz coverage as new
 order classes land.
 
+**A found instance of exactly this shape, and it did not wedge anything — it
+switched a control off.** An audit of every consumer of `order.Quantity`
+([`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md) §1) measured that the exotic
+constructor `types.NewIcebergOrder` overwrites the order's `Quantity` with the
+displayed slice before the engine sees it, so five ingress checks — `MinOrderQty`,
+`MaxOrderQty`, `MinOrderNotional`, `MaxOrderNotional` and the int64 notional
+overflow guard — were measuring the part of the order the venue displays. With
+`MaxOrderQty = 5` a plain sell of 9 was refused and **the same nine lots shown three
+rested**; `1.84e17` lots at price 100 was `REJECTED:NOTIONAL_OVERFLOW` plain and
+rested as an iceberg. The wedge here is not a crash: it is a **fat-finger cap whose
+subject chooses whether it applies**, since a client wanting to exceed the cap sets
+`displayQty = MaxOrderQty`. Closed at `matching.SemanticsVersion` 3 — the checks now
+measure the quantity the client's command puts to work. The lesson for the next
+exotic is the audit's second question rather than the fix: for each consumer, *is
+seeing the slice wrong, or is it right?* Four consumers read the displayed size and
+are correct to (the L2 feed above all — publishing the total there would announce
+every reserve on the venue), which is why "make them all consistent" would have been
+a hidden-liquidity leak dressed as a fix.
+
 ### 3.6 Quote stuffing / order-flood DoS — partial (backpressure ✓, enforcing gate = gap)
 Mass place + cancel with near-zero fills — "a DDoS on the order book" — to
 saturate the engine and slow rivals. **Citadel $800K (Nasdaq, 2014)**; **Trillium
@@ -271,7 +290,7 @@ defeating this at the source.
 | **pkg/auction (uniform-price uncross + `AuctionSession`)** — open/close/recovery call auction with a deterministic `RandomizedClose` | Marking-the-close, latency arb, MEV/JIT, momentum ignition | Athena (2014); Flash Boys; Injective / CoW model |
 | **ProRata allocation** (`Config.ProRata`) | Alternative to strict time-priority allocation | — |
 | **Iceberg / static peg** | Hides parent-order size (partial) | Order anticipation (mechanics present) |
-| **Pre-trade risk caps** — `MinRestingTime`, `MaxOrderQty`/`MaxOrderNotional`, `MinOrderQty`/`MinOrderNotional`, `MaxOrdersPerAccount`, `DedupClientOrderIDs`, `MaxMarkStep` + `MinMarkDepth`, `MaxForceTradeQty`, `BandBreachPause`, `IcebergPeakJitter` + notional-overflow guard | Spoofing, dust/stuffing, replay double-book, oracle pump (jump + patient drag), liquidation cascade, iceberg sniffing, integer overflow | JPMorgan $920M; Binance `-1008`; FIX PossDup; Mango/JELLY; Bitcoin CVE-2010-5139 |
+| **Pre-trade risk caps** — `MinRestingTime`, `MaxOrderQty`/`MaxOrderNotional`, `MinOrderQty`/`MinOrderNotional`, `MaxOrdersPerAccount`, `DedupClientOrderIDs`, `MaxMarkStep` + `MinMarkDepth`, `MaxForceTradeQty`, `BandBreachPause`, `IcebergPeakJitter` + notional-overflow guard. The four size/notional caps and the overflow guard measure **the quantity the client submitted**, which for an iceberg is its total and not its displayed slice (§3.5, [`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md) §3.1); `MaxOrdersPerAccount` counts orders, so an iceberg is one | Spoofing, dust/stuffing, replay double-book, oracle pump (jump + patient drag), liquidation cascade, iceberg sniffing, integer overflow | JPMorgan $920M; Binance `-1008`; FIX PossDup; Mango/JELLY; Bitcoin CVE-2010-5139 |
 | **Surveillance detectors** (`pkg/surveillance`) — `SpoofDetector`, `RateLimiter`, `OTRDetector`, `CloseMarkingDetector`, `RampingDetector`, `PingingDetector`, `CrossBookMonitor` | Spoofing/layering, stuffing, OTR abuse, marking-the-close, ramping, pinging, cross-book manipulation | JPMorgan; Trillium; Athena; Oystacher $2.5M; MiFID II RTS 9 |
 | **Gateway layer** (`pkg/gateway` + `examples/gateway`) — enforcing token-bucket `RateGate`, taker speed bump, CAT-style audit export | Flood DoS, latency arb, audit trail | Citadel/Trillium; IEX; Rule 613 |
 
@@ -292,7 +311,7 @@ real-world enforcement frequency × impact × matching-engine relevance.
 | 3 | **OTR / cancel-ratio metric** — count cancels-per-fill, not just placements (the strongest spoofing signal) | Spoofing / layering. Unanimous gap across analyses. | S | **Surveillance** | ✅ `surveillance.OTRDetector` |
 | 4 | **Minimum-liquidity mark bounds + mark-step guard** — reject `SetMarkPrice` unbacked by depth or moving more than a per-window cap | Oracle / mark manipulation. **Mango $110M; Hyperliquid JELLY $13.5M.** The honest crypto gap. | M | **Core** | ✅ mark-step (`Config.MaxMarkStep`) + depth-backed bound (`Config.MinMarkDepth`) |
 | 5 | **Checked / saturating notional arithmetic + ingress magnitude bounds** on price / qty / notional | Integer overflow. Bitcoin CVE-2010-5139. int64 alone isn't enough — `price×qty` still wraps. | S | **Core** | ✅ overflow-reject + saturating guardrail |
-| 6 | **Per-order max size / notional (fat-finger) reject** in the cold path | Runaway / fat-finger. Complements `Guardrail` (which caps aggregate, not per-order). | S | **Core** | ✅ `Config.MaxOrderQty` / `MaxOrderNotional` |
+| 6 | **Per-order max size / notional (fat-finger) reject** in the cold path | Runaway / fat-finger. Complements `Guardrail` (which caps aggregate, not per-order). | S | **Core** | ✅ `Config.MaxOrderQty` / `MaxOrderNotional`, measured against the **client's** quantity — an iceberg used to evade both by exactly its hidden size (§3.5), and the ✅ stopped being a claim nobody had checked when that was measured and closed |
 
 ### SHOULD — real gaps, clear defense
 

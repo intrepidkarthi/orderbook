@@ -112,6 +112,38 @@ func Corpus() []Scenario {
 			},
 			Script: guarded(),
 		},
+		{
+			// The NOTIONAL half of the same admission surface, in a scenario of its
+			// own rather than as more lines in `guarded`.
+			//
+			// It exists because two independent reviews of the size-cap fix found the
+			// same hole and it was real: `guarded` sets no notional caps, so reverting
+			// checkOrderCaps's checkedMul from the client's total back to the displayed
+			// slice — reopening BOTH notional controls and the int64 overflow guard,
+			// the one an operator cannot configure off — left this whole file GREEN.
+			// Three unit tests fired and the fingerprint did not, which is exactly the
+			// state Rule 22 exists to make impossible: a change to what a control
+			// measures that no bump could be justified by.
+			//
+			// docs/ICEBERG-ADMISSION.md §12 predicted this and offered "a second
+			// scenario with the notional caps set, and the cost is a wider diff". This
+			// is that scenario, and it is appended last so the cost is only its own
+			// lines: no existing scenario's ids, event ids or digests move.
+			//
+			// Separate rather than merged into `guarded` because the two size caps
+			// there would decide most of these commands before the notional pair saw
+			// them — an order big enough to breach a notional ceiling is usually big
+			// enough to breach a lot ceiling first — and a case decided by the wrong
+			// control is a case that measures nothing.
+			Name: "notional",
+			Config: func() matching.Config {
+				c := base()
+				c.MinOrderNotional = 500
+				c.MaxOrderNotional = 5000
+				return c
+			},
+			Script: notionalGuarded(),
+		},
 	}
 }
 
@@ -397,7 +429,7 @@ func guarded() []Cmd {
 	s.add(Cmd{Kind: Submit, User: "g1", Sell: true, Price: 100, Qty: 5})
 	s.add(Cmd{Kind: Submit, User: "g2", Price: 100, Qty: 5, Note: "sets the band reference"})
 	s.add(Cmd{Kind: Submit, User: "g3", Price: 150, Qty: 2, Note: "outside a ±10% band"})
-	s.add(Cmd{Kind: Submit, User: "g3", Price: 150, Qty: 2, Privileged: true, Note: "privileged: exempt"})
+	privBid := s.add(Cmd{Kind: Submit, User: "g3", Price: 150, Qty: 2, Privileged: true, Note: "privileged: exempt"})
 	s.add(Cmd{Kind: Submit, User: "g4", Price: 99, Qty: 100, Note: "over MaxOrderQty"})
 	s.add(Cmd{Kind: Submit, User: "g4", Price: 99, Qty: 1, Note: "under MinOrderQty"})
 	s.add(Cmd{Kind: Submit, User: "g5", Price: 98, Qty: 2})
@@ -405,6 +437,49 @@ func guarded() []Cmd {
 	s.add(Cmd{Kind: Submit, User: "g5", Price: 96, Qty: 2})
 	s.add(Cmd{Kind: Submit, User: "g5", Price: 95, Qty: 2, Note: "over MaxOrdersPerAccount"})
 	s.add(Cmd{Kind: CancelAll, User: "g5"})
+
+	// APPENDED, NEVER INSERTED, for the reason tierTwo's own appendix gives: an
+	// insertion shifts every later id, event id and digest and turns a reviewable
+	// diff into a rewrite nobody reads.
+	//
+	// These close the blind spot docs/ICEBERG-ADMISSION.md §7 measured. `conditional`
+	// was the only scenario with icebergs and it configures no caps; `guarded` was the
+	// only scenario with caps and it had no iceberg. So no scenario had both, the
+	// golden was byte-identical after a change to what the CAPS MEASURE, and under
+	// Rule 22 nobody could have bumped for it — docs/PINNED-DEFECTS.md §6.1 recurring
+	// in the same file, one scenario over.
+	//
+	// The caps are already configured here, so no existing verdict moves.
+	//
+	// The cancel first is plumbing and not a case: g3's privileged bid is still
+	// resting at 150, and every iceberg below is a sell that would cross it, print at
+	// 150 and drag the ±10% band reference up with it — after which the cases would
+	// be refused for the BAND rather than decided by the caps, which is not what they
+	// are here to measure.
+	s.add(Cmd{Kind: Cancel, User: "g3", Target: privBid, Note: "clears the band reference's only maker"})
+
+	// Over the cap by its TOTAL and under it by its slice: the fat-finger reject a
+	// client used to switch off by choosing displayQty.
+	s.add(Cmd{Kind: Iceberg, User: "g6", Sell: true, Price: 100, Qty: 100, DisplayQty: 3,
+		Note: "100 lots over MaxOrderQty=40, shown 3"})
+	// The control that must NOT move: a genuinely tiny iceberg is still dust, under
+	// either rule. A fix that measured anything but the total would move this line.
+	s.add(Cmd{Kind: Iceberg, User: "g6", Sell: true, Price: 100, Qty: 1, DisplayQty: 1,
+		Note: "one lot, under MinOrderQty=2 by its total AND its slice"})
+	// Thirty lots shown one: refused as dust before, admitted for what it is now,
+	// and a one-lot slice rests BELOW the floor because the floor judged the order.
+	s.add(Cmd{Kind: Iceberg, User: "g6", Sell: true, Price: 100, Qty: 30, DisplayQty: 1,
+		Note: "thirty lots shown one, fifteen times over the dust floor"})
+	// A taker, so the refill path runs under a configured floor: every refilled
+	// slice is smaller than MinOrderQty and none of them is re-admitted.
+	s.add(Cmd{Kind: Submit, User: "g7", Price: 100, Qty: 10, Note: "works the reserve, refilling below the floor"})
+	// The boundary, and the second control that must not move: exactly at the cap.
+	s.add(Cmd{Kind: Iceberg, User: "g6", Sell: true, Price: 101, Qty: 40, DisplayQty: 5,
+		Note: "exactly MaxOrderQty"})
+	// One over it.
+	s.add(Cmd{Kind: Iceberg, User: "g6", Sell: true, Price: 102, Qty: 41, DisplayQty: 5,
+		Note: "one lot over MaxOrderQty"})
+	s.add(Cmd{Kind: CancelAll, User: "g6"})
 	return s.cmds
 }
 
@@ -421,4 +496,71 @@ func (s *scriptBuilder) add(c Cmd) int {
 // pct is a percentage as the decimal fraction the engine's collar knobs take.
 func pct(n int) decimal.Decimal {
 	return decimal.RequireFromString(fmt.Sprintf("0.%02d", n))
+}
+
+// notionalGuarded is the notional admission script. Every command in it is decided
+// by MinOrderNotional, MaxOrderNotional or the int64 overflow guard, which is the
+// point: docs/ICEBERG-ADMISSION.md §3.2 applies one rule to five checks, and before
+// this scenario the fingerprint could see two of them.
+//
+// The three plain orders first are the CONTROLS. Each iceberg case below is the same
+// notional as one of them, and the rule under test is that the two get the same
+// verdict — an iceberg is not a different kind of order to the venue's risk limits,
+// it is a different way of showing one.
+func notionalGuarded() []Cmd {
+	var s scriptBuilder
+
+	// Controls: a plain order inside the window, one under the floor, one over the
+	// ceiling. Prices are 100, so notional is a hundred times the lot count.
+	s.add(Cmd{Kind: Submit, User: "n1", Sell: true, Price: 100, Qty: 9, Note: "900 of notional, inside [500, 5000]"})
+	s.add(Cmd{Kind: Submit, User: "n1", Sell: true, Price: 100, Qty: 4, Note: "400, under MinOrderNotional"})
+	s.add(Cmd{Kind: Submit, User: "n1", Sell: true, Price: 100, Qty: 51, Note: "5100, over MaxOrderNotional"})
+
+	// MaxOrderNotional evaded by the display size: sixty lots at 100 is 6000 and does
+	// not fit, and a slice of ten is 1000 and does fit. This line is REJECTED because
+	// the cap weighs the client's total; weighed against the slice it RESTED.
+	s.add(Cmd{Kind: Iceberg, User: "n2", Sell: true, Price: 100, Qty: 60, DisplayQty: 10,
+		Note: "6000 total over MaxOrderNotional, 1000 slice under it"})
+
+	// MinOrderNotional refusing real size: fifty lots at 100 is 5000 — exactly the
+	// ceiling and ten times the floor — shown three lots, which is 300 and is dust.
+	// This line is ACCEPTED because the floor weighs the client's total; weighed
+	// against the slice it was REFUSED. It doubles as the at-the-ceiling boundary.
+	s.add(Cmd{Kind: Iceberg, User: "n2", Sell: true, Price: 100, Qty: 50, DisplayQty: 3,
+		Note: "5000 total exactly at MaxOrderNotional, 300 slice under MinOrderNotional"})
+
+	// One lot over the ceiling, so the boundary is pinned from both sides.
+	s.add(Cmd{Kind: Iceberg, User: "n2", Sell: true, Price: 100, Qty: 51, DisplayQty: 3,
+		Note: "5100, one lot over MaxOrderNotional"})
+
+	// The control that must NOT move: dust by its total AND by its slice, refused
+	// under either rule. A fix that measured anything other than the client's total
+	// would move this line, and a fix that measured nothing would move it too.
+	s.add(Cmd{Kind: Iceberg, User: "n2", Sell: true, Price: 100, Qty: 4, DisplayQty: 2,
+		Note: "400 total and 200 slice, under MinOrderNotional either way"})
+
+	// THE OVERFLOW GUARD, which is the reason this scenario is worth its diff. It has
+	// no Config knob, Privileged orders do not bypass it, and checkOrderCaps's own
+	// comment calls it an arithmetic invariant rather than ingress policy — a corrupt
+	// or hand-edited log entry must not replay a notional that wraps int64 into the
+	// book. Measured against the displayed slice it was CLIENT-SELECTABLE: price ×
+	// 10 is 1000 and passes, so this order RESTED, and price × its real size does not
+	// fit in an int64 at all.
+	//
+	// §12 feared such an order would "dominate every aggregate in the golden". It
+	// does not, and that is a fact about rejection rather than about the number: the
+	// order never rests and never prints, so it contributes one line, one REJECTED
+	// event and one rejection counter, exactly like every other refusal here.
+	s.add(Cmd{Kind: Iceberg, User: "n3", Sell: true, Price: 100, Qty: 92233720368547759, DisplayQty: 10,
+		Note: "price x total overflows int64, price x slice is 1000 and does not"})
+
+	// A taker that works the accepted reserve down. It clears n1's resting nine
+	// first — the two are at the same price and the plain order is in front — and
+	// then takes five slices of the iceberg. Every one of those slices is 300 of
+	// notional, well under the floor, and not one is re-admitted: Rule 3 for the
+	// notional pair, which the quantity cases in `guarded` cannot show.
+	s.add(Cmd{Kind: Submit, User: "n4", Price: 100, Qty: 24, Note: "clears the plain nine, then five slices of 300 notional refill below the floor"})
+
+	s.add(Cmd{Kind: CancelAll, User: "n2"})
+	return s.cmds
 }

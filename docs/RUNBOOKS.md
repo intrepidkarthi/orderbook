@@ -331,6 +331,67 @@ book. `ReadAll` is the reader that sees everything.
 
 ---
 
+## An iceberg refused on replay by a cap that did not exist for it
+
+**Signal.** One line, and it does not mention icebergs:
+
+```
+obgw: BTC-USD REPLAYED RECORDS FROM ANOTHER MATCHER. This build matches at semantics 3;
+the log declares [2], and -wal-accept-semantics let it through. ...
+```
+
+The venue then starts, recovery completes, the report is clean — and the recovered book
+is missing specific iceberg orders that the venue which wrote the log had accepted and
+was resting. Nothing names them.
+
+**When this can happen.** Only in one situation, and you had to opt into it. This
+build matches at `matching.SemanticsVersion` 3, in which the per-order size and notional
+caps measure an iceberg's **total** rather than its displayed slice
+([ICEBERG-ADMISSION.md](ICEBERG-ADMISSION.md), [SEMANTICS-VERSION.md](SEMANTICS-VERSION.md)
+§1.2 row 3). A log written at semantics 2 by a venue that set `MaxOrderQty`,
+`MaxOrderNotional`, `MinOrderQty` or `MinOrderNotional` can hold iceberg commands that
+were accepted then and are refused now. The semantics gate refuses such a log outright
+— that is the runbook above — so this only happens when an operator has already decided
+to accept the mismatch:
+
+```
+-wal-accept-semantics 2
+```
+
+Having accepted it, you have been told the recovered book may differ. What you have not
+been told is **which orders are missing**, and that asymmetry is deliberate rather than
+overlooked: the iceberg-reserve gate one section up names every record it refuses, and
+this refusal names none. `restoreEntry` discards `ProcessIceberg`'s result, so a
+replay-time rejection drops the record with nothing counted and nothing logged. The fix
+is a count in `RecoverReport` and it is a `pkg/wal` change that has not been made;
+[ICEBERG-ADMISSION.md](ICEBERG-ADMISSION.md) §12 carries it as this slice's residual.
+
+**What to do.**
+
+1. **Prefer the safe route in "Upgrading across a semantics change".** Start the
+   previous build once, let it recover its own log, take a checkpoint, then upgrade. A
+   snapshot is state rather than a program: `LoadSnapshot` never re-admits a resting
+   order, so an iceberg the snapshot covers comes back exactly as it was, over the cap
+   or not. That route makes this section moot.
+2. **If you did use the override**, find the affected orders before clients do. They
+   are the iceberg commands in the replayed range whose TOTAL — `TotalQty` in the
+   record, which is the client's size and not the display size — is over
+   `MaxOrderQty`, or whose `price × TotalQty` is over `MaxOrderNotional`, or which fall
+   under either minimum. `wal.ReadAll` over the replayed sequence range is the reader
+   that sees them — the same one the reserve runbook above points at; the engine will
+   not tell you.
+3. **Tell their owners and have them re-enter.** The orders were never rested by this
+   build, so there is nothing to cancel — which is exactly what makes them hard to
+   notice.
+4. **Remove `-wal-accept-semantics` after the next checkpoint lands.**
+
+**The same order can survive one recovery and not another.** Snapshot-covered: it comes
+back. Replayed from the log: it is judged again by this build's caps. That is not a bug
+in either path — a snapshot is state and admission judges commands — but it does mean
+"we recovered fine last time" is not evidence about the next time.
+
+---
+
 ## A gap between the snapshot and the log
 
 **Signal.** The venue refuses to start:

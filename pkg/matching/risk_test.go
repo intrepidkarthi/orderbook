@@ -380,3 +380,45 @@ func countKind(got []recEvent, k EventKind) int {
 	}
 	return n
 }
+
+// TestAdmissionMeasuresAnOrderWhoseQuantityIsNotPositive guards the mechanism that
+// carries an iceberg's total past settleInto (docs/ICEBERG-ADMISSION.md §4.2, §13.6).
+//
+// "This settle is not a client submission" must be a fact NO COMMAND CAN FORGE. Two
+// encodings of it as a reserved value of the quantity itself were built and both are
+// wrong, for the same reason: there is no int64 an order cannot carry. Under §4.2's
+// sketched "admitQty <= 0" an order whose Quantity is zero or negative skipped EVERY
+// check in checkOrderCaps, including the ones a venue configured; under the named
+// constant -1 tested for equality, that hole shrank to exactly one value and stayed
+// open. Both are reachable — types.NewOrder refuses such an order, but pkg/wal's
+// restoreEntry replays a decoded record's order directly, which is the
+// corrupt-or-hand-edited-log case the overflow guard's own comment exists for.
+//
+// Measured on a venue whose dust floor is 2:
+//
+//	admitQty <= 0   a hand-built sell of -5 RESTED, at -5 lots
+//	admitQty == -1  a hand-built sell of -1 RESTED, at -1 lots
+//
+// -1 IS IN THIS TABLE BECAUSE IT IS THE VALUE THAT BROKE THE SECOND ENCODING, and a
+// guard that omitted it passed against a build that rested it. The distinction now
+// travels out of band — settleRefill is a different method, not a different number —
+// so no quantity is special and every one of these is measured.
+func TestAdmissionMeasuresAnOrderWhoseQuantityIsNotPositive(t *testing.T) {
+	for _, qty := range []int64{0, -1, -2, -5, math.MinInt64} {
+		e := NewEngine(Config{Symbol: "BTC-USD", MinOrderQty: 2})
+		// Built by hand: types.NewOrder refuses this, a decoded journal record does not.
+		o := &types.Order{
+			UserID: "u", Symbol: "BTC-USD", Side: types.SideSell,
+			Type: types.OrderTypeLimit, Price: 100, Quantity: qty, RemainingQty: qty,
+			TimeInForce: types.TIFGoodTillCancel, Status: types.OrderStatusNew,
+		}
+		r := e.Process(o)
+		if !errors.Is(r.RejectionReason, types.ErrOrderBelowMinQty) {
+			t.Errorf("a hand-built order of quantity %d ended %s/%v under MinOrderQty=2, want REJECTED "+
+				"with ErrOrderBelowMinQty — the dust floor must still see it", qty, r.Status, r.RejectionReason)
+		}
+		if _, q, ok := e.BestAsk(); ok {
+			t.Errorf("a hand-built order of quantity %d rested %d lots at the offer", qty, q)
+		}
+	}
+}

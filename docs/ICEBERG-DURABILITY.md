@@ -151,9 +151,15 @@ other two were measured while establishing that the constructor is the cause:
   `Config.MaxOrderQty = 5`: a plain sell of 9 is `REJECTED — order quantity exceeds the
   configured maximum`; **the same nine lots posted as an iceberg shown 3 is accepted**,
   with 6 in reserve. The cap is evaded by exactly the hidden quantity.
+  **FIXED 2026-08-19** by [`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md), at
+  `matching.SemanticsVersion` 3.
 - **And they misjudge it in the other direction.** With `Config.MinOrderQty = 5`, an
   iceberg of **90** shown 3 is `REJECTED — order quantity is below the configured
   minimum`, for being 18× under a floor it is 18× over.
+  **FIXED 2026-08-19**, same slice — which also found that the defect was five checks
+  and not two (both notional caps and the int64 overflow guard read the same wrong
+  number) and that the taker-side refill loop was re-admitting an order's own tail and
+  discarding the verdict.
 - **The replication follower rebuilds icebergs from the same records**
   (`examples/replication/follower.go:106` calls `RestoreAfter` on each shipped entry),
   so a follower's book has been diverging from its primary on the first iceberg, from
@@ -702,15 +708,19 @@ an argument, not a test, and it is written here so the next reviewer can attack 
   reserve. This is the same shape as [`RUNBOOKS.md`](RUNBOOKS.md)'s "what the upgrade
   does NOT repair, at semantics 2": a state is not a program. The runbook section gains
   the same paragraph, with the remedy — cancel and re-enter, and tell the client.
-- **It does not fix the ingress caps §1.3 measured.** `Config.MaxOrderQty` still sees the
-  display slice, so nine lots refused as a plain order are accepted as an iceberg shown
-  three; and `Config.MinOrderQty` still refuses a 90-lot iceberg shown 3. Both are
-  ingress policy in `pkg/matching` with a venue-policy question attached ("is an
+- **It does not fix the ingress caps §1.3 measured** — ~~`Config.MaxOrderQty` still sees
+  the display slice, so nine lots refused as a plain order are accepted as an iceberg
+  shown three; and `Config.MinOrderQty` still refuses a 90-lot iceberg shown 3~~. Both
+  were ingress policy in `pkg/matching` with a venue-policy question attached ("is an
   iceberg's cap its total or its slice?"), both would change what the engine accepts —
   which *is* a semantics change, with a corpus extension and a version bump behind it —
-  and neither belongs in a journal-format slice. **They are pinned**:
+  and neither belonged in a journal-format slice. **They were pinned**:
   `TestIcebergEvadesTheMaxOrderSizeCap` and `TestIcebergIsRefusedForAMinimumItExceeds`
-  assert today's behaviour with the sentence a fix must come and delete.
+  asserted that behaviour with the sentence a fix had to come and delete.
+  **FIXED 2026-08-19** by [`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md), which answered
+  the venue-policy question (the cap is the client's total), extended
+  `internal/semcheck`'s `guarded` scenario and moved `matching.SemanticsVersion` to 3.
+  Both pins are inverted, keeping their names and every assertion.
 - **It does not model icebergs in `internal/refmatch`.** They stay tier 2
   ([`REFERENCE-MATCHER.md`](REFERENCE-MATCHER.md) §2.4), so the differential harness
   cannot reach any of this and a green sweep is evidence of nothing about it — stated

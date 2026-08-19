@@ -77,7 +77,7 @@ defaults.
 | `MinOrderQty` | `int64` | Reject an order below this many lots (`ErrOrderBelowMinQty`) | `0` (disabled) | dust floor; `Privileged` exempt |
 | `MinOrderNotional` | `int64` | Reject a **limit** order with `price×qty` below this (`ErrOrderBelowMinNotional`) | `0` (disabled) | dust floor; `Privileged` exempt |
 | `MaxOrdersPerAccount` | `int` | Cap resting orders per `UserID`; a submit over the cap is rejected (`ErrTooManyOrders`) | `0` (disabled) | resource-exhaustion guard; `Privileged` exempt |
-| `DedupClientOrderIDs` | `int` | Reject a duplicate `(UserID, ClientOrderID)` among the last N accepted keys (`ErrDuplicateClientOrderID`) | `0` (disabled) | near-term replay guard; empty ids skip; recorded on accept; bypassed on replay |
+| `DedupClientOrderIDs` | `int` | Reject a duplicate `(UserID, ClientOrderID)` among the last N accepted keys (`ErrDuplicateClientOrderID`) | `0` (disabled) | near-term replay guard; empty ids skip; recorded on accept; **runs on replay too** |
 | `MaxForceTradeQty` | `int64` | Cap a single `ForceTrade` (liquidation/ADL) print (`ErrForceTradeTooLarge`) | `0` (disabled) | forces chunked liquidation |
 | `BandBreachPause` | `time.Duration` | A price-band breach escalates to a timed `Halted` pause that auto-resumes after this long | `0` (bare reject) | LULD-style pause-and-reopen; emits `HALTED`/`RESUMED` |
 
@@ -103,23 +103,55 @@ and the real enforcement cases behind each.
 
 ### Pre-trade risk & anti-manipulation controls
 
-Opt-in admission controls (all default to disabled) that gate the **live ingress
-path** — enforced on the cold reject path, so the zero-alloc hot path is
-untouched, and `Privileged` (liquidation/ADL) orders are exempt from the caps and
-the resting-time floor. Each maps to a named enforcement case in
-[THREAT-MODEL.md](THREAT-MODEL.md):
+Opt-in admission controls (all default to disabled) — enforced on the cold reject
+path, so the zero-alloc hot path is untouched, and `Privileged` (liquidation/ADL)
+orders are exempt from the caps and the resting-time floor. Each maps to a named
+enforcement case in [THREAT-MODEL.md](THREAT-MODEL.md).
+
+**Two things about *when* they run, both of which are easy to assume wrongly:**
+
+- The size, notional and account controls run on **deterministic replay as well as
+  live ingress**, and that is not an oversight to be tidied up. The journal is
+  written write-ahead, so it records commands as SUBMITTED — an order the live
+  engine rejected is in it like any other — and skipping the caps on replay rested
+  live-rejected orders on the recovered book. The corollary is that neither the
+  configuration nor the build may change across a recovery unless
+  `matching.SemanticsVersion` says the change is safe; see
+  [SEMANTICS-VERSION.md](SEMANTICS-VERSION.md). The genuinely time-dependent
+  controls — `MinRestingTime` and the band-breach pause — *are* bypassed on replay,
+  because re-evaluating them against replay-time timestamps would refuse commands
+  the live engine accepted.
+- The size and notional caps measure **what the client submitted**, which for an
+  iceberg is `DisplayQty + hidden reserve` and **not** its displayed slice. Size a
+  cap for the order you mean to bound, not for the part of it you will see on the
+  book. Before `matching.SemanticsVersion` 3 they measured the slice, which made
+  the fat-finger cap client-selectable — a venue capped at 5 lots accepted 9 shown
+  3, and refused 90 shown 3 as dust. See
+  [ICEBERG-ADMISSION.md](ICEBERG-ADMISSION.md).
+
+The controls:
 
 - **Per-order caps** (`MaxOrderQty`, `MaxOrderNotional`) and **dust floors**
   (`MinOrderQty`, `MinOrderNotional`) — bound a *single* order from both ends,
   complementing `Guardrail` (which bounds *aggregate* output). An order whose
-  `price×qty` overflows int64 is always rejected, and the guardrail's windowed
-  notional accumulates with a saturating add so no wrap can hide a runaway.
+  `price×qty` overflows int64 is always rejected — no knob disables that one and
+  `Privileged` does not bypass it — and the guardrail's windowed notional
+  accumulates with a saturating add so no wrap can hide a runaway. All five measure
+  the client's total, per the note above. An iceberg's *refills* are not re-admitted:
+  admission judges the command, and a refill is not a command, so a 1-lot tail slice
+  of an order admitted at 90 rests even under a dust floor of 5.
 - **Per-account cap** (`MaxOrdersPerAccount`) — bounds how many resting orders one
   user holds, against a dust/quote-stuffing flood. The count is maintained O(1) in
   the order book, so it tracks fills and rebuilds on snapshot restore.
 - **Idempotency dedup** (`DedupClientOrderIDs`) — rejects a duplicate
   `(UserID, ClientOrderID)` within a bounded recent window; the key is recorded
-  only on acceptance, so a rejected order stays resubmittable.
+  only on acceptance, so a rejected order stays resubmittable. This one runs on
+  replay too, and has to: the guard is recovered state, not a live-only
+  convenience, or a client resending across a venue restart — exactly when resends
+  are most likely — double-books. *(The row above said "bypassed on replay" until
+  2026-08-19. It was measured false — a duplicate is rejected identically with
+  `SetReplaying(true)` — and it had always contradicted `recordClientOrderID`'s own
+  doc comment. Pre-existing, corrected while this section was being rewritten.)*
 - **Minimum resting time** (`MinRestingTime`) — defeats the post-size-then-pull
   spoofing pattern by refusing a too-soon cancel.
 - **Mark guards** (`MaxMarkStep`, `MinMarkDepth`/`MarkDepthBand`) — `SetMarkPrice`

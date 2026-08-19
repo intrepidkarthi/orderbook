@@ -111,7 +111,8 @@ exists to leave behind.
 |---:|---|---|
 | **0** | every build up to and including v0.25.0 | **Unknown.** Not "1", not "compatible", not anything. See §4 |
 | **1** | v0.25.0 + the differential-findings slice | The first stamped semantics. Includes the three changes in §1 — [`CHANGELOG.md`](../CHANGELOG.md) *Unreleased / Fixed*: "A rejected fill-or-kill no longer moves `LastTradePrice`"; *Unreleased / Changed*: "A `REJECTED` command's event batch may now carry further events" and "Under `ProRata`, a taker that meets its own resting liquidity is no longer skipped" — so it is *not* the semantics of the last released build |
-| **2** | this release onward | The two fixes in [`PINNED-DEFECTS.md`](PINNED-DEFECTS.md) — [`CHANGELOG.md`](../CHANGELOG.md) *Unreleased / Fixed*: "A failing fill-or-kill no longer corrupts an iceberg it consumed"; *Unreleased / Changed*: "A cascade-fired order the venue refuses now publishes a `CANCELED`". Only the first is replay-visible; the second ships under the same number because the two are one commit and the golden moves for both |
+| **2** | v0.25.0 + the pinned-defects slice | The two fixes in [`PINNED-DEFECTS.md`](PINNED-DEFECTS.md) — [`CHANGELOG.md`](../CHANGELOG.md) *Unreleased / Fixed*: "A failing fill-or-kill no longer corrupts an iceberg it consumed"; *Unreleased / Changed*: "A cascade-fired order the venue refuses now publishes a `CANCELED`". Only the first is replay-visible; the second ships under the same number because the two are one commit and the golden moves for both |
+| **3** | this release onward | The admission fix in [`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md) — [`CHANGELOG.md`](../CHANGELOG.md) *Unreleased / Changed*: "The per-order size and notional caps measure the quantity the client submitted" and "Admission no longer runs again on an iceberg refill". `MinOrderQty`, `MaxOrderQty`, `MinOrderNotional`, `MaxOrderNotional` and the int64 notional overflow guard measured an iceberg's **displayed slice**, so a venue capped at 5 lots accepted 9 shown 3 and refused 90 shown 3; they now measure the client's total. A venue that sets none of the five, or accepts no icebergs, sees no change. Shipping under the same number, because they are one commit and the golden moves for all of them: an iceberg the venue REFUSES is no longer left in the engine's iceberg registry, where it made every later checkpoint unloadable ([`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md) §13.4) — *Unreleased / Fixed*: "A refused iceberg no longer makes the venue's own snapshot unloadable" |
 
 **Row 2 nearly did not exist, and the reason is worth the line.** `internal/semcheck`
 was **green** on both of those fixes with the corpus as it stood: the tier-2 script
@@ -129,6 +130,29 @@ of it — with this fingerprint green, because the corpus's iceberg was alone at
 A rejected order that reorders a level moves no aggregate and no event; it moves the
 maker id on the next print, and nothing in the corpus took that print.
 [`PINNED-DEFECTS.md`](PINNED-DEFECTS.md) §13.6.
+
+**Row 3 is the same rule a third time, one scenario over.** `conditional` was the only
+scenario with icebergs and it configures no caps; `guarded` was the only scenario with
+caps and it had no iceberg. So a change to *what the caps measure* left the golden
+byte-identical, and outcome 4 refused the bump — measured, not predicted. `guarded`
+gained eight commands first (seven cases and a cancel that clears the resting
+privileged bid out of the band's way), and the number moved on the strength of the
+eight lines that appeared. Two of the seven earn their place by **not** moving: a
+one-lot iceberg is still dust, and one at exactly `MaxOrderQty` is still accepted — a
+fix that measured anything other than the client's total would have moved them.
+[`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md) §7.
+
+**And a fourth time, one control over, found by review rather than by the gate.** The
+extension above covers the two QUANTITY caps. `guarded` sets no notional caps, so
+reverting only the notional half of the same five-check fix — both notional controls
+*and* the `int64` overflow guard, the one no operator can switch off — left the golden
+**byte-identical** again. Rule 22 would have permitted that regression under a number
+saying nothing changed. The `notional` scenario closes it, appended last so it moves no
+existing line, and it brings three rejection kinds the corpus had never reached:
+`ORDER_EXCEEDS_MAX_NOTIONAL`, `ORDER_BELOW_MIN_NOTIONAL` and `NOTIONAL_OVERFLOW`, all
+0→n. **The lesson is not "extend the corpus" but where to look:** all four times, the
+gap was a scenario that turns a knob on and a scenario that reaches the behaviour, and
+they were never the same scenario. [`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md) §13.9.
 
 **This slice must ship in the same release as those three changes.** If it slips a
 release, semantics 0 comes to mean two genuinely different matchers — builds before the

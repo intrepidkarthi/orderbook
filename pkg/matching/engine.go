@@ -211,10 +211,17 @@ type Config struct {
 	EventSink EventSink
 
 	// --- Pre-trade risk & anti-manipulation admission controls ---
-	// These gate the live ingress path only (they are bypassed on deterministic
-	// replay, which trusts the already-accepted command log). All default to
-	// zero = disabled, and Privileged (liquidation/ADL) orders are exempt from
-	// the size caps and the minimum resting time. See docs/THREAT-MODEL.md.
+	// These gate every command the engine decides, live AND on deterministic
+	// replay: the journal is written write-ahead, so it records commands as
+	// SUBMITTED and an order the live engine rejected is in it like any other —
+	// see SetReplaying and checkOrderCaps, which say why skipping them on replay
+	// rested live-rejected orders on the recovered book. The corollary is that
+	// neither the configuration nor the BUILD may change across a recovery unless
+	// matching.SemanticsVersion says the change is safe. All default to zero =
+	// disabled, and Privileged (liquidation/ADL) orders are exempt from the size
+	// caps and the minimum resting time. The size and notional caps measure what
+	// the CLIENT submitted, which for an iceberg is its total and not its
+	// displayed slice (docs/ICEBERG-ADMISSION.md §3.1). See docs/THREAT-MODEL.md.
 
 	// MaxOrderQty rejects any single order larger than this many lots — a
 	// fat-finger / fat-order guard that complements the aggregate Guardrail.
@@ -524,6 +531,28 @@ func saturatingAdd(a, b int64) int64 {
 // rejects an order whose notional overflows int64. Privileged (liquidation/ADL)
 // orders bypass the configured caps but are still overflow-checked.
 //
+// RULE 1 (docs/ICEBERG-ADMISSION.md §3.1): the per-order size and notional controls
+// measure the quantity the CLIENT's command puts to work, not the part of it the
+// venue displays. That quantity arrives as admitQty, and it differs from
+// order.Quantity for exactly one order type — an ICEBERG, whose visible slice is a
+// fraction of what was submitted, because types.NewIcebergOrder overwrites Quantity
+// with the display size before anything downstream sees the order. Reading
+// order.Quantity here made the fat-finger cap CLIENT-SELECTABLE: set
+// displayQty = MaxOrderQty and the cap is gone.
+//
+// All five checks below take admitQty, including the overflow guard, which has no
+// Config knob and which Privileged orders do not bypass. An invariant a client can
+// step around by choosing an order type is not an invariant.
+//
+// MaxOrdersPerAccount and the duplicate guard do NOT take it, and they are not an
+// oversight: one counts ORDERS (an iceberg is one order however many slices it
+// shows) and the other reads a client id. Neither was ever measuring a quantity.
+//
+// EVERY admitQty is measured, including a non-positive one: an order whose
+// quantity is zero or negative did not come from types.NewOrder, and a dust floor
+// is exactly what should turn it away. There is no in-band "skip me" value, because
+// no int64 is one — see settleRefill, which carries that fact out of band.
+//
 // These run during replay too. The command log is written write-ahead, so it
 // records commands as SUBMITTED, not as accepted — an order the live engine
 // rejected is in the log like any other. Every check here is a deterministic
@@ -540,16 +569,16 @@ func saturatingAdd(a, b int64) int64 {
 // the band-breach pause gate on e.replaying at their own call sites, because
 // re-evaluating those against replay-time timestamps would wrongly reject
 // commands the live engine accepted.
-func (e *Engine) checkOrderCaps(order *types.Order) error {
+func (e *Engine) checkOrderCaps(order *types.Order, admitQty int64) error {
 	priv := order.Privileged
-	if !priv && e.config.MinOrderQty > 0 && order.Quantity < e.config.MinOrderQty {
+	if !priv && e.config.MinOrderQty > 0 && admitQty < e.config.MinOrderQty {
 		return types.ErrOrderBelowMinQty
 	}
-	if !priv && e.config.MaxOrderQty > 0 && order.Quantity > e.config.MaxOrderQty {
+	if !priv && e.config.MaxOrderQty > 0 && admitQty > e.config.MaxOrderQty {
 		return types.ErrOrderExceedsMaxQty
 	}
 	if order.Type == types.OrderTypeLimit {
-		notional, ok := checkedMul(order.Price, order.Quantity)
+		notional, ok := checkedMul(order.Price, admitQty)
 		if !ok {
 			return types.ErrNotionalOverflow
 		}
@@ -940,7 +969,60 @@ func (e *Engine) rejectDisabled(order *types.Order) *MatchResult {
 // settleInto matches order and applies market/TIF resting rules, appending trades
 // to dst. It assumes the engine lock is held and the order's id is assigned, and
 // returns the extended buffer, the order's final status, and any rejection reason.
+//
+// It is the case where the order's own Quantity IS what the client submitted, which
+// is every order type except the iceberg. Eight of the nine call sites are this one,
+// and they say nothing because they have nothing to say.
 func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
+	return e.settleAdmitting(order, order.Quantity, dst)
+}
+
+// settleAdmitting settles order as a CLIENT SUBMISSION, admitting it against
+// admitQty — the quantity the client's command puts to work (Rule 1, see
+// checkOrderCaps). It differs from order.Quantity for exactly one order type: an
+// iceberg, whose visible slice is a fraction of what was submitted.
+func (e *Engine) settleAdmitting(order *types.Order, admitQty int64, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
+	return e.settle(order, admitQty, true, dst)
+}
+
+// settleRefill settles an iceberg's next slice, loaded from a reserve the venue
+// already admitted. It is NOT a client command, so ingress admission does not run.
+//
+// RULE 3 (docs/ICEBERG-ADMISSION.md §4.4): the ingress size, notional and account
+// controls run when a COMMAND arrives, and a refill is not a command. Re-running
+// them per slice refused an order's own tail — under MinOrderQty=2 the last lot of
+// a 10-lot iceberg was rejected inside the refill loop, the verdict discarded, and
+// the client told FILLED with a lot missing. It also made the two refill paths
+// disagree: the maker-side refill in match() re-adds the slice to the book directly
+// and has never run admission at all.
+//
+// It is a SEPARATE METHOD rather than a sentinel admitQty, and that is the second
+// attempt. The first encoded "not a submission" as a reserved value of the quantity
+// itself — docs/ICEBERG-ADMISSION.md §4.2 sketched "admitQty <= 0", and it was built
+// as -1 tested for equality to keep a stale zero from being waved through. Both
+// spellings are wrong for the same reason: there is no int64 an order cannot carry.
+// types.NewOrder refuses a non-positive quantity, but pkg/wal's restoreEntry replays
+// e.Order.Fresh() straight out of a decoded record, so a corrupt or hand-edited log
+// entry IS a hand-built order — the case checkOrderCaps's own comment says the
+// overflow guard exists for. Measured with MinOrderQty = 2 and an order struct built
+// by hand, on the two sentinel encodings and on this one:
+//
+//	admitQty <= 0      quantity  0 -> NEW,      not resting
+//	admitQty <= 0      quantity -5 -> NEW,      RESTING at -5 lots
+//	admitQty == -1     quantity -1 -> NEW,      RESTING at -1 lots
+//	a separate method  quantity -1 -> REJECTED, ORDER_BELOW_MIN_QTY  (the pre-fix verdict)
+//
+// The distinction is a property of the CALL, not of the value, so it travels out of
+// band where nothing a client sends can forge it.
+// docs/ICEBERG-ADMISSION.md §13.6.
+func (e *Engine) settleRefill(order *types.Order, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
+	return e.settle(order, 0, false, dst)
+}
+
+// settle is the body behind settleInto, settleAdmitting and settleRefill. submitted
+// says whether this settle is a client command: when it is false the ingress size,
+// notional and account controls do not run and admitQty is not read.
+func (e *Engine) settle(order *types.Order, admitQty int64, submitted bool, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
 	// Lift a timed band-breach pause whose clock has elapsed, then apply circuit
 	// breakers: engine state, then a limit price outside the collar.
 	e.maybeAutoResume()
@@ -960,9 +1042,11 @@ func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trad
 			order.Status = types.OrderStatusRejected
 			return dst, types.OrderStatusRejected, types.ErrNewOrdersHalted
 		}
-		if err := e.checkOrderCaps(order); err != nil {
-			order.Status = types.OrderStatusRejected
-			return dst, types.OrderStatusRejected, err
+		if submitted {
+			if err := e.checkOrderCaps(order, admitQty); err != nil {
+				order.Status = types.OrderStatusRejected
+				return dst, types.OrderStatusRejected, err
+			}
 		}
 		if err := e.restOrder(order); err != nil {
 			order.Status = types.OrderStatusRejected
@@ -971,9 +1055,11 @@ func (e *Engine) settleInto(order *types.Order, dst []types.Trade) ([]types.Trad
 		return dst, order.Status, nil
 	}
 	// Pre-trade risk caps (fat-finger size/notional + int64 overflow guard).
-	if err := e.checkOrderCaps(order); err != nil {
-		order.Status = types.OrderStatusRejected
-		return dst, types.OrderStatusRejected, err
+	if submitted {
+		if err := e.checkOrderCaps(order, admitQty); err != nil {
+			order.Status = types.OrderStatusRejected
+			return dst, types.OrderStatusRejected, err
+		}
 	}
 	if order.Type == types.OrderTypeLimit && !order.Privileged && e.outsideBand(order.Price) {
 		order.Status = types.OrderStatusRejected
@@ -1356,18 +1442,46 @@ func (e *Engine) ProcessIceberg(ib *types.IcebergOrder) *MatchResult {
 	ib.JitterBps = e.icebergJitBps // deterministic reload-size jitter (anti-sniffing)
 	e.icebergOrders[ib.Order.ID] = ib
 
-	dst, status, reason := e.settleInto(ib.Order, nil)
+	// The quantity the CLIENT's command puts to work, captured BEFORE the first
+	// settle: this is the one instant at which TotalRemaining equals what was
+	// submitted, and it is the number the venue's size and notional caps must
+	// weigh. types.NewIcebergOrder has already overwritten ib.Order.Quantity with
+	// the display size, so settleInto's default would measure the slice — which is
+	// the fat-finger cap a client turns off by choosing displayQty. It is the same
+	// number Writer.AppendIceberg journals, so the two layers agree on what the
+	// command was. docs/ICEBERG-ADMISSION.md §3.1, §4.2.
+	admitQty := ib.TotalRemaining()
+
+	dst, status, reason := e.settleAdmitting(ib.Order, admitQty, nil)
 	// If the slice fully crossed on entry, keep refilling and re-settling until
-	// it rests or the total is exhausted.
+	// it rests or the total is exhausted. A refill is not a command — settleRefill,
+	// not settleAdmitting — so admission does not run again; re-admitting the tail
+	// refused an order the venue had already accepted and threw the refusal away.
 	for ib.Order.IsFilled() && !ib.IsFullyFilled() {
 		if !ib.Refill() {
 			break
 		}
-		dst, _, _ = e.settleInto(ib.Order, dst)
+		dst, _, _ = e.settleRefill(ib.Order, dst)
 	}
 	if ib.IsFullyFilled() {
 		delete(e.icebergOrders, ib.Order.ID)
 		status = types.OrderStatusFilled
+	}
+	// The registry holds icebergs whose displayed slice is RESTING, because that is
+	// the only thing it is read for: refilling a slice a taker consumed, and writing
+	// the reserve into a snapshot. The line above covers the order that worked off
+	// its total; this covers every other way the command can end without a slice on
+	// the book — refused (halted venue, a size or notional cap, a band breach, a
+	// post-only that would cross, a fill-or-kill that could not fill) or cancelled
+	// (an immediate-or-cancel remainder). Registering BEFORE the settle and not
+	// undoing it on refusal left an IcebergEntry in every later snapshot for an order
+	// that is not there, and LoadSnapshot refuses such a snapshot with "iceberg N has
+	// no resting displayed slice" — one refused iceberg and the venue can no longer
+	// load its own checkpoint, permanently. Pre-existing, and this slice's whole
+	// point is to refuse far more icebergs, so it is repaired here rather than
+	// inherited. docs/ICEBERG-ADMISSION.md §13.4.
+	if _, resting := e.book.Get(ib.Order.ID); !resting {
+		delete(e.icebergOrders, ib.Order.ID)
 	}
 	dst = e.cascadeStops(dst)
 	e.emitResult(ib.Order, dst, status, reason)

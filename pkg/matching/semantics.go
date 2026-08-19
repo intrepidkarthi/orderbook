@@ -48,9 +48,15 @@ package matching
 //	   rejected fill-or-kill no longer moves LastTradePrice; a rejected command's
 //	   batch carries the events describing state that was not rolled back; pro-rata no
 //	   longer skips a taker's own liquidity)
-//	2  this release onward — a failing fill-or-kill no longer corrupts an iceberg it
-//	   consumed, and a cascade-fired order the venue refuses now publishes a CANCELED
+//	2  a failing fill-or-kill no longer corrupts an iceberg it consumed, and a
+//	   cascade-fired order the venue refuses now publishes a CANCELED
 //	   (docs/PINNED-DEFECTS.md)
+//	3  this release onward — the per-order size and notional caps, and the int64
+//	   notional overflow guard, measure the quantity the CLIENT submitted instead of
+//	   an iceberg's displayed slice, so an iceberg over MaxOrderQty is refused where
+//	   it used to rest and one under MinOrderQty by its slice alone is admitted; and
+//	   admission no longer re-runs on an iceberg refill, which used to refuse an
+//	   order's own tail and discard the verdict (docs/ICEBERG-ADMISSION.md)
 //
 // It is an integer and only ever increases, so a refusal can say which direction the
 // mismatch runs and an operator can look up a range in the changelog.
@@ -62,4 +68,4 @@ package matching
 // so the corpus was extended FIRST and the number moved on the strength of the seven
 // lines that appeared. If a change of yours leaves this file green, that is a fact
 // about the corpus and not about your change.
-const SemanticsVersion = 2
+const SemanticsVersion = 3
