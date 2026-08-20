@@ -9,6 +9,28 @@ versions may include breaking changes).
 
 ### Added
 
+- **What sharding actually scales to, measured.** `matching.Shards` gives each symbol
+  its own single-writer book, and two documents said distinct symbols "scale linearly
+  across cores". Nobody had measured it, and it is not true.
+
+  `BenchmarkShards_Scaling` (`pkg/matching/shard_bench_test.go`) routes `b.N` operations
+  across N shards, one producer goroutine per shard, on a 70/20/10 rest / cancel /
+  marketable mix holding ~2 K resting orders per book. Pinned to the four performance
+  cores of an M4, median of five 10-second runs: **876 K ops/s at one book, 1.64 M at
+  two (1.88×), 1.97 M at four (2.24×)** — and then nothing, 2.00 M at six and 1.99 M at
+  eight, inside the ±4% run-to-run spread.
+
+  The reason is the shape of a shard rather than anything in the matching. Each shard is
+  a *pair* of goroutines, a producer blocked on its reply channel and the matching
+  goroutine draining the command queue, so N books want 2N runnable goroutines and past
+  the core count the machine goes into the handoff. Books beyond that buy queue
+  headroom, not throughput, and venue capacity is not symbols × single-book throughput.
+
+  The 4 allocs/op corroborates the durable-path table rather than contradicting it:
+  `Runner.Process` is 3, and this benchmark allocates the order *inside* the timed loop,
+  which the single-threaded benchmarks hoist out. New section in
+  [BENCHMARKS.md](docs/BENCHMARKS.md#scaling-across-cores), summarised in the README.
+
 - **The venue counts what it refuses and times what makes an order durable.** Sixteen
   metric families already said what the venue *did*; nothing said what it *dropped*,
   and the durability path was untimed.
@@ -341,6 +363,20 @@ versions may include breaking changes).
   `TestRejectedFOKDoesNotFireAStop`, `TestRejectedFOKDoesNotMoveTheBand`.
 
 ### Changed
+
+- **The linear-scaling claim is corrected in all three places that made it**, now that
+  there is a measurement: `pkg/matching/shard.go`'s type comment,
+  [INTEGRATION.md](docs/INTEGRATION.md) "Multi-symbol scaling", and
+  [MULTI-SYMBOL.md](docs/MULTI-SYMBOL.md) §2. Each states what it used to claim rather
+  than quietly reading differently. MULTI-SYMBOL §2's argument survives the correction:
+  a serialisation point takes 2.24× to 1×.
+
+- **Every document in `docs/` is now reachable from the README.** Twelve were not,
+  including MULTI-SYMBOL, LAG-AND-SHED, PINNED-DEFECTS and REFERENCE-MATCHER. They are
+  listed as a "Design records" group rather than swelling the reference table to
+  thirty-four rows. Also fixed: one broken anchor in [CONFIG.md](docs/CONFIG.md), and
+  `examples/multisymbol`'s header comment, which claimed the reference gateway still
+  served a single instrument — untrue since `cmd/obgw` grew `-symbols`.
 
 - **The per-order size and notional caps measure the quantity the CLIENT submitted, so
   an iceberg is judged by its total and not by the slice it displays.**
