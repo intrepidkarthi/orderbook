@@ -11,9 +11,16 @@ import (
 
 // Shards routes order flow to one single-writer Runner per symbol. Because each
 // symbol is a shared-nothing single writer (its own goroutine and book), distinct
-// symbols scale linearly across cores — the canonical way real venues scale a
-// matching engine (shard by instrument, never lock one book across threads). It is
-// safe for concurrent producers.
+// symbols scale across cores — the canonical way real venues scale a matching
+// engine (shard by instrument, never lock one book across threads). It is safe for
+// concurrent producers.
+//
+// Scaling is sublinear, and stops at the core count. BenchmarkShards_Scaling
+// measures 2.24x at four books on four cores, and nothing further at six or eight:
+// each shard is a PAIR of goroutines — a producer blocked on its reply and the
+// matching goroutine draining the queue — so past the core count the machine goes
+// into the handoff rather than into matching. Books beyond that buy queue headroom,
+// not throughput.
 type Shards struct {
 	mu        sync.RWMutex
 	runners   map[string]*Runner

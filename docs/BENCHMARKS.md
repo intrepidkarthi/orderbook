@@ -499,6 +499,66 @@ are dominated by the machine's storage and by whatever else it is doing. Run
 `go test -bench=. ./pkg/wal/` on your own hardware, with your own group-commit
 size, and use the ratios above to sanity-check the shape.
 
+## Scaling across cores
+
+Every figure above drives one book from one goroutine. That is the engine's
+contract, and it says nothing about a machine with more than one core. A book
+cannot be parallelised — `Engine` is a single writer by design
+([MULTI-SYMBOL.md](MULTI-SYMBOL.md) §2) — so the only axis that scales is books,
+and nobody had measured what happens when you add them. Two documents nonetheless
+said that distinct symbols "scale linearly across cores". They do not, and both
+have been corrected.
+
+`BenchmarkShards_Scaling` (`pkg/matching/shard_bench_test.go`) routes `b.N`
+operations across N shards through `matching.Shards`, one producer goroutine per
+shard, on a 70/20/10 rest / cancel / marketable mix holding ~2 K resting orders per
+book so the book does not grow for the length of the run. `b.N` is split exactly
+across shards, so the rows cannot differ by a rounding remainder.
+
+```sh
+GOMAXPROCS=4 go test -run '^$' -bench BenchmarkShards_Scaling \
+    -benchtime=10s -count=5 -benchmem ./pkg/matching/
+```
+
+`GOMAXPROCS=4` on the M4 above. The machine has 10 logical cores but only **4
+performance cores**; a matching goroutine scheduled onto an efficiency core measures
+the scheduler rather than the engine, so the core count is pinned to the one that
+means something. Median of 5 × 10 s runs — 344 s of measurement.
+
+| books | ns/op (aggregate) | ~ops/sec | vs. 1 book | B/op | allocs/op |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1,141 | 876 K | 1.00× | 663 | 4 |
+| 2 | 608 | 1.64 M | 1.88× | 663 | 4 |
+| 4 | 508 | 1.97 M | 2.24× | 664 | 4 |
+| 6 | 500 | 2.00 M | 2.28× | 664 | 4 |
+| 8 | 502 | 1.99 M | 2.27× | 665 | 4 |
+
+Run-to-run spread was within ±4% on ns/op at every row, so the plateau is the engine
+and not the machine having a bad afternoon.
+
+**Two books nearly double. Four books do not quadruple.** The second book returns
+1.88×; then it stops. Four books on four cores return 2.24×, and books five through
+eight return nothing further. The reason is the shape of a shard rather than anything
+in the matching: each shard is a **pair** of goroutines — a producer blocked on its
+reply channel, and the matching goroutine draining the command queue — so N books
+want 2N runnable goroutines on N-or-fewer cores. Past the core count the machine goes
+into the handoff instead of into matching. Books beyond that buy queue headroom, not
+throughput.
+
+The 4 allocs/op corroborates rather than contradicts the durable-path table above:
+`Runner.Process` is 3, and this benchmark allocates the `*types.Order` **inside** the
+timed loop, which the single-threaded benchmarks hoist out. A producer that has to
+build its own orders is what a shard actually faces, and the cost is identical in
+every row, so it dampens the ratios rather than flattering them.
+
+**What this does not measure.** Not a journalled shard — every row here is
+unjournalled, and a per-shard WAL adds the group-commit cost from the table above to
+each book. Not `GOMAXPROCS` above the performance-core count. Not more than eight
+books. And not the wire: an end-to-end figure through `cmd/obgw` would need the
+interleaved A/B this page insists on everywhere else, and a number measured without
+it does not belong here — see the warning at the end of the next section, which is
+about exactly this mistake.
+
 ## What these numbers cannot tell you
 
 Every figure on this page is a microbenchmark measured over seconds. They are the right

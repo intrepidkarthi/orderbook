@@ -44,8 +44,10 @@ deserves a spec rather than a clause.
 **No, and not by accident.** A venue-wide sequence requires every shard to agree on
 a common counter, which requires a serialisation point that every command passes
 through — which is the exact bottleneck sharding exists to remove. Buying a total
-order costs the linear scaling that is the only reason to have more than one
-engine.
+order costs the cross-core scaling that is the only reason to have more than one
+engine. That scaling has since been measured and it is *sublinear* — 2.24× on four
+cores, flat after that ([BENCHMARKS.md](BENCHMARKS.md#scaling-across-cores)) — which
+weakens this argument without changing it: a serialisation point takes 2.24× to 1×.
 
 So: **each symbol is its own timeline.** Within a symbol, everything this project
 already proves holds — deterministic apply, a gap-free event sequence, exact

@@ -317,6 +317,34 @@ buffer, not about the concurrent API.
 See [docs/BENCHMARKS.md](docs/BENCHMARKS.md#the-durable-path) for the comparison
 and for why the durable figures are given as ratios rather than nanoseconds.
 
+**Scaling across cores.** A book cannot be parallelised — it is a single writer by
+design — so the only axis that scales is books. `BenchmarkShards_Scaling` drives N
+shards through `matching.Shards`, one producer goroutine per shard, on a 70/20/10
+rest / cancel / marketable mix holding ~2 K resting orders per book:
+
+| books | ns/op (aggregate) | ~ops/sec | vs. 1 book |
+|---:|---:|---:|---:|
+| 1 | 1,141 | 876 K | 1.00× |
+| 2 | 608 | 1.64 M | 1.88× |
+| 4 | 508 | 1.97 M | 2.24× |
+| 6 | 500 | 2.00 M | 2.28× |
+| 8 | 502 | 1.99 M | 2.27× |
+
+`GOMAXPROCS=4` on the same M4 (4 performance cores), median of 5 × 10 s runs,
+~5.7 minutes of measurement:
+`GOMAXPROCS=4 go test -run '^$' -bench BenchmarkShards_Scaling -benchtime=10s -count=5 ./pkg/matching/`.
+4 allocs/op, 663 B/op — order construction is *inside*
+the timed loop here, unlike the table above, because a producer that builds its own
+orders is what a shard actually faces.
+
+**It is not linear, and that is the finding.** Four books on four cores returns
+2.24×, not 4×, and books 5 through 8 return nothing further. Each shard is a *pair*
+of goroutines — a producer blocked on its reply, and the matching goroutine draining
+the queue — so past core count the machine is spent on the handoff rather than on
+matching. Adding books beyond the core count buys queue headroom, not throughput.
+The per-book figure is also not comparable to the single-threaded table above: it is
+a different workload, and both the queue handoff and order allocation are inside it.
+
 Reproduce with `make bench`. CI runs the benchmarks on every push. Methodology
 and full results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 

@@ -298,8 +298,15 @@ p99 ~167 ns, p999 ~292 ns** on a cancel-heavy mix.
 ## Multi-symbol scaling
 
 Keep **one engine goroutine per symbol** (or per shard of symbols). A router
-hashes `symbol → shard`; shards share no mutable state, so they scale linearly
-across cores. Pin hot shards to cores for cache locality. Scale *out* to multiple
+hashes `symbol → shard`; shards share no mutable state, so adding books adds
+throughput — **but not linearly, and this page used to say it did.** Measured on
+four performance cores, four books return 2.24× a single book and books five
+through eight return nothing further, because each shard is a producer/matcher
+goroutine *pair* and past the core count the machine goes into the handoff rather
+than into matching ([BENCHMARKS.md](BENCHMARKS.md#scaling-across-cores)). A venue
+with more symbols than cores still works; the extra books buy queue headroom. Do
+not plan capacity as symbols × single-book throughput. Pin hot shards to cores for
+cache locality. Scale *out* to multiple
 processes only when a single box's cores or NIC saturate — but keep a symbol
 wholly within one writer.
 
