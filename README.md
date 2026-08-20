@@ -406,6 +406,27 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [TESTING.md](docs/TESTING.md) | The one rule that keeps the rest honest: a test does not count until it has been run against code broken the way it claims to detect. Five case studies from this repository of tests that were green for the wrong reason — or red for none. |
 | [CHANGELOG.md](CHANGELOG.md) | Release history with breaking-change notes. |
 
+**Design records.** Each of the following was written as a spec *before* the code
+existed, and each ends with a section recording what building it actually found —
+including where the spec turned out to be wrong about its own design. They are the
+working record rather than the reference manual, and they are listed here because a
+document nothing links to is a document nobody reads.
+
+| Document | Contents |
+|---|---|
+| [MULTI-SYMBOL.md](docs/MULTI-SYMBOL.md) | One venue, many books: partitioned ids, a durable manifest, one command log per shard — and why there is deliberately no venue-wide sequence and no venue-wide "as of" instant. |
+| [LAG-AND-SHED.md](docs/LAG-AND-SHED.md) | Counting what the venue refused and timing what it waits on, so overload is legible in the metrics instead of silent. |
+| [SEMANTICS-VERSION.md](docs/SEMANTICS-VERSION.md) | Making a replay refuse rather than lie when the matching semantics have changed under a log that outlived them. |
+| [JOURNAL-COMPLETENESS.md](docs/JOURNAL-COMPLETENESS.md) | Turning "the journal records everything that mutates the book" from a claim into a test that fails when it stops being true. |
+| [REFERENCE-MATCHER.md](docs/REFERENCE-MATCHER.md) | An oracle that shares no code with the thing it checks — two sorted slices, deliberately naive — and the three engine defects it found. |
+| [DIFFERENTIAL-FINDINGS.md](docs/DIFFERENTIAL-FINDINGS.md) | Deciding those three defects before fixing them, and §11 on the three places the decision document was wrong about its own reachability. |
+| [PINNED-DEFECTS.md](docs/PINNED-DEFECTS.md) | One rejection that fails to undo and one that fails to announce: the two defects that were pinned as tests before they were repaired. |
+| [ICEBERG-ADMISSION.md](docs/ICEBERG-ADMISSION.md) | A fat-finger cap a client could switch off by choosing an order type, and the audit that found five admission checks measuring the wrong quantity. |
+| [ICEBERG-DURABILITY.md](docs/ICEBERG-DURABILITY.md) | A log record that cannot state the order it records, what a recovery is allowed to do about it, and the operator flag that makes the trade-off explicit. |
+| [PERFORMANCE-ROADMAP.md](docs/PERFORMANCE-ROADMAP.md) | The performance and production roadmap, with every milestone's status checked against the code rather than against what a spec intended. |
+| [TUTORIAL-SPEC.md](docs/TUTORIAL-SPEC.md) | The hands-on course (`web/learn.html`): learn the book by being every player in it. |
+| [DEMO-SPEC.md](docs/DEMO-SPEC.md) | The hosted explainer that runs the real Go engine in the browser via WebAssembly. |
+
 ---
 
 ## Beyond the engine

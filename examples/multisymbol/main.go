@@ -8,11 +8,15 @@
 // documented and bad. So: build the consumer that would notice if any of them were
 // wrong.
 //
-// What it is not: cmd/obgw. The reference gateway serves one instrument and
-// deliberately still does — converting it is a larger change to the most-tested
-// component here, and doing that in the same pass as the protocol would mean
-// debugging both at once. This is the proof the wire and the core compose; the
-// gateway catching up is its own arc.
+// What it is not: cmd/obgw. When this was written the reference gateway served one
+// instrument and deliberately still did, because converting it in the same pass as
+// the protocol would have meant debugging both at once. The gateway has since caught
+// up (-symbols with -datadir, one symbolBook per instrument in cmd/obgw/book.go), so
+// that paragraph is now history rather than a limitation.
+//
+// What survives the gateway growing up is the reason this exists: it is the smallest
+// consumer that would notice if a multi-symbol seam were wrong, and it exercises the
+// seams without the gateway's session, auth and rate-limiting layers in the way.
 package main
 
 import (
