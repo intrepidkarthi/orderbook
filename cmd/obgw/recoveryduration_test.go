@@ -123,7 +123,9 @@ func TestRecoveryDurationIsReported(t *testing.T) {
 		WALPath: walPath,
 	}
 
-	const rounds = 5
+	// Three rather than five: with the comparison downgraded to an observation the
+	// extra rounds bought precision nothing now depends on, at ~2 s each under -race.
+	const rounds = 3
 	bares := make([]int64, 0, rounds)
 	reported := make([]int64, 0, rounds)
 	var wall int64
@@ -152,16 +154,37 @@ func TestRecoveryDurationIsReported(t *testing.T) {
 		srv.Close()
 	}
 
-	// PAIRED, and that is the whole point of interleaving the two measurements.
-	// Within a round both sides see the same machine, so their DIFFERENCE cancels
-	// the drift that moves them together. Comparing the minimum of one series
-	// against the minimum of the other throws that away — the two minima come from
-	// different rounds, so machine noise enters the comparison at full strength
-	// against a margin that is only about 5%.
+	// THE TIMING COMPARISON IS OBSERVED AND DELIBERATELY NOT ASSERTED.
 	//
-	// That is not a hypothetical. This test compared independent floors until
-	// 2026-08-21 and failed on roughly half of CI runs, on both Go 1.23 and 1.27,
-	// while passing every time on an idle laptop.
+	// This test used to require the reported duration to exceed a bare wal.Recover on
+	// the same fixture. That assertion is removed rather than retuned, on the grounds
+	// docs/TESTING.md gives: it was run against code with the defect it names and
+	// stayed green, so it was decoration.
+	//
+	// Two independent findings, both from 2026-08-21:
+	//
+	//  1. It does not isolate the adoptions. Moving `recoveredIn` to before both Adopt
+	//     calls still leaves a positive margin, because `recoverAloneNanos` is not a
+	//     control for the server's path — the venue recovers through
+	//     wal.RecoverWithOptions with options, a snapshot path and a differently
+	//     configured engine. Roughly half the margin is that difference.
+	//
+	//  2. The margin is below the noise floor where it matters. Adoption is ~5% of the
+	//     recovery and cannot be made a larger share: it is ~10x cheaper per order than
+	//     replaying a record is per record, and the book comes out of the log, so the
+	//     ratio is a property of the two costs and not of the fixture size. Under -race
+	//     the recovery is ~585 ms and 5% is visible; in the coverage job it is ~35 ms
+	//     and 5% is ~1.8 ms, under the scheduling noise of a shared runner. The same
+	//     assertion therefore cannot pass reliably in both jobs of the same workflow.
+	//
+	// What survives is asserted above and is deterministic: the gauge exists, is
+	// positive, is bounded by the wall clock around NewServer, and the book it describes
+	// really did recover. The margin is logged so a human reading CI can see it move.
+	//
+	// LAG-AND-SHED.md 8's claim that the interval CONTAINS both adoptions is asserted
+	// by nothing, here or elsewhere. Closing it needs a control that walks the server's
+	// own recovery path, or a seam that makes adoption observably expensive — not a
+	// tighter threshold on this difference.
 	diffs := make([]int64, rounds)
 	positive := 0
 	for i := range diffs {
@@ -170,37 +193,9 @@ func TestRecoveryDurationIsReported(t *testing.T) {
 			positive++
 		}
 	}
-	// WHAT THIS DOES AND DOES NOT PROVE — verified by sabotage on 2026-08-21, per
-	// docs/TESTING.md.
-	//
-	// It proves the gauge is populated, positive, bounded by the wall clock around
-	// NewServer, and measurably larger than a bare wal.Recover on the same fixture.
-	//
-	// It does NOT isolate the two Adopt calls, and the failure message below must not
-	// be read as though it does. Moving `recoveredIn` to before both Adopts leaves the
-	// median paired difference at +31 ms instead of +65 ms — still positive, still
-	// green. Roughly half the margin is not adoption at all: the server recovers
-	// through wal.RecoverWithOptions with options, a snapshot path and a differently
-	// configured engine, so `recoverAloneNanos` is not a control for "everything except
-	// the Adopts" and no threshold on this difference separates the two cleanly.
-	//
-	// The previous floor-based comparison passed against that same sabotage, so this is
-	// a pre-existing hole rather than one the paired comparison introduced. Closing it
-	// needs a control that walks the server's own recovery path, or a seam that makes
-	// adoption observably expensive. Until then this is a smoke test for the gauge, and
-	// the property in LAG-AND-SHED.md §8 that the interval CONTAINS both adoptions is
-	// asserted by nothing.
-	med := median(diffs)
-	if med <= 0 {
-		t.Errorf("the reported recovery is not measurably longer than wal.Recover alone on the same fixture "+
-			"(median difference %d ns over %d paired rounds, %d of them positive) — the gauge is measuring a "+
-			"narrower interval than the recovery it claims to time. Note this test cannot tell you it is the "+
-			"Adopt calls that left the interval; see the comment above",
-			med, rounds, positive)
-	}
-	t.Logf("median paired difference %d ns (%d/%d rounds positive); recovery median %d ns; wal.Recover median %d ns; "+
-		"last wall clock around NewServer %d ns",
-		med, positive, rounds, median(reported), median(bares), wall)
+	t.Logf("observed only, not asserted: median paired difference %d ns (%d/%d rounds positive); "+
+		"recovery median %d ns; wal.Recover median %d ns; last wall clock around NewServer %d ns",
+		median(diffs), positive, rounds, median(reported), median(bares), wall)
 }
 
 // TestRecoveryDurationReportsWhatItCannotKnow is deliverable 20.

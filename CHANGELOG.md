@@ -121,16 +121,30 @@ versions may include breaking changes).
   10× cheaper per order than replaying a record is per record, and the book comes out of
   the log, so the ratio is a property of the two costs rather than of the size.
 
-  **A sabotage run then found the test does not prove what it says**, and that is now
-  written into it. Moving the measurement to before both `Adopt` calls leaves the
-  difference at +31 ms — still positive, still green — because `recoverAloneNanos` is
-  not a control for the server's path: the venue recovers through
-  `wal.RecoverWithOptions` with options, a snapshot path and a differently configured
-  engine, and about half the margin is that difference rather than adoption. The
-  floor-based version passed the same sabotage, so the hole is pre-existing. The test
-  now states what it is — a smoke test for the gauge — and records that
+  **The comparison is then removed entirely rather than retuned**, on the grounds
+  [TESTING.md](docs/TESTING.md) gives: it was run against code carrying the defect it
+  names and stayed green, so it was decoration. Two findings, both the same day.
+
+  It does not isolate the adoptions — moving the measurement to before both `Adopt`
+  calls still leaves a positive margin, because `recoverAloneNanos` is not a control for
+  the server's path: the venue recovers through `wal.RecoverWithOptions` with options, a
+  snapshot path and a differently configured engine, and about half the margin is that
+  difference rather than adoption. The floor-based version passed the same sabotage, so
+  the hole was pre-existing.
+
+  And the margin is below the noise floor where it matters. Under `-race` the recovery
+  is ~585 ms and 5% is visible; in the coverage job, which runs without the detector, it
+  is ~35 ms and 5% is ~1.8 ms — under the scheduling noise of a shared runner, which is
+  how the paired version still failed there at a median of −1.2 ms. **One assertion could
+  not pass reliably in both jobs of the same workflow**, and no threshold fixes that,
+  because adoption cannot be made a larger share of the recovery at any fixture size.
+
+  What survives is deterministic and was never the problem: the gauge exists, is
+  positive, is bounded by the wall clock around `NewServer`, and the book it describes
+  really did recover. The margin is logged for a human reading CI. Rounds drop from five
+  to three, since the extra precision fed an assertion that no longer exists.
   [LAG-AND-SHED.md](docs/LAG-AND-SHED.md) §8's claim that the interval *contains* both
-  adoptions is asserted by nothing.
+  adoptions is now recorded, in the test, as asserted by nothing.
 
 - **The conformance-suite scenario count read 23 against an actual 28.** The count was
   correct at v0.25.0 and 0.26.0 added five scenarios to `TestEventStreamReconstructsBook`
