@@ -90,6 +90,20 @@ versions may include breaking changes).
   cancel + replace 0.0000). It is a deterministic allocation count, not a timing, so it
   was in the test log the whole time — which is the same way the original error survived.
 
+- **`TestSnapshotDurationIsObserved/a healthy venue records what the write cost` was a
+  third.** It compared the venue's recorded **mean** snapshot duration against a write
+  the test performs itself, failing at more than 20× apart. On a shared runner one
+  descheduled write took the mean to 133 ms against a 1.3 ms write — 100× apart, on a
+  venue with nothing wrong with it.
+
+  The fix is which statistic carries which bound. *Too small* is the defect the subtest
+  names — a timer around the wrong thing reads orders of magnitude under a real write —
+  and the mean is right for it, being exact at any magnitude and movable by an outlier
+  only upward. *Too large* is the direction contention also produces, so that bound now
+  reads the median, which moves only when the typical write is slow. Verified by
+  recording a fixed microsecond in place of the real duration: the retained bound fails
+  with "more than an order of magnitude too small means this is not timing the write".
+
 - **`TestSyncLatencyIsObserved/the count advances on an idle venue` was a second CI
   timing flake**, found by the coverage job the same day. It slept a fixed 250 ms and
   required 8 beats of a 20 ms ticker — a 36% margin against the scheduler, which holds

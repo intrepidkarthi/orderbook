@@ -396,12 +396,32 @@ func TestSnapshotDurationIsObserved(t *testing.T) {
 			t.Fatalf("WriteSnapshot: %v", err)
 		}
 		measured := float64(time.Since(start).Nanoseconds())
-		if mean > measured*20 || mean*20 < measured {
+
+		// Two statistics, and which bound gets which is the point.
+		//
+		// TOO SMALL is the defect this subtest names — a timer around the wrong thing,
+		// or around nothing, reads orders of magnitude under a real write. The mean is
+		// right for that: it is exact at any magnitude and an outlier can only push it
+		// UP, so a mean that is still far too small is real.
+		//
+		// TOO LARGE is the direction contention also produces. The mean is the wrong
+		// statistic there, and this subtest failed in CI on exactly that: one
+		// descheduled write took the mean to 133 ms against a 1.3 ms write, 100x apart,
+		// on a venue with nothing wrong with it. The median moves only if the TYPICAL
+		// write is slow, which is the thing worth failing on. It is a bucket upper
+		// bound rather than an exact value, which an order-of-magnitude band can carry;
+		// on a 20-order book the buckets are nowhere near saturating.
+		med := float64(srv.snapHist.Quantile(0.5))
+		if mean*20 < measured {
 			t.Errorf("mean recorded duration %.0f ns against %.0f ns measured by the test; more than an order of "+
-				"magnitude apart means this is not timing the write", mean, measured)
+				"magnitude too small means this is not timing the write", mean, measured)
 		}
-		t.Logf("snapshot duration mean %.0f ns over %d writes; the test's own write took %.0f ns",
-			mean, srv.snapHist.Count(), measured)
+		if med > measured*20 {
+			t.Errorf("median recorded duration %.0f ns against %.0f ns measured by the test; the typical write "+
+				"being that much slower means this is timing more than the write", med, measured)
+		}
+		t.Logf("snapshot duration median %.0f ns, mean %.0f ns over %d writes; the test's own write took %.0f ns",
+			med, mean, srv.snapHist.Count(), measured)
 	})
 
 	t.Run("a failed write is counted and never timed", func(t *testing.T) {
