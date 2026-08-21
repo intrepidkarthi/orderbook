@@ -90,6 +90,16 @@ versions may include breaking changes).
   cancel + replace 0.0000). It is a deterministic allocation count, not a timing, so it
   was in the test log the whole time — which is the same way the original error survived.
 
+- **A 9 MB compiled binary was tracked in the repository.** `obgw` sat at the root and
+  had been committed for months: `go build ./cmd/obgw` writes its output to the working
+  directory rather than to `/bin`, which `.gitignore` covers, and the binary has no
+  extension for `*.exe` or `*.test` to catch. Every rebuild that got committed added
+  another 9 MB blob to a repository whose entire source is a few hundred KB.
+
+  Untracked and ignored, along with the other ten commands by name. The blobs already in
+  history stay there — rewriting published history to reclaim the space would break every
+  existing clone and fork for a saving nobody is paying for at clone time twice.
+
 - **`TestSnapshotDurationIsObserved/a healthy venue records what the write cost` was a
   third.** It compared the venue's recorded **mean** snapshot duration against a write
   the test performs itself, failing at more than 20× apart. On a shared runner one

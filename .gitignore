@@ -6,6 +6,22 @@
 *.test
 *.wasm
 
+# Compiled commands. `go build ./cmd/obgw` drops its binary in the working
+# directory, not in /bin, and obgw was tracked that way for months -- a 9 MB
+# blob per rebuild in a repository whose source is a few hundred KB. Listed by
+# name because these have no extension to match on.
+/obgw
+/obdash
+/obdemo
+/obmm
+/obsoak
+/obwasm
+/surveil
+/ofistudy
+/lambdastudy
+/flowstudy
+/l2capture
+
 # Coverage / profiling
 coverage.out
 coverage.html
