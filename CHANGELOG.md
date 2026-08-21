@@ -40,10 +40,18 @@ versions may include breaking changes).
 
 - **`make cover-check`: a coverage floor CI enforces, and deliberately not a coverage
   badge.** There was no coverage figure anywhere, so the only way to know it was to run
-  the profile by hand. It is **83.8%** over `pkg/` and `internal/` — the packages a
-  consumer imports — and 73.4% counting the `cmd/` binaries and `examples/` demos,
-  which are `main()` wiring and runnable demonstrations rather than library code. The
-  gate fails the build below **80%**, and CI runs the same target a contributor runs.
+  the profile by hand. It is **87.2%** over `pkg/` and `internal/` — the packages a
+  consumer imports — on `ubuntu-latest` under Go 1.27, which is where CI measures it.
+  `cmd/` and `examples/` are outside that number, being `main()` wiring and runnable
+  demonstrations rather than library code. The gate fails the build below **80%**, and
+  CI runs the same target a contributor runs.
+
+  **The figure names its environment, because it moves with it.** The same target on
+  macOS under Go 1.23.5 reports 83.8%, and all twenty measured packages read higher on
+  CI by 0.2 to 4 points — a uniform shift that points at statement attribution in the
+  toolchain rather than at any test behaving differently. This was caught by the gate's
+  first CI run disagreeing with the number written down from a local run an hour
+  earlier, which is the argument for gating on a floor rather than tracking a delta.
 
   A service was wired up first (Codecov) and then removed before it was ever
   activated, because a badge is the wrong instrument for this repository.
