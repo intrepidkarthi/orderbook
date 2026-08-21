@@ -6,13 +6,6 @@
 
 <p align="center"><b><a href="https://intrepidkarthi.github.io/orderbook/">▶ Live demo</a></b> — the real engine, compiled to WebAssembly, running in your browser · <b><a href="https://intrepidkarthi.github.io/orderbook/console.html">▶ Live console</a></b> — a running market with signals and surveillance, every panel titled by the call that produces it.</p>
 
-An embeddable matching core in Go, with a demonstrated network seam:
-integer-exact pricing, a zero-allocation match path, a lock-free single-writer
-core, deterministic and machine-checked crash recovery, and a reference
-order-entry gateway that speaks a frozen binary protocol over TCP. And one
-document most libraries don't have: an honest account of what production takes
-and how far this goes ([docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md)).
-
 [![Go Reference](https://pkg.go.dev/badge/github.com/intrepidkarthi/orderbook.svg)](https://pkg.go.dev/github.com/intrepidkarthi/orderbook)
 [![CI](https://github.com/intrepidkarthi/orderbook/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/intrepidkarthi/orderbook/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/intrepidkarthi/orderbook)](https://goreportcard.com/report/github.com/intrepidkarthi/orderbook)
@@ -20,23 +13,85 @@ and how far this goes ([docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Live demo](https://img.shields.io/badge/demo-WebAssembly-654FF0?logo=webassembly&logoColor=white)](https://intrepidkarthi.github.io/orderbook/)
 
-`orderbook` is an embeddable Go library — `go get` it into an exchange, a
-simulator, or a trading tool. The matching core owns the order book, the matching
-algorithm, order lifecycle, deterministic sequencing, and market-data snapshots,
-plus a set of opt-in **pre-trade risk & anti-manipulation controls**; credit,
-identity, fees, and wire protocols stay in the layers around it, the same
-boundary production venues draw. Companion packages cover the rest of that
-boundary — durable WAL persistence (`pkg/wal`), market-abuse surveillance
-(`pkg/surveillance`), in-process pre-trade admission control (`pkg/gateway`),
-and a uniform-price call auction (`pkg/auction`). Every defensive control is
-grounded in a real enforcement case or incident, catalogued in
-[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md). The repository also ships a
-reproducible market-microstructure research harness and an interactive
-WebAssembly demo that runs the real engine in the browser.
+An embeddable limit order book and matching engine in Go. Integer-exact `int64`
+pricing with no floating point on the money path, a match path that allocates
+**0 B/op**, a lock-free single-writer core (the LMAX model), deterministic crash
+recovery gated in CI against a 2,000-command tape, and `cmd/obgw` — a reference
+TCP gateway speaking a frozen binary protocol on both edges, order entry and
+public market data. `go get` it into an exchange, a simulator, or a backtester:
+the core owns the book, the matching algorithm, order lifecycle, sequencing and
+market-data snapshots, while `pkg/wal` (durable persistence), `pkg/surveillance`
+(market-abuse detection), `pkg/gateway` (pre-trade admission) and `pkg/auction`
+(uniform-price call auction) cover the layers around it. It has never run a live
+market, and [what that costs you](#experimental-use-at-your-own-risk) is written
+down rather than implied.
 
-> ### ⚠ Experimental. Use at your own risk.
->
-> **This is an experiment, not a product.** It has never run a live market. It has
+---
+
+## Installation
+
+```sh
+go get github.com/intrepidkarthi/orderbook/pkg/matching
+```
+
+Requires Go 1.23 or later.
+
+---
+
+## Quickstart
+
+The engine works in integer ticks and lots. Pass them directly, or use an
+`Instrument` to convert from decimals at the boundary.
+
+```go
+eng := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
+
+// A resting sell, then a crossing buy that trades against it at the maker price.
+sell, _ := types.NewOrder("mm", "BTC-USD", types.SideSell, types.OrderTypeLimit, 100, 5, types.TIFGoodTillCancel)
+eng.Process(sell)
+
+buy, _ := types.NewOrder("taker", "BTC-USD", types.SideBuy, types.OrderTypeLimit, 101, 3, types.TIFGoodTillCancel)
+res := eng.Process(buy) // res.Trades, res.Status, res.RejectionReason
+
+bid, qty, ok := eng.BestBid()
+```
+
+Decimals at the boundary, concurrent submission, and the zero-allocation path:
+
+```go
+// Decimals in, int64 ticks/lots out.
+inst := types.NewInstrument("BTC-USD", decimal.RequireFromString("0.01"), decimal.RequireFromString("0.001"))
+order, _ := inst.NewOrder("alice", types.SideBuy, types.OrderTypeLimit,
+    decimal.RequireFromString("30000.50"), decimal.RequireFromString("0.25"), types.TIFGoodTillCancel)
+
+// Many producers, one matching goroutine.
+r := matching.NewRunner(matching.RunnerConfig{Engine: matching.DefaultConfig("BTC-USD")})
+defer r.Close()
+r.SubmitAsync(order) // enqueue without blocking; result arrives on the returned channel
+
+// Zero-allocation hot path: reuse the trade buffer across calls.
+buf := make([]types.Trade, 0, 8)
+buf, status, _ := eng.Match(order, buf[:0])
+```
+
+Or run the reference gateway and talk to it over a socket:
+
+```sh
+go run ./cmd/obgw -addr 127.0.0.1:9000 -symbol BTC-USD -accounts alice:s3cret
+```
+
+`cmd/obgw`'s tests are a working client — login, enter, cancel, reduce, query,
+resume — and are the most useful reference for writing another one. The protocol
+helpers live in `server_test.go`.
+
+Runnable, testable examples render on
+[pkg.go.dev](https://pkg.go.dev/github.com/intrepidkarthi/orderbook/pkg/matching#pkg-examples).
+
+---
+
+## Experimental. Use at your own risk.
+
+> **⚠ This is an experiment, not a product.** It has never run a live market. It has
 > had no independent review. Its Go API and its wire protocol have each broken more
 > than once in a single week, and the compatibility promise that now governs them
 > ([docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)) is days old. Known problems are
@@ -74,10 +129,11 @@ operator dashboard that is an ordinary subscriber of the venue's own feed), and 
 [live console](https://intrepidkarthi.github.io/orderbook/console.html) running
 the engine, signals and surveillance in the browser.
 
-What does not, and is yours: **continuous operation** (the command log never
-shrinks and a restart reads all of it, so a venue left running becomes slower and
-hungrier to restart every day it stays up — the first thing to fix before running
-this for a week), **credential lifecycle** (the reference speaks TLS and
+What does not, and is yours: **continuous operation** (the log rotates and a
+covered prefix can be deleted, but retention is opt-in and unset by default, so a
+venue left running without `-wal-retain` still becomes slower and hungrier to
+restart every day it stays up — the first thing to set before running this for a
+week), **credential lifecycle** (the reference speaks TLS and
 holds secret digests, never plaintext — but rotation, revocation and expiry are
 yours, and it says so), **multi-symbol routing** (order ids and
 sequences are per-engine, so several symbols means several engines and a router
@@ -89,12 +145,11 @@ consensus, because bundling one forces a wrong answer on everybody. See
 [docs/EXCHANGE-ARCHITECTURE.md](docs/EXCHANGE-ARCHITECTURE.md) for why, including
 the venues that lost quorum getting it wrong.
 
-The engine has never run a live market. **Production-readiness is a property of
-your deployment, not of this library** — what is offered here is that the pieces
-you build on are correct, tested, and honest about their edges.
-[docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) is the checklist: what
-ships, what is deliberately absent, what you would have to build — and which gaps
-no library work can close, because they are properties of your deployment.
+What is offered here is that the pieces you build on are correct, tested, and
+honest about their edges.
+[docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) is the checklist:
+what ships, what is deliberately absent, what you would have to build — and which
+gaps no library work can close, because they are properties of your deployment.
 
 ---
 
@@ -188,67 +243,6 @@ no library work can close, because they are properties of your deployment.
   was found.
 - **Tested and benchmarked.** Race, fuzz, soak, and replay-recovery suites;
   microbenchmarks run in CI on every push.
-
----
-
-## Installation
-
-```sh
-go get github.com/intrepidkarthi/orderbook/pkg/matching
-```
-
-Requires Go 1.23 or later.
-
----
-
-## Quickstart
-
-The engine works in integer ticks and lots. Pass them directly, or use an
-`Instrument` to convert from decimals at the boundary.
-
-```go
-eng := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
-
-// A resting sell, then a crossing buy that trades against it at the maker price.
-sell, _ := types.NewOrder("mm", "BTC-USD", types.SideSell, types.OrderTypeLimit, 100, 5, types.TIFGoodTillCancel)
-eng.Process(sell)
-
-buy, _ := types.NewOrder("taker", "BTC-USD", types.SideBuy, types.OrderTypeLimit, 101, 3, types.TIFGoodTillCancel)
-res := eng.Process(buy) // res.Trades, res.Status, res.RejectionReason
-
-bid, qty, ok := eng.BestBid()
-```
-
-Decimals at the boundary, concurrent submission, and the zero-allocation path:
-
-```go
-// Decimals in, int64 ticks/lots out.
-inst := types.NewInstrument("BTC-USD", decimal.RequireFromString("0.01"), decimal.RequireFromString("0.001"))
-order, _ := inst.NewOrder("alice", types.SideBuy, types.OrderTypeLimit,
-    decimal.RequireFromString("30000.50"), decimal.RequireFromString("0.25"), types.TIFGoodTillCancel)
-
-// Many producers, one matching goroutine.
-r := matching.NewRunner(matching.RunnerConfig{Engine: matching.DefaultConfig("BTC-USD")})
-defer r.Close()
-r.SubmitAsync(order) // enqueue without blocking; result arrives on the returned channel
-
-// Zero-allocation hot path: reuse the trade buffer across calls.
-buf := make([]types.Trade, 0, 8)
-buf, status, _ := eng.Match(order, buf[:0])
-```
-
-Or run the reference gateway and talk to it over a socket:
-
-```sh
-go run ./cmd/obgw -addr 127.0.0.1:9000 -symbol BTC-USD -accounts alice:s3cret
-```
-
-`cmd/obgw`'s tests are a working client — login, enter, cancel, reduce, query,
-resume — and are the most useful reference for writing another one. The protocol
-helpers live in `server_test.go`.
-
-Runnable, testable examples render on
-[pkg.go.dev](https://pkg.go.dev/github.com/intrepidkarthi/orderbook/pkg/matching#pkg-examples).
 
 ---
 
