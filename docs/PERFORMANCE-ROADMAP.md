@@ -1091,11 +1091,13 @@ The strict path should avoid:
 > `default.pgo`. `cmd/obgw` exposes no runtime-tuning flag; the only
 > performance-adjacent one is `-pprof`.
 >
-> **CI is a single OS and a single toolchain.** `ci.yml`, `bench.yml` and `soak.yml`
-> are all `ubuntu-latest` with Go 1.23. The macOS figures in
-> [`BENCHMARKS.md`](BENCHMARKS.md) come from the author's laptop — so the project has
-> two platforms' numbers and has **never run the same benchmark under a controlled
-> matrix**, and never two Go versions.
+> **CI is a single OS, and the benchmarks a single toolchain.** `ci.yml` now builds,
+> vets and race-tests on two Go versions — 1.23, the floor the README claims, and 1.27,
+> the current release — so the compatibility claim is checked rather than stated. Every
+> job is still `ubuntu-latest`, and `bench.yml` and `soak.yml` are still one toolchain
+> apiece. The macOS figures in [`BENCHMARKS.md`](BENCHMARKS.md) come from the author's
+> laptop — so the project has two platforms' numbers and has **never run the same
+> benchmark under a controlled matrix**.
 >
 > **What does exist** is the seam this milestone would be driven from: `net/http/pprof`
 > on the admin listener, off by default, already used by the soak workflow. And the

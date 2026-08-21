@@ -11,14 +11,23 @@ permissions:
 
 jobs:
   build-test:
-    name: build · vet · test (race)
+    name: build · vet · test (race) · go${{ matrix.go }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor the README claims, and the current release. Running both is
+        # what makes "Requires Go 1.23 or later" a checked claim rather than a
+        # stated one -- a floor nothing builds against is a floor nobody has
+        # tested. Bump the second entry when Go releases; the first moves only
+        # when the go directive in go.mod does.
+        go: ["1.23", "1.27"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "${{ matrix.go }}"
           cache: true
 
       - name: Build
@@ -38,7 +47,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.27"
           cache: true
 
       # Not -race: the coverage number is the subject here, and the race
