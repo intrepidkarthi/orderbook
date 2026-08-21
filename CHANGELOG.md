@@ -90,6 +90,35 @@ versions may include breaking changes).
   cancel + replace 0.0000). It is a deterministic allocation count, not a timing, so it
   was in the test log the whole time — which is the same way the original error survived.
 
+- **`TestRecoveryDurationIsReported` failed on about half of all CI runs.** It compared
+  the venue's self-reported recovery against a bare `wal.Recover` on the same fixture by
+  taking the minimum of five samples of each — two series reduced independently, so
+  machine noise entered the comparison at full strength against a margin of only ~5%.
+  It failed on Go 1.23 and on 1.27, and passed every time on an idle laptop, which is
+  the signature of a timing assertion rather than a version problem.
+
+  The rounds were already interleaved "so a drift in the machine's state moves both
+  together" — and then the code discarded exactly that by reducing the two series
+  separately. It now compares the **median of the per-round differences**, which is what
+  the interleaving was for: 5/5 rounds positive at a median of +65 ms, against a
+  previous margin that flipped sign run to run.
+
+  The doc comment also claimed the adoptions were "around a fifth of the recovery". They
+  are ~5%, and the margin cannot be widened by growing the fixture — adoption is roughly
+  10× cheaper per order than replaying a record is per record, and the book comes out of
+  the log, so the ratio is a property of the two costs rather than of the size.
+
+  **A sabotage run then found the test does not prove what it says**, and that is now
+  written into it. Moving the measurement to before both `Adopt` calls leaves the
+  difference at +31 ms — still positive, still green — because `recoverAloneNanos` is
+  not a control for the server's path: the venue recovers through
+  `wal.RecoverWithOptions` with options, a snapshot path and a differently configured
+  engine, and about half the margin is that difference rather than adoption. The
+  floor-based version passed the same sabotage, so the hole is pre-existing. The test
+  now states what it is — a smoke test for the gauge — and records that
+  [LAG-AND-SHED.md](docs/LAG-AND-SHED.md) §8's claim that the interval *contains* both
+  adoptions is asserted by nothing.
+
 - **The conformance-suite scenario count read 23 against an actual 28.** The count was
   correct at v0.25.0 and 0.26.0 added five scenarios to `TestEventStreamReconstructsBook`
   without moving it — three fill-or-kill × STP combinations among them. Counted by

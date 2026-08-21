@@ -83,9 +83,10 @@ func recoverAloneNanos(t *testing.T, path string) int64 {
 // cost from above. The floor of (Recover + Adopt) genuinely exceeds the floor of
 // Recover, which is the thing being asserted, and neither floor moves when the
 // machine is loaded.
-func floor(xs []int64) int64 {
-	sort.Slice(xs, func(a, b int) bool { return xs[a] < xs[b] })
-	return xs[0]
+func median(xs []int64) int64 {
+	ys := append([]int64(nil), xs...)
+	sort.Slice(ys, func(a, b int) bool { return ys[a] < ys[b] })
+	return ys[len(ys)/2]
 }
 
 // TestRecoveryDurationIsReported is deliverable 19, and the third assertion is the
@@ -98,10 +99,16 @@ func floor(xs []int64) int64 {
 // produce a number reliably SMALLER than the truth, which is the worst kind of wrong
 // for a figure that feeds a recovery time objective.
 //
-// Both sides are measured five times and compared as medians, INTERLEAVED so a drift
-// in the machine's state moves both together. The margin being asserted is real work
-// and not noise, but it is a fifth of a 20 ms measurement, and a single sample of
-// either side is not a number to build an assertion on.
+// Both sides are measured five times, INTERLEAVED so a drift in the machine's state
+// moves both together, and compared as the MEDIAN OF THE PER-ROUND DIFFERENCES. The
+// pairing is what the interleaving is for: the margin is real work rather than noise,
+// but it is only about 5% — measured at ratio 1.05 to 1.06 on an idle machine, not the
+// "fifth of the recovery" this comment claimed until 2026-08-21 — and 5% between two
+// independently reduced series is inside the noise of a shared CI runner.
+//
+// The margin cannot be widened by making the fixture bigger. Adoption is roughly 10x
+// cheaper per order than replaying a record is per record, and the book comes out of
+// the log, so the ratio is a property of the two costs and not of the size.
 func TestRecoveryDurationIsReported(t *testing.T) {
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "obgw.wal")
@@ -145,14 +152,55 @@ func TestRecoveryDurationIsReported(t *testing.T) {
 		srv.Close()
 	}
 
-	bare, mine := floor(bares), floor(reported)
-	if mine <= bare {
-		t.Errorf("recovery duration %d ns is not above the %d ns wal.Recover alone costs on the same fixture — "+
-			"the two Adopt calls are outside the measured interval, so the venue is reporting a downtime "+
-			"reliably shorter than the one it had", mine, bare)
+	// PAIRED, and that is the whole point of interleaving the two measurements.
+	// Within a round both sides see the same machine, so their DIFFERENCE cancels
+	// the drift that moves them together. Comparing the minimum of one series
+	// against the minimum of the other throws that away — the two minima come from
+	// different rounds, so machine noise enters the comparison at full strength
+	// against a margin that is only about 5%.
+	//
+	// That is not a hypothetical. This test compared independent floors until
+	// 2026-08-21 and failed on roughly half of CI runs, on both Go 1.23 and 1.27,
+	// while passing every time on an idle laptop.
+	diffs := make([]int64, rounds)
+	positive := 0
+	for i := range diffs {
+		diffs[i] = reported[i] - bares[i]
+		if diffs[i] > 0 {
+			positive++
+		}
 	}
-	t.Logf("recovery floor %d ns; wal.Recover floor %d ns (ratio %.2f); last wall clock around NewServer %d ns",
-		mine, bare, float64(mine)/float64(bare), wall)
+	// WHAT THIS DOES AND DOES NOT PROVE — verified by sabotage on 2026-08-21, per
+	// docs/TESTING.md.
+	//
+	// It proves the gauge is populated, positive, bounded by the wall clock around
+	// NewServer, and measurably larger than a bare wal.Recover on the same fixture.
+	//
+	// It does NOT isolate the two Adopt calls, and the failure message below must not
+	// be read as though it does. Moving `recoveredIn` to before both Adopts leaves the
+	// median paired difference at +31 ms instead of +65 ms — still positive, still
+	// green. Roughly half the margin is not adoption at all: the server recovers
+	// through wal.RecoverWithOptions with options, a snapshot path and a differently
+	// configured engine, so `recoverAloneNanos` is not a control for "everything except
+	// the Adopts" and no threshold on this difference separates the two cleanly.
+	//
+	// The previous floor-based comparison passed against that same sabotage, so this is
+	// a pre-existing hole rather than one the paired comparison introduced. Closing it
+	// needs a control that walks the server's own recovery path, or a seam that makes
+	// adoption observably expensive. Until then this is a smoke test for the gauge, and
+	// the property in LAG-AND-SHED.md §8 that the interval CONTAINS both adoptions is
+	// asserted by nothing.
+	med := median(diffs)
+	if med <= 0 {
+		t.Errorf("the reported recovery is not measurably longer than wal.Recover alone on the same fixture "+
+			"(median difference %d ns over %d paired rounds, %d of them positive) — the gauge is measuring a "+
+			"narrower interval than the recovery it claims to time. Note this test cannot tell you it is the "+
+			"Adopt calls that left the interval; see the comment above",
+			med, rounds, positive)
+	}
+	t.Logf("median paired difference %d ns (%d/%d rounds positive); recovery median %d ns; wal.Recover median %d ns; "+
+		"last wall clock around NewServer %d ns",
+		med, positive, rounds, median(reported), median(bares), wall)
 }
 
 // TestRecoveryDurationReportsWhatItCannotKnow is deliverable 20.
