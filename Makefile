@@ -48,7 +48,13 @@ COVER_MIN ?= 80.0
 
 .PHONY: cover-check
 cover-check: ## Gate: coverage over pkg/ and internal/ must be >= COVER_MIN
-	@$(GO) test -coverprofile=coverage.out -covermode=atomic $(PKGS)
+	@# -p 1: one package binary at a time. This target measures coverage; it is not
+	@# a scheduling stress test, and running the whole suite in parallel WITH
+	@# coverage instrumentation on a 4-vCPU runner starves the drills in
+	@# examples/replication that hold real TCP listeners -- they pass alone and
+	@# under -race at full parallelism, and failed only here. Serial is slower and
+	@# says the same thing about coverage.
+	@$(GO) test -p 1 -coverprofile=coverage.out -covermode=atomic $(PKGS)
 	@head -1 coverage.out > coverage.lib.out
 	@grep -E '/(pkg|internal)/' coverage.out >> coverage.lib.out
 	@total=$$($(GO) tool cover -func=coverage.lib.out | awk '/^total:/ {gsub(/%/,"",$$3); print $$3}'); \

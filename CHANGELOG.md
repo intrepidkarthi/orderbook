@@ -90,6 +90,17 @@ versions may include breaking changes).
   cancel + replace 0.0000). It is a deterministic allocation count, not a timing, so it
   was in the test log the whole time — which is the same way the original error survived.
 
+- **The coverage gate runs the suite serially (`-p 1`).** Its first runs failed on
+  `examples/replication`'s drills — including one reporting *"ids are not partitioned
+  after all"*, which reads like a correctness bug and is not one. Those drills hold real
+  TCP listeners; they pass alone, and pass under `-race` at full parallelism. They failed
+  only in the job that runs every package concurrently **with** coverage instrumentation
+  on a 4-vCPU runner, which starves them.
+
+  The target measures coverage. It is not a scheduling stress test, and the race jobs
+  already exercise the suite under full parallelism. Serial is slower and says exactly
+  the same thing about coverage.
+
 - **A 9 MB compiled binary was tracked in the repository.** `obgw` sat at the root and
   had been committed for months: `go build ./cmd/obgw` writes its output to the working
   directory rather than to `/bin`, which `.gitignore` covers, and the binary has no
