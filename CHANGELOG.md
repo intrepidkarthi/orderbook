@@ -90,6 +90,19 @@ versions may include breaking changes).
   cancel + replace 0.0000). It is a deterministic allocation count, not a timing, so it
   was in the test log the whole time — which is the same way the original error survived.
 
+- **`TestSyncLatencyIsObserved/the count advances on an idle venue` was a second CI
+  timing flake**, found by the coverage job the same day. It slept a fixed 250 ms and
+  required 8 beats of a 20 ms ticker — a 36% margin against the scheduler, which holds
+  on an idle laptop and does not hold on a shared runner instrumenting every package
+  for coverage. The goroutine is not scheduled 8 times inside that window and the venue
+  is not what failed.
+
+  It now waits for the beats instead of budgeting for them, polling to a 10-second
+  deadline. Slow machines are slow rather than red, and the defect it names is still
+  caught: a heartbeat that does not beat leaves the count at 0 and fails at the
+  deadline. Verified by demanding beats the ticker cannot deliver — it fails at the
+  deadline reporting the count it did see, rather than hanging or passing.
+
 - **`TestRecoveryDurationIsReported` failed on about half of all CI runs.** It compared
   the venue's self-reported recovery against a bare `wal.Recover` on the same fixture by
   taking the minimum of five samples of each — two series reduced independently, so

@@ -240,10 +240,28 @@ func TestSyncLatencyIsObserved(t *testing.T) {
 		defer srv.Close()
 
 		// No client, no orders, nothing to flush. The ticker fires anyway.
-		time.Sleep(250 * time.Millisecond)
-		if got := srv.syncHist.Count(); got < 8 {
-			t.Errorf("%s_count = %d after 250 ms of a 20 ms ticker, want at least 8 — "+
-				"the group-commit loop's only heartbeat does not beat", walSyncLatencyMetric, got)
+		//
+		// POLLED rather than slept, and the difference is which machine the assertion
+		// is about. Sleeping 250 ms and demanding 8 beats of a 20 ms ticker leaves a
+		// 36% margin against the scheduler, which is fine on an idle laptop and is not
+		// fine on a shared CI runner instrumenting every package for coverage — the
+		// goroutine simply does not get scheduled 8 times inside that window, and the
+		// venue is not what failed. This waits for the beats instead of budgeting for
+		// them, so a slow machine is slow rather than red.
+		//
+		// It still catches the defect it names: a heartbeat that does not beat leaves
+		// the count at 0 and this fails at the deadline.
+		const wantBeats = 8
+		var got int64
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+			if got = srv.syncHist.Count(); got >= wantBeats {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got < wantBeats {
+			t.Errorf("%s_count = %d after waiting up to 10 s for %d beats of a 20 ms ticker — "+
+				"the group-commit loop's only heartbeat does not beat", walSyncLatencyMetric, got, wantBeats)
 		}
 	})
 
