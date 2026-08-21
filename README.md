@@ -182,9 +182,9 @@ gaps no library work can close, because they are properties of your deployment.
   [docs/BOUNDED-RECOVERY.md](docs/BOUNDED-RECOVERY.md).
 - **An event stream that reconstructs the book.** `Accepted`/`Trade`/`Canceled`/
   `Replaced` replay into an L3 book identical to the engine's, asserted on every
-  commit across 23 scenarios covering every order class — including iceberg
-  refill, all five self-trade-prevention modes, FOK reversal and cascade-fired
-  stops.
+  commit across 28 scenarios covering every order class — including iceberg
+  refill, all five self-trade-prevention modes, FOK reversal, FOK against a
+  resting iceberg, cascade-fired stops and a bust.
 - **Full order surface.** Limit, market, stop / stop-limit, iceberg (hidden),
   post-only, pegged, OCO / bracket, and trailing-stop orders; GTC / IOC / FOK / DAY /
   GTD time-in-force, with the venue holding the deadline rather than the client

@@ -7,6 +7,70 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Changed
+
+- **CI builds and race-tests on two Go versions rather than one.** Every workflow
+  pinned Go 1.23 while 1.27 was the current release, so the project was testing
+  neither what the README promises nor what most people now build with. `bench`,
+  `pages` and `soak` move to 1.27; `ci.yml` runs a matrix of **1.23 and 1.27**.
+
+  The matrix is the point rather than the version bump. The README says "Requires Go
+  1.23 or later" and nothing built against 1.23 to check it — a floor nothing compiles
+  against is a floor nobody has tested. It now fails a job when it stops being true.
+
+  `go.mod` is deliberately **not** bumped. The `go` directive is the minimum every
+  consumer of an embeddable library has to meet, and raising it to a release three days
+  old would lock out everyone on 1.23 through 1.26 to gain nothing the matrix does not
+  already prove.
+
+- **The Go Report Card badge is gone.** goreportcard.com was sunset on 1 July 2026 and
+  `gojp/goreportcard` is archived. The badge endpoint still answers 200 — what it now
+  serves is an SVG reading *"go report: retired"*, so the README was advertising a dead
+  service in the row of badges a first-time visitor reads first.
+
+- **The README leads with the demo and the quickstart, not the caveats.** Quickstart
+  moved from line 204 to line 40: demo GIF, badges, one paragraph of what this is,
+  install, quickstart — then the honesty section under its own heading, which the pitch
+  links to by anchor rather than burying above the fold. Nothing in the warning is
+  dropped; the blockquote, Scope, "What ships" and "What does not, and is yours" all
+  survive intact and now sit together instead of restating the deployment-property
+  argument across four separate paragraphs.
+
+### Added
+
+- **A published coverage number, and the list of what it counts.** There was no
+  coverage report anywhere, so the only way to know the figure was to run the profile
+  by hand: **73.4%** across every package, **83.8%** with `cmd/`, `examples/` and
+  `legacy/` ignored. `codecov.yml` states the ignore list and why — those packages are
+  `main()` wiring and runnable demonstrations, and what is under them is covered by
+  `pkg/` and by `cmd/obgw`'s own end-to-end suite. The project status target is 80%,
+  which is the floor it must not fall through and not the number it is today.
+
+### Fixed
+
+- **The published test count and fuzz-target count in
+  [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md).** The count read "over 600"
+  against an actual 844, which is the floor degrading the safe direction it was
+  designed to degrade. The fuzz-target count next to it read "two" against an actual
+  **three** — `FuzzDifferential` shipped in 0.26.0 and this line did not move with it,
+  which is not a floor going stale but a figure that was simply wrong.
+
+  Corrected to "over 800 test functions, three fuzz targets". The historical statements
+  elsewhere — the soak write-up's "480 tests, two fuzzers", and this file's own "as it
+  then stood (480 functions)" — are left alone, because they describe what existed at
+  the moment being narrated.
+
+- **The conformance-suite scenario count read 23 against an actual 28.** The count was
+  correct at v0.25.0 and 0.26.0 added five scenarios to `TestEventStreamReconstructsBook`
+  without moving it — three fill-or-kill × STP combinations among them. Counted by
+  running the test rather than by reading the table, because the STP cases are generated
+  per mode rather than written out. Corrected in the README and in
+  [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md).
+
+- **`PERFORMANCE-ROADMAP.md` said CI had "never two Go versions".** That stopped being
+  true in this release. It now says what is the case: still one OS, still one toolchain
+  for the benchmarks, and the benchmark matrix still does not exist.
+
 ## [0.26.0] - 2026-08-21
 
 ### Added

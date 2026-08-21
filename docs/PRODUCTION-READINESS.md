@@ -64,7 +64,7 @@ Each row names the evidence, because a checklist that only asserts is worth noth
 | Claim | How it is checked |
 |---|---|
 | Matching is deterministic | Same command stream produces a byte-identical engine; gated in CI against a 2,000-command tape, checkpointing at five different points |
-| The event stream reconstructs the book | Replayed into an L3 book identical to the engine's, across 23 scenarios covering every order class |
+| The event stream reconstructs the book | Replayed into an L3 book identical to the engine's, across 28 scenarios covering every order class |
 | Recovery is exact | Snapshot + log tail rebuilds a byte-identical engine, including all three sequence counters, the duplicate guard and conditional-order state |
 | The log cannot silently corrupt | CRC-32C per record; a complete record failing its checksum refuses to start the venue rather than truncating |
 | Neither can the snapshot | CRC-32C over the whole file, refused the same way. It is the base the log is replayed on top of, so a wrong one is worse than a wrong record — and it had no check at all until writing the runbook for it showed the procedure would have been "you cannot detect this" |
@@ -74,9 +74,9 @@ Each row names the evidence, because a checklist that only asserts is worth noth
 | Market data cannot drift from the book | Derived L2 compared against the engine's own snapshot after every command of a random tape |
 | A subscriber can join anywhere | Snapshot + everything after its sequence equals the book, asserted in-process and end to end over a socket |
 | No data races | `go test -race -count=3` across all 16 packages |
-| No panics on hostile input | 5.6M fuzz executions across two targets |
+| No panics on hostile input | 5.6M fuzz executions across the two long-running targets, plus a third differential target |
 
-Test count: **over 600 test functions**, two fuzz targets, race and replay-recovery
+Test count: **over 800 test functions**, three fuzz targets, race and replay-recovery
 in CI. Count them with `grep -rh '^func Test' --include='*_test.go' . | wc -l`.
 
 A floor rather than a figure, and that is the second lesson this line has taught. It
@@ -85,9 +85,15 @@ it was stale again within a day. A hand-maintained count goes stale by construct
 the same reason v0.19.0 deleted the hardcoded "latest version" from the docs page
 rather than updating it. A floor can only ever become an understatement.
 
+Which is exactly what it became: the floor read "over 600" against an actual 844 at
+v0.26.0, and the fuzz-target count next to it read "two" against an actual three —
+`FuzzDifferential` shipped in v0.26.0 and this line was not updated with it. The floor
+degrading safely is the design working; the target count going flatly wrong is not,
+because it was a figure wearing a floor's clothes.
+
 ## 1a. What sustained load found that nothing else did
 
-The engine has over 600 test functions, two fuzz targets at 5.6M executions, replay-recovery
+The engine has over 800 test functions, three fuzz targets, replay-recovery
 and race detection in CI, and a benchmark suite that has twice been corrected against
 itself. None of them found this:
 
