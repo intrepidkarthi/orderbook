@@ -38,13 +38,24 @@ versions may include breaking changes).
 
 ### Added
 
-- **A published coverage number, and the list of what it counts.** There was no
-  coverage report anywhere, so the only way to know the figure was to run the profile
-  by hand: **73.4%** across every package, **83.8%** with `cmd/`, `examples/` and
-  `legacy/` ignored. `codecov.yml` states the ignore list and why — those packages are
-  `main()` wiring and runnable demonstrations, and what is under them is covered by
-  `pkg/` and by `cmd/obgw`'s own end-to-end suite. The project status target is 80%,
-  which is the floor it must not fall through and not the number it is today.
+- **`make cover-check`: a coverage floor CI enforces, and deliberately not a coverage
+  badge.** There was no coverage figure anywhere, so the only way to know it was to run
+  the profile by hand. It is **83.8%** over `pkg/` and `internal/` — the packages a
+  consumer imports — and 73.4% counting the `cmd/` binaries and `examples/` demos,
+  which are `main()` wiring and runnable demonstrations rather than library code. The
+  gate fails the build below **80%**, and CI runs the same target a contributor runs.
+
+  A service was wired up first (Codecov) and then removed before it was ever
+  activated, because a badge is the wrong instrument for this repository.
+  [TESTING.md](docs/TESTING.md) names *"coverage went up"* as explicitly not the
+  standard here, and every case study in it is a test that was green for the wrong
+  reason — each with full line coverage of the code it failed to check. A percentage
+  cannot see that. A floor at least fails when the suite stops keeping up with the
+  code, which is the one thing the number is good for, and a badge never fails at all.
+
+  The gate was verified in both directions before it was committed, per that same
+  document: it passes at the 80% floor and exits non-zero at 90%, printing the figure
+  it refused.
 
 ### Fixed
 

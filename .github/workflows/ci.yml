@@ -40,7 +40,7 @@ jobs:
         run: go test -race ./...
 
   coverage:
-    name: coverage
+    name: coverage floor
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,15 +50,11 @@ jobs:
           go-version: "1.27"
           cache: true
 
-      # Not -race: the coverage number is the subject here, and the race
-      # detector's instrumentation is not free on the 66-second wal suite.
-      - name: Test (coverage)
-        run: go test -coverprofile=coverage.out -covermode=atomic ./...
-
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          files: ./coverage.out
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      # A gate, not a badge. This fails the build when coverage over the
+      # packages a consumer imports drops through the floor -- which a coverage
+      # service reports and never enforces. Not -race: the number is the subject
+      # here, and the detector's instrumentation is not free on the wal suite.
+      #
+      # Reproduce locally with the same command: `make cover-check`.
+      - name: Coverage floor
+        run: make cover-check

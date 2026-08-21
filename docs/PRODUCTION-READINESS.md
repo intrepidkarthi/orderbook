@@ -79,6 +79,20 @@ Each row names the evidence, because a checklist that only asserts is worth noth
 Test count: **over 800 test functions**, three fuzz targets, race and replay-recovery
 in CI. Count them with `grep -rh '^func Test' --include='*_test.go' . | wc -l`.
 
+Coverage: **83.8% of statements** over `pkg/` and `internal/`, the packages a consumer
+imports. Reproduce it with `make cover-check`, which is the same command CI runs and
+which fails below 80%. `cmd/` and `examples/` are deliberately outside that number —
+they are `main()` wiring and runnable demonstrations, and counting them measures how
+much demo code has tests rather than how well the library is covered. With them in it
+is 73.4%.
+
+It is a floor and a gate, not a goal, and there is deliberately no coverage badge.
+[TESTING.md](TESTING.md) names *"coverage went up"* as explicitly not this project's
+standard: every case study in it is a test that was green for the wrong reason, and
+each of those has full line coverage of the code it fails to check. Coverage counts
+lines executed. It cannot see whether a test would notice the defect it exists to
+catch, which is the only question that document asks.
+
 A floor rather than a figure, and that is the second lesson this line has taught. It
 read 480 for several releases after it stopped being true; corrected to an exact 584,
 it was stale again within a day. A hand-maintained count goes stale by construction —
