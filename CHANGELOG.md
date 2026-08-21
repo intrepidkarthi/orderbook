@@ -60,6 +60,17 @@ versions may include breaking changes).
   then stood (480 functions)" — are left alone, because they describe what existed at
   the moment being narrated.
 
+- **The README still published `Add` at 1.05 allocs/op against a measured 2.01.**
+  v0.25.0 corrected this figure in [BENCHMARKS.md](docs/BENCHMARKS.md) — including a
+  paragraph on it having been wrong in the flattering direction — and did not correct
+  the same sentence in the README, so the number the most-read page carried went on
+  understating the cost of growing a book by half for another release.
+
+  Re-measured rather than copied across: `TestAddAloneDoesAllocate` prints **2.0101**
+  allocs/op, 94.57 B/op. The two figures beside it were already right (cancel 0.0002,
+  cancel + replace 0.0000). It is a deterministic allocation count, not a timing, so it
+  was in the test log the whole time — which is the same way the original error survived.
+
 - **The conformance-suite scenario count read 23 against an actual 28.** The count was
   correct at v0.25.0 and 0.26.0 added five scenarios to `TestEventStreamReconstructsBook`
   without moving it — three fill-or-kill × STP combinations among them. Counted by

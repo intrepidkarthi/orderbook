@@ -279,7 +279,7 @@ Median of 5 runs on an idle machine; ±10% run to run. The fractional allocation
 counts are deliberate: Go prints `allocs/op` as integer division, so "0" can mean
 anything under 1.0. Measured against `runtime.MemStats`, cancel really does allocate
 ~0.0002 objects per operation — and `Add` into a growing book really does allocate
-1.05, which is what "pooled" means rather than "allocation-free".
+2.01, which is what "pooled" means rather than "allocation-free".
 
 **Book size is part of the result**, so it is stated. Cancel is given at two depths
 because the benchmark's iteration count doubles as the book size, and the 4× spread
