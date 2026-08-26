@@ -9,6 +9,13 @@ versions may include breaking changes).
 
 ### Changed
 
+- **`pages.yml` scopes its permissions per job rather than workflow-wide.** The
+  workflow-level block handed both jobs `pages: write` *and* `id-token: write`, so
+  `build` — the job that checks out the repo and runs `go build` and a shell script —
+  held a token it never uses, while `deploy`, which runs one action, is the only step
+  that needs it. No behaviour change; the union each job receives now matches what it
+  actually calls.
+
 - **A session may have one `Query` in flight at a time.** `MsgQuery` was the only
   client command with no admission control on it at all: every other command passes
   `gate.Allow`, but that gate is order-shaped — it rates an *order* against a per-book
@@ -114,6 +121,16 @@ versions may include breaking changes).
   it refused.
 
 ### Fixed
+
+- **WAL archival refuses per segment, by inode, to archive into the live set.**
+  `CheckArchiveDir` refuses an archive directory that is the log's own, once per
+  `Retain` and before the loop — which closed the window *between* retention cycles
+  and left the one *inside* a cycle open. An archive path swapped for a symlink into
+  the live set mid-run reaches `archiveSegment`'s "a target of the right size is
+  already here" branch, where the target *is* the source: it returned nil, and `Retain`
+  then unlinked the only copy. The comparison is now per segment and by `os.SameFile`,
+  so the path taken to get there does not matter, and it costs one `Stat` on a branch
+  that only runs when a target already exists.
 
 - **Surveillance detectors no longer keep per-order state forever for every order
   that fills.** All five of them — spoofing, order-to-trade ratio, close-marking,

@@ -267,6 +267,18 @@ func archiveSegment(seg segment, dir string) error {
 	// crashed-cycle path and not the ordinary one.
 	target := filepath.Join(dir, seg.name)
 	if st, err := os.Stat(target); err == nil && st.Size() == seg.size {
+		// The archive target and the live segment being the SAME FILE is the one
+		// reading of "already archived" that must never return nil: Retain unlinks the
+		// source next, and here the source is the archive. CheckArchiveDir refuses
+		// this configuration once per cycle, before the loop, which leaves a window
+		// for anything that happens DURING one — an archive directory replaced by a
+		// symlink into the live set by a deployment script mid-run. Checking it per
+		// segment, by inode rather than by path, closes the window instead of
+		// narrowing it, and costs one Stat on a branch that only runs when a target
+		// is already there.
+		if src, serr := os.Stat(seg.path); serr == nil && os.SameFile(st, src) {
+			return fmt.Errorf("%w: %s and the live segment are the same file", ErrArchiveIsTheLog, target)
+		}
 		same, err := sameFileContents(seg.path, target)
 		if err != nil {
 			return err

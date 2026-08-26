@@ -10,10 +10,13 @@ on:
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
+# Scoped per job, not workflow-wide. `build` runs the steps that execute code — a
+# checkout, `go build`, a shell script — and held `id-token: write` it never uses;
+# `deploy` runs one action and is the only step that needs it. A workflow-level grant
+# hands every job the union of what any job needs, which is the wrong default for the
+# job most likely to grow another step.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -22,6 +25,11 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # `pages: write` is for actions/configure-pages' `enablement: true`; the artifact
+    # upload needs nothing beyond the default token.
+    permissions:
+      contents: read
+      pages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -52,6 +60,10 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # actions/deploy-pages wants both, and this is the only job that runs it.
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

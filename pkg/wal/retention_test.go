@@ -888,3 +888,48 @@ func TestACorruptArchiveOfTheRightSizeIsNotMistakenForAGoodOne(t *testing.T) {
 		t.Errorf("restored set holds %d records, want 1000", len(entries))
 	}
 }
+
+// TestArchivingIntoTheLiveSetIsRefusedPerSegment. CheckArchiveDir refuses an archive
+// directory that is the live one, once per cycle and before the loop — which leaves
+// the window inside a cycle open: a directory swapped for a symlink into the live set
+// while retention is already running reaches archiveSegment's "a target of the right
+// size is already here" branch, where the target IS the source, and Retain then
+// unlinks the only copy. The check is per segment and by inode, so the path it takes
+// to get there does not matter.
+func TestArchivingIntoTheLiveSetIsRefusedPerSegment(t *testing.T) {
+	dir := t.TempDir()
+	stem := filepath.Join(dir, "w.wal")
+	snapPath := filepath.Join(dir, "s.snap")
+	const per = 100
+	for s := 0; s < 4; s++ {
+		base := int64(s*per + 1)
+		seqs := make([]int64, per)
+		for i := range seqs {
+			seqs[i] = base + int64(i)
+		}
+		handBuiltSegment(t, segPath(stem, base), base, seqs)
+	}
+	emptySnapshotAt(t, snapPath, 400)
+
+	// The archive directory reached through a symlink to the log directory: a
+	// different string, the same inode, which is what a mid-cycle swap produces.
+	link := filepath.Join(t.TempDir(), "archive")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	seg := segment{path: segPath(stem, 1), name: filepath.Base(segPath(stem, 1))}
+	st, err := os.Stat(seg.path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	seg.size = st.Size()
+
+	if err := archiveSegment(seg, link); !errors.Is(err, ErrArchiveIsTheLog) {
+		t.Fatalf("archiveSegment into the live set = %v, want ErrArchiveIsTheLog", err)
+	}
+	// And the segment is still there: a refused archival deletes nothing.
+	if _, err := os.Stat(seg.path); err != nil {
+		t.Errorf("the live segment is gone after a refused archival: %v", err)
+	}
+}
