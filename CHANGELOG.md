@@ -76,6 +76,39 @@ versions may include breaking changes).
 
 ### Fixed
 
+- **A WAL append whose write did not land now latches the writer and rolls its
+  sequence back.** `append` builds the frame header and the payload as two buffered
+  writes and returned either error bare. A buffered write only fails when the flush
+  inside it failed, so this is the state the `failed` field's own comment describes —
+  *a partially completed flush leaves the buffer in an indeterminate relationship to
+  the file* — and it was the one path that did not latch it. Two consequences, both
+  silent: the next append wrote a record into the middle of a torn frame, and the
+  sequence the failed append had already consumed named a record that does not exist,
+  which is exactly the guarantee `Runner.logCommand` and every log shipper reading
+  `SetOnAppend` depend on. `Sync` and `rotateLocked` latched already; this one now
+  does too, under the same Rule 5.
+
+- **WAL archival no longer accepts a same-size archive copy as proof it can delete
+  the live segment.** `archiveSegment`'s idempotency branch is the only verification
+  standing between a sealed segment and its unlink — `Retain` deletes the source on
+  the strength of it returning nil — and it compared file *size*. Size cannot tell a
+  good archive from a corrupted one of the same length: rot on the archive medium, an
+  external sync tool that truncated and re-padded, a bad block that reads back clean.
+  The venue was then holding one unreadable copy of records it had just deleted the
+  only other copy of, with no error raised anywhere. Contents are now compared, and
+  only when a target is already there — the crashed-cycle path, not the ordinary one,
+  which still pays one `Stat`.
+
+- **Creating a fresh WAL segment no longer skips the downgrade-safety marker when it
+  could not tell whether the stem exists.** `openFreshSegment` read `os.Lstat`'s
+  answer as two cases and there are three: any error that was not `IsNotExist` — an
+  `EACCES` on the parent, a network-filesystem hiccup — fell through as if a file
+  were at the stem, skipping the marker on exactly the shape the marker exists for
+  (numbered segments, nothing at the stem, an older build concluding there is no log).
+  It now stops and says which question it could not answer. `healMissingStem` takes
+  the opposite reading of the same uncertainty and keeps it: that one is a repair, and
+  a repair that writes over a stem it cannot read turns a diagnosis into damage.
+
 - **Self-trade prevention no longer strands an iceberg's hidden reserve.** All three STP
   removal branches took an iceberg's *visible slice* off the book and left the hidden
   remainder in the engine's tracking map, where nothing would ever read it again: the

@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -254,9 +255,27 @@ func archiveSegment(seg segment, dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	// The idempotency branch, and it is the ONE verification standing between the
+	// live segment and its deletion: Retain unlinks the source on the strength of
+	// this function returning nil. Matching size used to be the whole test, and size
+	// cannot tell a good archive from a corrupted one of the same length — rot on the
+	// archive medium, an external sync tool that truncated and re-padded, a bad block
+	// read back clean. The archive is written .partial-then-rename precisely so a
+	// crash inside a copy cannot produce this file, so anything the size test accepts
+	// and the content test rejects came from OUTSIDE, which is the case worth being
+	// slow for. Content is compared only when a target is already there, which is the
+	// crashed-cycle path and not the ordinary one.
 	target := filepath.Join(dir, seg.name)
 	if st, err := os.Stat(target); err == nil && st.Size() == seg.size {
-		return nil // idempotent by name: an earlier cycle crashed between copy and unlink
+		same, err := sameFileContents(seg.path, target)
+		if err != nil {
+			return err
+		}
+		if same {
+			return nil // idempotent by name: an earlier cycle crashed between copy and unlink
+		}
+		// Same size, different bytes. Fall through and re-archive over it; the rename
+		// below replaces it, and the source is still here to be copied from.
 	}
 	tmp := target + ".partial"
 	src, err := os.Open(seg.path)
@@ -452,4 +471,50 @@ func ReadAfter(stem string, afterSeq int64) ([]Entry, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// sameFileContents reports whether two files hold identical bytes. Callers have
+// already established that the two are the same LENGTH, so this is the second half of
+// that question and not a general comparison: it streams both and stops at the first
+// difference.
+func sameFileContents(a, b string) (bool, error) {
+	fa, err := os.Open(a)
+	if err != nil {
+		return false, err
+	}
+	defer fa.Close()
+	fb, err := os.Open(b)
+	if err != nil {
+		return false, err
+	}
+	defer fb.Close()
+
+	ba := make([]byte, 64*1024)
+	bb := make([]byte, 64*1024)
+	for {
+		na, erra := io.ReadFull(fa, ba)
+		nb, errb := io.ReadFull(fb, bb)
+		if na != nb || !bytes.Equal(ba[:na], bb[:nb]) {
+			return false, nil
+		}
+		// ReadFull's short reads are the end of the file, not a failure. Any other
+		// error is a read this function cannot answer over, and answering "different"
+		// would re-archive over a good copy while answering "same" would delete a live
+		// segment on no evidence — so it reports the error and the caller keeps both.
+		atEnd := func(err error) bool {
+			return err == io.EOF || err == io.ErrUnexpectedEOF
+		}
+		if atEnd(erra) && atEnd(errb) {
+			return true, nil
+		}
+		if erra != nil && !atEnd(erra) {
+			return false, erra
+		}
+		if errb != nil && !atEnd(errb) {
+			return false, errb
+		}
+		if atEnd(erra) != atEnd(errb) {
+			return false, nil
+		}
+	}
 }

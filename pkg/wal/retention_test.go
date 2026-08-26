@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -818,5 +819,72 @@ func TestTheByteBudgetIsFlooredByMinSegments(t *testing.T) {
 			t.Errorf("MinSegments %d retained %d bytes, want more than %d — the arithmetic in the docs is "+
 				"(MinSegments + 1) x MaxSegmentBytes", minSegs, info.Bytes, int64(minSegs)*segBytes)
 		}
+	}
+}
+
+// TestACorruptArchiveOfTheRightSizeIsNotMistakenForAGoodOne. archiveSegment's
+// idempotency branch is the only verification standing between a live segment and
+// its deletion — Retain unlinks the source on the strength of it returning nil — and
+// it used to be a size comparison. Size cannot tell a good archive from a corrupted
+// one of the same length, so a bit flip on the archive medium, or an external sync
+// tool that truncated and re-padded, left the venue holding one unreadable copy of
+// records it had just deleted the only other copy of, with no error anywhere.
+func TestACorruptArchiveOfTheRightSizeIsNotMistakenForAGoodOne(t *testing.T) {
+	dir := t.TempDir()
+	stem := filepath.Join(dir, "w.wal")
+	snapPath := filepath.Join(dir, "s.snap")
+	archive := filepath.Join(dir, "archive")
+	const per = 100
+	for s := 0; s < 10; s++ {
+		base := int64(s*per + 1)
+		seqs := make([]int64, per)
+		for i := range seqs {
+			seqs[i] = base + int64(i)
+		}
+		handBuiltSegment(t, segPath(stem, base), base, seqs)
+	}
+	emptySnapshotAt(t, snapPath, 1_000)
+
+	// A pre-existing archive copy of the first segment with one byte flipped deep in
+	// its payload — same name, same size, different records.
+	firstBase := int64(1)
+	firstName := filepath.Base(segPath(stem, firstBase))
+	if err := os.MkdirAll(archive, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	good := readFile(t, segPath(stem, firstBase))
+	corrupt := append([]byte(nil), good...)
+	corrupt[len(corrupt)/2] ^= 0xFF
+	writeFile(t, filepath.Join(archive, firstName), corrupt)
+
+	res, err := Retain(stem, snapPath, Options{RetainBytes: 1, MinSegments: -1, ArchiveDir: archive})
+	if err != nil {
+		t.Fatalf("Retain: %v", err)
+	}
+	if len(res.Deleted) == 0 {
+		t.Fatal("nothing was deleted, so the archive path never ran")
+	}
+
+	// The live segment is gone, so the archive copy is now the only one. It has to be
+	// the segment.
+	got := readFile(t, filepath.Join(archive, firstName))
+	if !bytes.Equal(got, good) {
+		t.Fatalf("the archived %s is not the segment: retention deleted the live copy and kept a corrupt one", firstName)
+	}
+
+	// And it reads: restoring the archive rebuilds the whole history.
+	archived, err := ArchivedSegments(archive, stem)
+	if err != nil {
+		t.Fatalf("ArchivedSegments: %v", err)
+	}
+	for _, name := range archived {
+		writeFile(t, filepath.Join(dir, name), readFile(t, filepath.Join(archive, name)))
+	}
+	entries, err := ReadAll(stem)
+	if err != nil {
+		t.Fatalf("ReadAll after restoring the archive: %v", err)
+	}
+	if len(entries) != 1_000 {
+		t.Errorf("restored set holds %d records, want 1000", len(entries))
 	}
 }

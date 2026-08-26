@@ -686,10 +686,23 @@ func replaceSegmentHeader(path string, base int64) error {
 // which this build refuses on the next start — so the marker is what turns the silent
 // case into a loud one.
 func openFreshSegment(w *Writer, base int64) (*Writer, error) {
-	if _, err := os.Lstat(w.stem); os.IsNotExist(err) {
+	// Three answers, not two. "It exists" skips the marker and "it does not" writes
+	// one, but a stat that FAILED says neither, and treating it as "exists" is what
+	// skipped the marker on the one shape the marker is for. healMissingStem takes the
+	// opposite reading of the same uncertainty and is right to: it is a repair, and a
+	// repair that writes over a stem it cannot read turns a diagnosis into damage.
+	// This is not a repair. It is about to create a segment in that same directory, so
+	// an unreadable stem is a reason to stop, with a message naming what could not be
+	// decided rather than the ENOENT-shaped failure materialiseSegment would give.
+	switch _, err := os.Lstat(w.stem); {
+	case err == nil:
+		// A file is at the stem. Nothing to mark.
+	case os.IsNotExist(err):
 		if err := writeMarker(w.stem); err != nil {
 			return nil, err
 		}
+	default:
+		return nil, fmt.Errorf("wal: cannot tell whether %s exists, so the downgrade marker cannot be decided: %w", w.stem, err)
 	}
 	f, err := w.materialiseSegment(base)
 	if err != nil {
@@ -857,11 +870,27 @@ func (w *Writer) append(e Entry) (int64, error) {
 		binary.BigEndian.PutUint32(hdr[4:8], crc32.Checksum(b, crcTable))
 		n = 8
 	}
+	// A buffered write only fails when the flush inside it failed, which means bytes
+	// went at the file and did not land. That is the state w.failed's own comment
+	// describes — a partially completed flush leaves the buffer in an indeterminate
+	// relationship to the file — so it latches here for the reason it latches for a
+	// failed Sync and a failed rotation, and for one more: the header and the payload
+	// are two writes, so a failure between them leaves a frame declaring a length no
+	// payload follows. Appending behind that writes the next record into the middle of
+	// a torn one, and the reader cannot tell the two apart.
+	//
+	// The sequence rolls back for Rule 5's reason: a sequence handed out is a sequence
+	// that exists, and this one does not. Nothing else consumed it — onAppend fires
+	// below, not above.
 	if _, err := w.w.Write(hdr[:n]); err != nil {
-		return 0, err
+		w.seq--
+		w.failed = fmt.Errorf("wal: %s is no longer being journalled and this writer will not be used again: %w", w.stem, err)
+		return 0, w.failed
 	}
 	if _, err := w.w.Write(b); err != nil {
-		return 0, err
+		w.seq--
+		w.failed = fmt.Errorf("wal: %s is no longer being journalled and this writer will not be used again: %w", w.stem, err)
+		return 0, w.failed
 	}
 	w.written += int64(n) + int64(len(b))
 	w.segRecords++
