@@ -317,3 +317,48 @@ func TestConcurrentUseIsSafe(t *testing.T) {
 		t.Error("nothing was counted")
 	}
 }
+
+// TestQuantileIsNearestRankNotFlooredRank. The rank for a quantile over N samples is
+// ceil(q*N); truncating it reports the rank BELOW the one asked for. At a thousand
+// samples that is invisible, and at three it is the whole answer — which is the
+// number of fsyncs a quiet venue's scrape window actually holds, and
+// obgw_wal_sync_latency_ns is what an operator pages on.
+func TestQuantileIsNearestRankNotFlooredRank(t *testing.T) {
+	// Three samples, each in a bucket of its own, so a rank error cannot hide inside
+	// a bucket's width.
+	h := NewHistogram()
+	h.Observe(100 * time.Nanosecond)
+	h.Observe(10 * time.Microsecond)
+	h.Observe(1 * time.Millisecond)
+
+	// p99 of three is rank 3: the slowest. Floored, it was rank 2 — the middle one,
+	// and the one observation p99 exists to surface was unreportable.
+	if q := h.Quantile(0.99); q < int64(time.Millisecond) {
+		t.Errorf("p99 of three = %d, want the slowest at >= %d", q, int64(time.Millisecond))
+	}
+	if q := h.Quantile(1.0); q < int64(time.Millisecond) {
+		t.Errorf("p100 of three = %d, want the slowest", q)
+	}
+	// The median of three is rank 2, and ceil and floor agree there — a control, so a
+	// fix that simply moved everything up by one would fail here.
+	if q := h.Quantile(0.5); q < int64(10*time.Microsecond) || q >= int64(time.Millisecond) {
+		t.Errorf("p50 of three = %d, want the middle sample's bucket", q)
+	}
+
+	// One sample, and it was slow. q*total < 1 floored to a target of zero, which the
+	// first bucket examined satisfies whether or not anything is in it — so a single
+	// slow observation reported as the smallest bound in the table.
+	one := NewHistogram()
+	one.Observe(50 * time.Millisecond)
+	if q := one.Quantile(0.5); q < int64(time.Millisecond) {
+		t.Errorf("p50 of a single 50ms observation = %d, want it reflected", q)
+	}
+	if q := one.Quantile(0.99); q < int64(time.Millisecond) {
+		t.Errorf("p99 of a single 50ms observation = %d, want it reflected", q)
+	}
+
+	// An empty histogram still answers zero rather than the smallest bound.
+	if q := NewHistogram().Quantile(0.99); q != 0 {
+		t.Errorf("p99 of nothing = %d, want 0", q)
+	}
+}

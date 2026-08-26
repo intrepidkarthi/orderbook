@@ -76,6 +76,18 @@ versions may include breaking changes).
 
 ### Fixed
 
+- **`Histogram.Quantile` reports the rank it was asked for.** The nearest-rank index
+  was `int64(q * total)`, a truncation where the definition is a ceiling, so every
+  quantile came back one rank low. At a thousand samples that is invisible; at three
+  it is the whole answer — p99 of three floors to rank 2 and returns the *middle*
+  observation, so the slowest of the three, the only one a p99 exists to surface, was
+  unreportable. Worse below that: `q*total < 1` floors to a target of **zero**, which
+  the first bucket examined satisfies whether or not anything is in it, so a lone slow
+  observation read as the smallest bound in the table. The read path is the one that
+  makes it matter — `obgw_wal_sync_latency_ns` is what an operator pages on for fsync
+  tail latency, and a scrape window holding a handful of fsyncs is a quiet venue's
+  normal state rather than an edge case.
+
 - **A WAL append whose write did not land now latches the writer and rolls its
   sequence back.** `append` builds the frame header and the payload as two buffered
   writes and returned either error bare. A buffered write only fails when the flush

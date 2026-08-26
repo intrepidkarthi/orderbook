@@ -28,6 +28,7 @@ package observability
 import (
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -672,7 +673,26 @@ func (h *Histogram) Quantile(q float64) int64 {
 	if total == 0 {
 		return 0
 	}
-	target := int64(q * float64(total))
+	// Nearest rank, so the index is the CEILING of q*total and not its truncation.
+	// Flooring it reported the rank below the one asked for, which is invisible at a
+	// thousand samples and is the whole answer at three: p99 of three observations
+	// floors to 2 and returns the middle one, so the slowest of the three — the only
+	// one a p99 exists to surface — is the one it cannot report. It also floors to
+	// ZERO whenever q*total < 1, and a target of zero is satisfied by the first
+	// bucket examined whether or not anything is in it, which turns "one sample, and
+	// it was slow" into the smallest bound in the table.
+	//
+	// This matters where the histogram is read rather than in the abstract: the
+	// obgw_wal_sync_latency_ns quantiles below are what an operator pages on, and a
+	// window holding a handful of fsyncs is the normal state of a quiet venue, not an
+	// edge case.
+	target := int64(math.Ceil(q * float64(total)))
+	if target < 1 {
+		target = 1
+	}
+	if target > total {
+		target = total
+	}
 	var seen int64
 	for i := range h.buckets {
 		seen += h.buckets[i].Load()
