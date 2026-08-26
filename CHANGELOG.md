@@ -9,6 +9,15 @@ versions may include breaking changes).
 
 ### Changed
 
+- **Self-trade prevention: a `DECREMENT` that takes a maker to zero now sets its status
+  to `CANCELLED`.** The branch removed the order from the book and published a
+  `CANCELED` for it without touching `Order.Status`, so the event and the field it
+  describes disagreed: a consumer reconciling the two — an invariant checker, a
+  reconciliation job, a client SDK holding the order — kept a `PARTIALLY_FILLED` order
+  the venue had already dropped. The sibling `CANCEL_OLDEST` and `CANCEL_BOTH` branches
+  always set it; this one did not. **Wire-visible on any venue running `DECREMENT`**,
+  and it moves four lines of the behaviour fingerprint on its own
+  ([`SEMANTICS-VERSION.md`](docs/SEMANTICS-VERSION.md) row 4).
 - **CI builds and race-tests on two Go versions rather than one.** Every workflow
   pinned Go 1.23 while 1.27 was the current release, so the project was testing
   neither what the README promises nor what most people now build with. `bench`,
@@ -66,6 +75,25 @@ versions may include breaking changes).
   it refused.
 
 ### Fixed
+
+- **Self-trade prevention no longer strands an iceberg's hidden reserve.** All three STP
+  removal branches took an iceberg's *visible slice* off the book and left the hidden
+  remainder in the engine's tracking map, where nothing would ever read it again: the
+  `CANCELED` reported a display chunk, the rest of the client's order stopped trading
+  without being cancelled, reported or refilled, and the map entry outlived the order
+  for the life of the process.
+
+  An iceberg is **one order**, so cancelling its visible slice cancels the order and
+  the reserve goes with it. [`PINNED-DEFECTS.md`](docs/PINNED-DEFECTS.md) §9 already
+  settled that an STP cancellation is not restorable — it is what the taker's own mode
+  asked for — which under §2's rule leaves exactly one remedy, and it is the one taken:
+  the reserve is folded into the order before the event, so the `CANCELED` reports the
+  size the client actually loses.
+
+  `DECREMENT` is the other half. It is defined over the two orders' overlap, so stopping
+  at the displayed slice took a display chunk off the taker and left the reserve resting
+  behind an order the book no longer held — neither of the two sizes the mode is defined
+  over. It now reloads and keeps going into the reserve until one side is out.
 
 - **The published test count and fuzz-target count in
   [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md).** The count read "over 600"

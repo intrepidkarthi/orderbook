@@ -144,6 +144,27 @@ func Corpus() []Scenario {
 			},
 			Script: notionalGuarded(),
 		},
+		{
+			// Self-trade prevention MEETING an iceberg, in a scenario of its own for
+			// the reason rows 2 and 3 of docs/SEMANTICS-VERSION.md §1.2 record twice
+			// already: the corpus reached icebergs and it reached STP, and it never
+			// crossed the two. `conditional` has the icebergs and takes CANCEL_NEWEST
+			// from the default; `capped-decrement-shard3` has DECREMENT and its tape
+			// draws no icebergs. So every STP removal path could strand a reserve, or
+			// publish a CANCELED for an order still reading PARTIALLY_FILLED, and
+			// leave this file byte-identical — which is the one state Rule 22 exists
+			// to make impossible.
+			//
+			// Appended last so the cost is only its own lines: no existing scenario's
+			// ids, event ids or digests move.
+			Name: "stp-iceberg",
+			Config: func() matching.Config {
+				c := base()
+				c.SelfTradePrevention = matching.STPCancelOldest
+				return c
+			},
+			Script: stpIceberg(),
+		},
 	}
 }
 
@@ -562,5 +583,77 @@ func notionalGuarded() []Cmd {
 	s.add(Cmd{Kind: Submit, User: "n4", Price: 100, Qty: 24, Note: "clears the plain nine, then five slices of 300 notional refill below the floor"})
 
 	s.add(Cmd{Kind: CancelAll, User: "n2"})
+	return s.cmds
+}
+
+// stpIceberg is the self-trade-prevention-meets-iceberg script. Every command in it
+// is decided by one of the three STP removal branches acting on an order whose size
+// is mostly hidden, which is the intersection no other scenario reaches.
+//
+// The property under test is not the removal — that was already right — but what the
+// removal SAYS. An iceberg is one order: cancelling its visible slice cancels the
+// order and the reserve goes with it, so the CANCELED has to report the size the
+// client loses, and a DECREMENT defined over the two orders' overlap has to keep
+// going into the reserve rather than stopping at the display chunk.
+func stpIceberg() []Cmd {
+	var s scriptBuilder
+
+	// THE CONTROL, first, and it must never move: a stranger taking an iceberg's
+	// slices is the normal refill path, which no STP branch touches. Sixty shown ten,
+	// worked down by twenty-five from another account — two full slices and half of a
+	// third, each refilling as it goes.
+	s.add(Cmd{Kind: Iceberg, User: "w0", Sell: true, Price: 100, Qty: 60, DisplayQty: 10,
+		Note: "the control: a stranger's fills refill it, and no STP branch is involved"})
+	s.add(Cmd{Kind: Submit, User: "x0", Price: 100, Qty: 25, Note: "two slices and half of a third, from another account"})
+	s.add(Cmd{Kind: CancelAll, User: "w0"})
+
+	// CANCEL_OLDEST on an iceberg. The venue default here, so the taker names no
+	// mode. The CANCELED this publishes carried the DISPLAYED ten before the fix and
+	// carries the client's whole sixty after it, because the fifty in reserve is
+	// destroyed by this command and cannot be restored — PINNED-DEFECTS.md §9 settled
+	// that an STP cancellation is what the taker's own mode asked for. §2's rule then
+	// leaves exactly one remedy: announce it.
+	s.add(Cmd{Kind: Iceberg, User: "w1", Sell: true, Price: 100, Qty: 60, DisplayQty: 10,
+		Note: "ten shown, fifty hidden"})
+	s.add(Cmd{Kind: Submit, User: "w1", Price: 100, Qty: 5,
+		Note: "CANCEL_OLDEST takes the whole order, reserve included"})
+	s.add(Cmd{Kind: CancelAll, User: "w1"})
+
+	// DECREMENT that does NOT exhaust the visible slice: the iceberg shrinks in place
+	// and keeps its queue position, and the reserve is untouched. The line that says
+	// the fix did not overreach into the shrink path.
+	s.add(Cmd{Kind: Iceberg, User: "w2", Sell: true, Price: 100, Qty: 60, DisplayQty: 10,
+		Note: "ten shown, fifty hidden"})
+	s.add(Cmd{Kind: Submit, User: "w2", Price: 100, Qty: 5, STP: string(matching.STPDecrement),
+		Note: "overlap 5: the slice shrinks to five in place, reserve untouched"})
+
+	// DECREMENT THROUGH the reserve, which is the line the whole scenario is for.
+	// Thirty-two against fifty-five still working: it takes the five that are shown,
+	// reloads, takes ten, reloads, takes ten, reloads, and stops seven into the
+	// fourth slice. Before the fix it took the five, cancelled the order, stranded
+	// fifty in a map nothing would read again, and rested twenty-seven of the taker
+	// across a book that no longer had anything to meet it.
+	s.add(Cmd{Kind: Submit, User: "w2", Price: 100, Qty: 32, STP: string(matching.STPDecrement),
+		Note: "the decrement continues into the reserve until the taker is out"})
+
+	// The same mode, larger than everything left: the iceberg is exhausted, cancelled
+	// and dropped, and the taker rests with the remainder.
+	s.add(Cmd{Kind: Submit, User: "w2", Price: 100, Qty: 40, STP: string(matching.STPDecrement),
+		Note: "twenty-three left, so the order goes and seventeen of the taker rests"})
+	s.add(Cmd{Kind: CancelAll, User: "w2"})
+
+	// CANCEL_BOTH is a separate copy of the same removal and gets the same line.
+	s.add(Cmd{Kind: Iceberg, User: "w3", Sell: true, Price: 100, Qty: 30, DisplayQty: 10,
+		Note: "ten shown, twenty hidden"})
+	s.add(Cmd{Kind: Submit, User: "w3", Price: 100, Qty: 5, STP: string(matching.STPCancelBoth),
+		Note: "both go, and the maker's CANCELED reports all thirty"})
+
+	// A PLAIN maker taken to zero by DECREMENT, so the status half of the fix is
+	// pinned here too and not only in capped-decrement-shard3's tape.
+	s.add(Cmd{Kind: Submit, User: "w4", Sell: true, Price: 100, Qty: 3})
+	s.add(Cmd{Kind: Submit, User: "w4", Price: 100, Qty: 5, STP: string(matching.STPDecrement),
+		Note: "maker to zero: CANCELED, and the order reads CANCELLED to match"})
+	s.add(Cmd{Kind: CancelAll, User: "w4"})
+
 	return s.cmds
 }

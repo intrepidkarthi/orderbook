@@ -1532,23 +1532,20 @@ func (e *Engine) match(taker *types.Order, dst []types.Trade) ([]types.Trade, ma
 				taker.Status = types.OrderStatusCancelled
 				return e.recordLast(dst, start), makerOrders
 			case STPCancelOldest:
-				_ = maker.Cancel()
-				_, _ = e.book.Remove(maker.ID)
-				e.emitCancel(maker)
+				e.stpRemoveMaker(maker)
 				continue
 			case STPCancelBoth:
 				taker.Status = types.OrderStatusCancelled
-				_ = maker.Cancel()
-				_, _ = e.book.Remove(maker.ID)
-				e.emitCancel(maker)
+				e.stpRemoveMaker(maker)
 				return e.recordLast(dst, start), makerOrders
 			case STPDecrement:
 				// Reduce both by the overlap with no trade; the smaller side fully
 				// cancels, the larger shrinks; then continue matching the taker.
 				e.decrement(taker, maker)
 				if maker.RemainingQty == 0 {
-					_, _ = e.book.Remove(maker.ID)
-					e.emitCancel(maker)
+					if !e.stpRefillIceberg(maker) {
+						e.stpRemoveMaker(maker)
+					}
 				} else {
 					// Shrunk in place, keeping queue position: there is no trade to
 					// infer the new size from, so without this a consumer's
@@ -1623,6 +1620,67 @@ func (e *Engine) takerSTP(taker *types.Order) SelfTradePrevention {
 		return SelfTradePrevention(taker.STPMode)
 	}
 	return e.config.SelfTradePrevention
+}
+
+// stpRemoveMaker takes a maker off the book because self-trade prevention said so,
+// and makes the removal complete rather than partial.
+//
+// Two things the three STP branches used to get wrong between them. The status is set
+// here, once, so a DECREMENT that lands on zero cannot publish a Canceled for an order
+// still reading PartiallyFilled — a consumer that reconciles the two disagrees with the
+// venue about an order the venue has already dropped.
+//
+// The reserve is the other one. An iceberg is ONE order, so cancelling its visible
+// slice cancels the order, and the hidden remainder goes with it — but going with it
+// silently is what leaves a client working size the book no longer holds. It is folded
+// into the order's own remaining quantity first, so the Canceled reports the size the
+// client actually loses. PINNED-DEFECTS.md §2: revert what the venue can restore,
+// announce what it cannot, and §9 already settled that an STP cancellation is not
+// restorable — it is what the taker's own mode asked for. So it is announced.
+//
+// The fold happens AFTER the book removal on purpose: the level aggregate is adjusted
+// by what the node contributed, and the reserve never contributed to it.
+func (e *Engine) stpRemoveMaker(maker *types.Order) {
+	_, _ = e.book.Remove(maker.ID)
+	if ib, ok := e.icebergOrders[maker.ID]; ok {
+		if ib.Hidden > 0 {
+			maker.Quantity += ib.Hidden
+			maker.RemainingQty += ib.Hidden
+			ib.Hidden = 0
+		}
+		delete(e.icebergOrders, maker.ID)
+	}
+	_ = maker.Cancel()
+	e.emitCancel(maker)
+}
+
+// stpRefillIceberg reloads the next slice of an iceberg whose visible slice a
+// DECREMENT just took to zero, and reports whether there was one to reload.
+//
+// DECREMENT is defined over the two orders' overlap, and an iceberg is one order:
+// stopping at the visible slice takes a display chunk off the taker and leaves the
+// reserve resting behind an order the book no longer holds, which is neither of the
+// sizes the mode is defined over. Refilling puts the order back at its price with what
+// it has left, the walk comes round, and the decrement continues into the reserve
+// until one side is out.
+//
+// It terminates for the same reason the non-iceberg case does: every pass takes at
+// least one lot off the taker, and the reserve is finite.
+//
+// No save is at risk here. A walk never both trades with and self-trade-prevents the
+// same maker (PINNED-DEFECTS.md §3.6, isSelfMatch is constant for a (taker, maker)
+// pair), so a maker reaching this function is one no print in this walk touched, and
+// a failing fill-or-kill has nothing of it to restore.
+func (e *Engine) stpRefillIceberg(maker *types.Order) bool {
+	ib, ok := e.icebergOrders[maker.ID]
+	if !ok || ib.Hidden <= 0 {
+		return false
+	}
+	_, _ = e.book.Remove(maker.ID)
+	ib.Refill()
+	_ = e.book.Add(ib.Order)
+	e.emitAdd(ib.Order)
+	return true
 }
 
 // decrement applies STPDecrement: reduce both orders by their overlap (quantity and
@@ -1923,14 +1981,10 @@ func (e *Engine) matchProRata(taker *types.Order, dst []types.Trade) ([]types.Tr
 				taker.Status = types.OrderStatusCancelled
 				return e.recordLast(dst, start), makerOrders
 			case STPCancelOldest:
-				_ = maker.Cancel()
-				_, _ = e.book.Remove(maker.ID)
-				e.emitCancel(maker)
+				e.stpRemoveMaker(maker)
 			case STPCancelBoth:
 				taker.Status = types.OrderStatusCancelled
-				_ = maker.Cancel()
-				_, _ = e.book.Remove(maker.ID)
-				e.emitCancel(maker)
+				e.stpRemoveMaker(maker)
 				return e.recordLast(dst, start), makerOrders
 			case STPDecrement:
 				// Both sides lose their overlap with no trade to explain it, so the
@@ -1939,8 +1993,9 @@ func (e *Engine) matchProRata(taker *types.Order, dst []types.Trade) ([]types.Tr
 				// exhausted and the walk is over.
 				e.decrement(taker, maker)
 				if maker.RemainingQty == 0 {
-					_, _ = e.book.Remove(maker.ID)
-					e.emitCancel(maker)
+					if !e.stpRefillIceberg(maker) {
+						e.stpRemoveMaker(maker)
+					}
 				} else {
 					e.emitReplaced(maker)
 				}

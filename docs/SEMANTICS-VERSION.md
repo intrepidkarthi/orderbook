@@ -112,7 +112,33 @@ exists to leave behind.
 | **0** | every build up to and including v0.25.0 | **Unknown.** Not "1", not "compatible", not anything. See §4 |
 | **1** | v0.25.0 + the differential-findings slice | The first stamped semantics. Includes the three changes in §1 — [`CHANGELOG.md`](../CHANGELOG.md) *Unreleased / Fixed*: "A rejected fill-or-kill no longer moves `LastTradePrice`"; *Unreleased / Changed*: "A `REJECTED` command's event batch may now carry further events" and "Under `ProRata`, a taker that meets its own resting liquidity is no longer skipped" — so it is *not* the semantics of the last released build |
 | **2** | v0.25.0 + the pinned-defects slice | The two fixes in [`PINNED-DEFECTS.md`](PINNED-DEFECTS.md) — [`CHANGELOG.md`](../CHANGELOG.md) *Unreleased / Fixed*: "A failing fill-or-kill no longer corrupts an iceberg it consumed"; *Unreleased / Changed*: "A cascade-fired order the venue refuses now publishes a `CANCELED`". Only the first is replay-visible; the second ships under the same number because the two are one commit and the golden moves for both |
-| **3** | this release onward | The admission fix in [`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md) — [`CHANGELOG.md`](../CHANGELOG.md) *Unreleased / Changed*: "The per-order size and notional caps measure the quantity the client submitted" and "Admission no longer runs again on an iceberg refill". `MinOrderQty`, `MaxOrderQty`, `MinOrderNotional`, `MaxOrderNotional` and the int64 notional overflow guard measured an iceberg's **displayed slice**, so a venue capped at 5 lots accepted 9 shown 3 and refused 90 shown 3; they now measure the client's total. A venue that sets none of the five, or accepts no icebergs, sees no change. Shipping under the same number, because they are one commit and the golden moves for all of them: an iceberg the venue REFUSES is no longer left in the engine's iceberg registry, where it made every later checkpoint unloadable ([`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md) §13.4) — *Unreleased / Fixed*: "A refused iceberg no longer makes the venue's own snapshot unloadable" |
+| **3** | v0.26.0 | The admission fix in [`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md) — [`CHANGELOG.md`](../CHANGELOG.md) *Unreleased / Changed*: "The per-order size and notional caps measure the quantity the client submitted" and "Admission no longer runs again on an iceberg refill". `MinOrderQty`, `MaxOrderQty`, `MinOrderNotional`, `MaxOrderNotional` and the int64 notional overflow guard measured an iceberg's **displayed slice**, so a venue capped at 5 lots accepted 9 shown 3 and refused 90 shown 3; they now measure the client's total. A venue that sets none of the five, or accepts no icebergs, sees no change. Shipping under the same number, because they are one commit and the golden moves for all of them: an iceberg the venue REFUSES is no longer left in the engine's iceberg registry, where it made every later checkpoint unloadable ([`ICEBERG-ADMISSION.md`](ICEBERG-ADMISSION.md) §13.4) — *Unreleased / Fixed*: "A refused iceberg no longer makes the venue's own snapshot unloadable" |
+| **4** | this release onward | The self-trade-prevention removal paths in [`PINNED-DEFECTS.md`](PINNED-DEFECTS.md) §2 — [`CHANGELOG.md`](../CHANGELOG.md) *Unreleased / Fixed*: "Self-trade prevention no longer strands an iceberg's hidden reserve" and *Unreleased / Changed*: "A DECREMENT that takes a maker to zero now sets its status to `CANCELLED`". Two removals that were partial. A `DECREMENT` landing on zero removed the maker and published a `CANCELED` for it without touching `Order.Status`, so a consumer reconciling the two held a `PARTIALLY_FILLED` order the venue had already dropped — that half is wire-visible on every venue running `DECREMENT` and moves four lines of `capped-decrement-shard3` on its own. The other half is the reserve: all three removal branches took an iceberg's visible slice off the book and left the hidden remainder in a tracking map nothing would read again, so the `CANCELED` reported a display chunk and the rest of the client's order simply stopped existing. §9 settled that an STP cancellation is not restorable — it is what the taker's own mode asked for — which under §2 leaves announcing it as the only remedy, so the `CANCELED` now carries the whole remaining order and `DECREMENT` works through the reserve rather than stopping at the slice. A venue that runs `CANCEL_NEWEST` and accepts no icebergs sees no change |
+
+**Row 4 is the same rule a fifth time, and this time the gap was between two features
+rather than between a control and a scenario.** The corpus reached icebergs
+(`conditional`) and it reached self-trade prevention (`capped-decrement-shard3`), and it
+never crossed them: `conditional` takes `CANCEL_NEWEST` from the default, which cancels
+the *taker* and never touches a maker, and the tape behind `capped-decrement-shard3`
+draws no icebergs. So every one of the three STP removal branches could strand a
+client's hidden reserve and leave this file byte-identical. The status half of the fix
+*was* visible — four lines of `capped-decrement-shard3` — which is the trap: a bump
+justified by the half that shows, shipping the half that does not. `stp-iceberg` closes
+it, appended last so it moves no existing line, and its control command is the one that
+must **not** move: a stranger taking an iceberg's slices is the ordinary refill path,
+which no STP branch touches.
+
+**Measured, by reverting the fix under the extended corpus: 22 lines.** Four in
+`capped-decrement-shard3`, all of them the status half — `CANCELED#…/PARTIALLY_FILLED`
+and `CANCELED#…/NEW` becoming `CANCELED#…/CANCELLED` — and eighteen in `stp-iceberg`.
+One of the eighteen is worth its own sentence. `stp-iceberg/0004` moves in its **digest
+alone**, with its rendered text byte-identical on both sides: the `CANCEL_OLDEST`
+removal publishes the same event kinds, leaves the same book and prints the same
+aggregates, and the only thing that differs is the fifty lots of reserve the fix folds
+into the cancelled order and drops from the iceberg registry. The renderer does not
+carry an event's remaining quantity, so that line *cannot* show it. The digest can, and
+does — which is the answer to "would a fingerprint that renders less have missed this",
+and the answer is no.
 
 **Row 2 nearly did not exist, and the reason is worth the line.** `internal/semcheck`
 was **green** on both of those fixes with the corpus as it stood: the tier-2 script

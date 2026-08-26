@@ -1,4 +1,4 @@
-semantics 3
+semantics 4
 # The behaviour fingerprint. See docs/SEMANTICS-VERSION.md §5.
 # scenario/pos kind command | verdict | T[trades] E[events] | state last mark bid ask counters | digest
 
@@ -662,7 +662,7 @@ capped-decrement-shard3/0051 RESUME                               | OK          
 capped-decrement-shard3/0052 SUBMIT      u0 S L 104x8 GTC+DECREMENT | NEW                          | T[] E[ACCEPTED#844424930132004/NEW/0] | OPEN last=100 mark=0 bid=- ask=100:2 n=4 oid=36 tid=2 eid=48 | e4cde5a873aac6f2
 capped-decrement-shard3/0053 RESUME                               | OK                           | T[] E[] | OPEN last=100 mark=0 bid=- ask=100:2 n=4 oid=36 tid=2 eid=48 | e4cde5a873aac6f2
 capped-decrement-shard3/0054 SUBMIT      u2 S L 103x3 GTC+ALLOW+g2 | NEW                          | T[] E[ACCEPTED#844424930132005/NEW/0] | OPEN last=100 mark=0 bid=- ask=100:2 n=5 oid=37 tid=2 eid=49 | c80a2e0efb3285af
-capped-decrement-shard3/0055 SUBMIT      u2 B L 102x7 FOK+g2      | REJECTED:FOK_CANNOT_FILL     | T[] E[REJECTED#844424930132006/FOK_CANNOT_FILL/REJECTED/0 CANCELED#844424930131986/PARTIALLY_FILLED/7] | OPEN last=100 mark=0 bid=- ask=103:11 n=4 oid=38 tid=2 eid=51 | 8e5810b0c8006f13
+capped-decrement-shard3/0055 SUBMIT      u2 B L 102x7 FOK+g2      | REJECTED:FOK_CANNOT_FILL     | T[] E[REJECTED#844424930132006/FOK_CANNOT_FILL/REJECTED/0 CANCELED#844424930131986/CANCELLED/7] | OPEN last=100 mark=0 bid=- ask=103:11 n=4 oid=38 tid=2 eid=51 | 8e5810b0c8006f13
 capped-decrement-shard3/0056 CANCEL_ALL  u2                       | CANCELLED n=1                | T[] E[CANCELED#844424930132005/CANCELLED/0] | OPEN last=100 mark=0 bid=- ask=103:8 n=3 oid=38 tid=2 eid=52 | 8704d73ca8f027d8
 capped-decrement-shard3/0057 SUBMIT      u0 S L 102x6 GTC         | NEW                          | T[] E[ACCEPTED#844424930132007/NEW/0] | OPEN last=100 mark=0 bid=- ask=102:6 n=4 oid=39 tid=2 eid=53 | b9524eaf440a5c5a
 capped-decrement-shard3/0058 REPLACE     u1 B L 103x5 GTC+g1 <-30 | REJECTED:ORDER_NOT_FOUND     | T[] E[] | OPEN last=100 mark=0 bid=- ask=102:6 n=4 oid=39 tid=2 eid=53 | b9524eaf440a5c5a
@@ -675,7 +675,7 @@ capped-decrement-shard3/0064 SUBMIT      u2 S L 98x4 GTC          | PARTIALLY_FI
 capped-decrement-shard3/0065 SUBMIT      u2 B L 101x8 GTC+CANCEL_NEWEST | CANCELLED                    | T[] E[ACCEPTED#844424930132012/CANCELLED/0 CANCELED#844424930132012/CANCELLED/0] | OPEN last=98 mark=0 bid=- ask=98:3 n=6 oid=44 tid=3 eid=60 | c1fdc3e96b423c0b
 capped-decrement-shard3/0066 SUBMIT      u1 B L 100x1 GTC         | FILLED                       | T[844424930131972:98x1 b844424930132013 s844424930132011 m844424930132011 t844424930132013 B seq4] E[ACCEPTED#844424930132013/FILLED/1 TRADE#844424930132013/98x1] | OPEN last=98 mark=0 bid=- ask=98:2 n=6 oid=45 tid=4 eid=62 | ed33f94ded99538d
 capped-decrement-shard3/0067 REDUCE      u1 <-58 to 3             | REJECTED:ORDER_NOT_FOUND     | T[] E[] | OPEN last=98 mark=0 bid=- ask=98:2 n=6 oid=45 tid=4 eid=62 | ed33f94ded99538d
-capped-decrement-shard3/0068 SUBMIT      u0 B L 102x8 IOC         | CANCELLED                    | T[844424930131973:98x2 b844424930132014 s844424930132011 m844424930132011 t844424930132014 B seq5] E[ACCEPTED#844424930132014/CANCELLED/2 TRADE#844424930132014/98x2 CANCELED#844424930132007/NEW/0 CANCELED#844424930132014/CANCELLED/2] | OPEN last=98 mark=0 bid=- ask=103:13 n=4 oid=46 tid=5 eid=66 | 9e9257236eacbe7a
+capped-decrement-shard3/0068 SUBMIT      u0 B L 102x8 IOC         | CANCELLED                    | T[844424930131973:98x2 b844424930132014 s844424930132011 m844424930132011 t844424930132014 B seq5] E[ACCEPTED#844424930132014/CANCELLED/2 TRADE#844424930132014/98x2 CANCELED#844424930132007/CANCELLED/0 CANCELED#844424930132014/CANCELLED/2] | OPEN last=98 mark=0 bid=- ask=103:13 n=4 oid=46 tid=5 eid=66 | 9e9257236eacbe7a
 capped-decrement-shard3/0069 SUBMIT      u1 S M 101x3 GTC+CANCEL_NEWEST+g2 | REJECTED:MARKET_NO_LIQUIDITY | T[] E[ACCEPTED#844424930132015/CANCELLED/0 CANCELED#844424930132015/CANCELLED/0] | OPEN last=98 mark=0 bid=- ask=103:13 n=4 oid=47 tid=5 eid=68 | b1b2180850e98bfd
 capped-decrement-shard3/0070 SUBMIT      u0 S L 101x9 GTC+CANCEL_NEWEST | NEW                          | T[] E[ACCEPTED#844424930132016/NEW/0] | OPEN last=98 mark=0 bid=- ask=101:9 n=5 oid=48 tid=5 eid=69 | 971bafc3d4c93146
 capped-decrement-shard3/0071 SUBMIT      u0 S L 99x5 IOC          | CANCELLED                    | T[] E[ACCEPTED#844424930132017/CANCELLED/0 CANCELED#844424930132017/CANCELLED/0] | OPEN last=98 mark=0 bid=- ask=101:9 n=5 oid=49 tid=5 eid=71 | 9fe849bc230d1296
@@ -701,7 +701,7 @@ capped-decrement-shard3/0090 CANCEL      u1 <-72                  | REJECTED:ORD
 capped-decrement-shard3/0091 SUBMIT      u3 S L 101x6 FOK+g2      | REJECTED:FOK_CANNOT_FILL     | T[] E[REJECTED#844424930132028/FOK_CANNOT_FILL/REJECTED/0] | OPEN last=102 mark=0 bid=- ask=98:1 n=8 oid=60 tid=10 eid=87 | 975021ce57d43553
 capped-decrement-shard3/0092 CANCEL_ALL  u0                       | CANCELLED n=3                | T[] E[CANCELED#844424930132027/CANCELLED/0 CANCELED#844424930132020/CANCELLED/1 CANCELED#844424930132004/CANCELLED/0] | OPEN last=102 mark=0 bid=- ask=98:1 n=5 oid=60 tid=10 eid=90 | ed57e82c5db75cdc
 capped-decrement-shard3/0093 SUBMIT      u1 B L 101x4 GTC         | PARTIALLY_FILLED             | T[844424930131979:98x1 b844424930132029 s844424930132026 m844424930132026 t844424930132029 B seq11] E[ACCEPTED#844424930132029/PARTIALLY_FILLED/1 TRADE#844424930132029/98x1] | OPEN last=98 mark=0 bid=101:3 ask=102:9 n=5 oid=61 tid=11 eid=92 | a21ca1f9761be93f
-capped-decrement-shard3/0094 SUBMIT      u1 S L 100x5 IOC         | CANCELLED                    | T[] E[ACCEPTED#844424930132030/CANCELLED/0 CANCELED#844424930132029/PARTIALLY_FILLED/1 CANCELED#844424930132030/CANCELLED/0] | OPEN last=98 mark=0 bid=- ask=102:9 n=4 oid=62 tid=11 eid=95 | be32a43eb68b4231
+capped-decrement-shard3/0094 SUBMIT      u1 S L 100x5 IOC         | CANCELLED                    | T[] E[ACCEPTED#844424930132030/CANCELLED/0 CANCELED#844424930132029/CANCELLED/1 CANCELED#844424930132030/CANCELLED/0] | OPEN last=98 mark=0 bid=- ask=102:9 n=4 oid=62 tid=11 eid=95 | be32a43eb68b4231
 capped-decrement-shard3/0095 CANCEL      u2 <-36                  | REJECTED:ORDER_NOT_FOUND     | T[] E[] | OPEN last=98 mark=0 bid=- ask=102:9 n=4 oid=62 tid=11 eid=95 | be32a43eb68b4231
 capped-decrement-shard3/0096 SUBMIT      u2 S L 101x3 GTC+g1      | NEW                          | T[] E[ACCEPTED#844424930132031/NEW/0] | OPEN last=98 mark=0 bid=- ask=101:3 n=5 oid=63 tid=11 eid=96 | a817091760d6e64e
 capped-decrement-shard3/0097 SUBMIT      u2 B L 101x1 GTC         | CANCELLED                    | T[] E[ACCEPTED#844424930132032/CANCELLED/0 REPLACED#844424930132031/NEW/0 CANCELED#844424930132032/CANCELLED/0] | OPEN last=98 mark=0 bid=- ask=101:2 n=5 oid=64 tid=11 eid=99 | b994ddb933070313
@@ -718,7 +718,7 @@ capped-decrement-shard3/0107 SUBMIT      u3 B M 98x3 FOK+DECREMENT | FILLED     
 capped-decrement-shard3/0108 SUBMIT      u2 B L 103x8 GTC+CANCEL_NEWEST | FILLED                       | T[844424930131983:102x3 b844424930132040 s844424930132024 m844424930132024 t844424930132040 B seq15 844424930131984:102x3 b844424930132040 s844424930132036 m844424930132036 t844424930132040 B seq16 844424930131985:103x2 b844424930132040 s844424930131974 m844424930131974 t844424930132040 B seq17] E[ACCEPTED#844424930132040/FILLED/8 TRADE#844424930132040/102x3 TRADE#844424930132040/102x3 TRADE#844424930132040/103x2] | OPEN last=103 mark=0 bid=- ask=103:14 n=5 oid=72 tid=17 eid=114 | c1619b0349ade7df
 capped-decrement-shard3/0109 SUBMIT      u3 S L 98x2 IOC+g2       | CANCELLED                    | T[] E[ACCEPTED#844424930132041/CANCELLED/0 CANCELED#844424930132041/CANCELLED/0] | OPEN last=103 mark=0 bid=- ask=103:14 n=5 oid=73 tid=17 eid=116 | cef116c19462cbd1
 capped-decrement-shard3/0110 CANCEL      u1 <-94                  | REJECTED:ORDER_NOT_FOUND     | T[] E[] | OPEN last=103 mark=0 bid=- ask=103:14 n=5 oid=73 tid=17 eid=116 | cef116c19462cbd1
-capped-decrement-shard3/0111 SUBMIT      u1 B L 104x7 GTC+DECREMENT+g2 | CANCELLED                    | T[] E[ACCEPTED#844424930132042/CANCELLED/0 CANCELED#844424930131974/PARTIALLY_FILLED/2 REPLACED#844424930132009/NEW/0 CANCELED#844424930132042/CANCELLED/0] | OPEN last=103 mark=0 bid=- ask=103:7 n=4 oid=74 tid=17 eid=120 | df152c1ef2ecdcfc
+capped-decrement-shard3/0111 SUBMIT      u1 B L 104x7 GTC+DECREMENT+g2 | CANCELLED                    | T[] E[ACCEPTED#844424930132042/CANCELLED/0 CANCELED#844424930131974/CANCELLED/2 REPLACED#844424930132009/NEW/0 CANCELED#844424930132042/CANCELLED/0] | OPEN last=103 mark=0 bid=- ask=103:7 n=4 oid=74 tid=17 eid=120 | df152c1ef2ecdcfc
 capped-decrement-shard3/0112 SUBMIT      u3 B L 103x8 GTC+PO+g1   | REJECTED:POST_ONLY_WOULD_CROSS | T[] E[REJECTED#844424930132043/POST_ONLY_WOULD_CROSS/REJECTED/0] | OPEN last=103 mark=0 bid=- ask=103:7 n=4 oid=75 tid=17 eid=121 | 62a5d4cad2c26062
 capped-decrement-shard3/0113 SUBMIT      u1 B L 104x6 GTC+CANCEL_OLDEST | FILLED                       | T[844424930131986:104x6 b844424930132044 s844424930132035 m844424930132035 t844424930132044 B seq18] E[ACCEPTED#844424930132044/FILLED/6 CANCELED#844424930132009/CANCELLED/0 CANCELED#844424930132034/CANCELLED/0 CANCELED#844424930131973/CANCELLED/0 TRADE#844424930132044/104x6] | OPEN last=104 mark=0 bid=- ask=104:3 n=1 oid=76 tid=18 eid=126 | e5db0eca49077527
 capped-decrement-shard3/0114 SUBMIT      u3 B L 99x8 GTC+CANCEL_NEWEST | NEW                          | T[] E[ACCEPTED#844424930132045/NEW/0] | OPEN last=104 mark=0 bid=99:8 ask=104:3 n=2 oid=77 tid=18 eid=127 | a95888d4dca3e169
@@ -1180,20 +1180,38 @@ notional/0007 ICEBERG     n3 S L 100x92233720368547759 GTC disp10 | REJECTED:NOT
 notional/0008 SUBMIT      n4 B L 100x24 GTC        | FILLED                       | T[1:100x9 b9 s1 m1 t9 B seq1 2:100x3 b9 s5 m5 t9 B seq2 3:100x3 b9 s5 m5 t9 B seq3 4:100x3 b9 s5 m5 t9 B seq4 5:100x3 b9 s5 m5 t9 B seq5 6:100x3 b9 s5 m5 t9 B seq6] E[ACCEPTED#9/FILLED/24 TRADE#9/100x9 TRADE#9/100x3 ACCEPTED#5/NEW/0 TRADE#9/100x3 ACCEPTED#5/NEW/0 TRADE#9/100x3 ACCEPTED#5/NEW/0 TRADE#9/100x3 ACCEPTED#5/NEW/0 TRADE#9/100x3 ACCEPTED#5/NEW/0] | OPEN last=100 mark=0 bid=- ask=100:3 n=1 oid=9 tid=6 eid=20 | 3bb1ba2a54efb17e  # clears the plain nine, then five slices of 300 notional refill below the floor
 notional/0009 CANCEL_ALL  n2                       | CANCELLED n=1                | T[] E[CANCELED#5/CANCELLED/0] | OPEN last=100 mark=0 bid=- ask=- n=0 oid=9 tid=6 eid=21 | b6a3017810154c85
 
+== stp-iceberg (fifo, stp=CANCEL_OLDEST, maxOrders=100000, shard=0)
+stp-iceberg/0000 ICEBERG     w0 S L 100x60 GTC disp10 | NEW                          | T[] E[ACCEPTED#1/NEW/0] | OPEN last=0 mark=0 bid=- ask=100:10 n=1 oid=1 tid=0 eid=1 | 1daa0e2f1a96af5f  # the control: a stranger's fills refill it, and no STP branch is involved
+stp-iceberg/0001 SUBMIT      x0 B L 100x25 GTC        | FILLED                       | T[1:100x10 b2 s1 m1 t2 B seq1 2:100x10 b2 s1 m1 t2 B seq2 3:100x5 b2 s1 m1 t2 B seq3] E[ACCEPTED#2/FILLED/25 TRADE#2/100x10 ACCEPTED#1/PARTIALLY_FILLED/5 TRADE#2/100x10 ACCEPTED#1/PARTIALLY_FILLED/5 TRADE#2/100x5] | OPEN last=100 mark=0 bid=- ask=100:5 n=1 oid=2 tid=3 eid=7 | 57c662560f56ed8a  # two slices and half of a third, from another account
+stp-iceberg/0002 CANCEL_ALL  w0                       | CANCELLED n=1                | T[] E[CANCELED#1/CANCELLED/5] | OPEN last=100 mark=0 bid=- ask=- n=0 oid=2 tid=3 eid=8 | d9b5805d1eb84858
+stp-iceberg/0003 ICEBERG     w1 S L 100x60 GTC disp10 | NEW                          | T[] E[ACCEPTED#3/NEW/0] | OPEN last=100 mark=0 bid=- ask=100:10 n=1 oid=3 tid=3 eid=9 | e37bb0537d7d6a7a  # ten shown, fifty hidden
+stp-iceberg/0004 SUBMIT      w1 B L 100x5 GTC         | NEW                          | T[] E[ACCEPTED#4/NEW/0 CANCELED#3/CANCELLED/0] | OPEN last=100 mark=0 bid=100:5 ask=- n=1 oid=4 tid=3 eid=11 | 03233c5ea4b660f2  # CANCEL_OLDEST takes the whole order, reserve included
+stp-iceberg/0005 CANCEL_ALL  w1                       | CANCELLED n=1                | T[] E[CANCELED#4/CANCELLED/0] | OPEN last=100 mark=0 bid=- ask=- n=0 oid=4 tid=3 eid=12 | 0ed35f168765b0d5
+stp-iceberg/0006 ICEBERG     w2 S L 100x60 GTC disp10 | NEW                          | T[] E[ACCEPTED#5/NEW/0] | OPEN last=100 mark=0 bid=- ask=100:10 n=1 oid=5 tid=3 eid=13 | 20e39916515bb538  # ten shown, fifty hidden
+stp-iceberg/0007 SUBMIT      w2 B L 100x5 GTC+DECREMENT | CANCELLED                    | T[] E[ACCEPTED#6/CANCELLED/0 REPLACED#5/NEW/0 CANCELED#6/CANCELLED/0] | OPEN last=100 mark=0 bid=- ask=100:5 n=1 oid=6 tid=3 eid=16 | bfdfc3cf164a5488  # overlap 5: the slice shrinks to five in place, reserve untouched
+stp-iceberg/0008 SUBMIT      w2 B L 100x32 GTC+DECREMENT | CANCELLED                    | T[] E[ACCEPTED#7/CANCELLED/0 ACCEPTED#5/NEW/0 ACCEPTED#5/NEW/0 ACCEPTED#5/NEW/0 REPLACED#5/NEW/0 CANCELED#7/CANCELLED/0] | OPEN last=100 mark=0 bid=- ask=100:3 n=1 oid=7 tid=3 eid=22 | cf0becc628f8bd1d  # the decrement continues into the reserve until the taker is out
+stp-iceberg/0009 SUBMIT      w2 B L 100x40 GTC+DECREMENT | NEW                          | T[] E[ACCEPTED#8/NEW/0 ACCEPTED#5/CANCELLED/0 ACCEPTED#5/CANCELLED/0 CANCELED#5/CANCELLED/0] | OPEN last=100 mark=0 bid=100:17 ask=- n=1 oid=8 tid=3 eid=26 | 5ff665dd352b97ff  # twenty-three left, so the order goes and seventeen of the taker rests
+stp-iceberg/0010 CANCEL_ALL  w2                       | CANCELLED n=1                | T[] E[CANCELED#8/CANCELLED/0] | OPEN last=100 mark=0 bid=- ask=- n=0 oid=8 tid=3 eid=27 | 175803b79f22df26
+stp-iceberg/0011 ICEBERG     w3 S L 100x30 GTC disp10 | NEW                          | T[] E[ACCEPTED#9/NEW/0] | OPEN last=100 mark=0 bid=- ask=100:10 n=1 oid=9 tid=3 eid=28 | 006d4b55d2c9eed3  # ten shown, twenty hidden
+stp-iceberg/0012 SUBMIT      w3 B L 100x5 GTC+CANCEL_BOTH | CANCELLED                    | T[] E[ACCEPTED#10/CANCELLED/0 CANCELED#9/CANCELLED/0 CANCELED#10/CANCELLED/0] | OPEN last=100 mark=0 bid=- ask=- n=0 oid=10 tid=3 eid=31 | c868af62a95117ec  # both go, and the maker's CANCELED reports all thirty
+stp-iceberg/0013 SUBMIT      w4 S L 100x3 GTC         | NEW                          | T[] E[ACCEPTED#11/NEW/0] | OPEN last=100 mark=0 bid=- ask=100:3 n=1 oid=11 tid=3 eid=32 | 1720394b96c177d5
+stp-iceberg/0014 SUBMIT      w4 B L 100x5 GTC+DECREMENT | NEW                          | T[] E[ACCEPTED#12/NEW/0 CANCELED#11/CANCELLED/0] | OPEN last=100 mark=0 bid=100:2 ask=- n=1 oid=12 tid=3 eid=34 | 931f99a9d262a5fc  # maker to zero: CANCELED, and the order reads CANCELLED to match
+stp-iceberg/0015 CANCEL_ALL  w4                       | CANCELLED n=1                | T[] E[CANCELED#12/CANCELLED/0] | OPEN last=100 mark=0 bid=- ask=- n=0 oid=12 tid=3 eid=35 | 3759950d25a48393
+
 == coverage
-commands: BUST=3 CANCEL=128 CANCEL_ALL=28 CANCEL_ONLY=12 EXPIRE_DUE=1 HALT=19 ICEBERG=13 OCO=2 PEGGED=3 REDUCE=70 REPLACE=59 RESUME=34 SET_MARK=2 SET_PHASE=12 STOP=5 SUBMIT=772 TRAILING=1
-events: ACCEPTED=450 REJECTED=418 TRADE=175 CANCELED=138 TRIGGERED=6 REPLACED=10 HALTED=16 RESUMED=24 CANCEL_ONLY=17 BUSTED=1
-verdicts: BUSTED=1 CANCELLED=96 FILLED=88 NEW=223 OK=80 PARTIALLY_FILLED=8 PENDING_TRIGGER=4 REDUCED=7 REJECTED=657
+commands: BUST=3 CANCEL=128 CANCEL_ALL=32 CANCEL_ONLY=12 EXPIRE_DUE=1 HALT=19 ICEBERG=17 OCO=2 PEGGED=3 REDUCE=70 REPLACE=59 RESUME=34 SET_MARK=2 SET_PHASE=12 STOP=5 SUBMIT=780 TRAILING=1
+events: ACCEPTED=469 REJECTED=418 TRADE=178 CANCELED=149 TRIGGERED=6 REPLACED=12 HALTED=16 RESUMED=24 CANCEL_ONLY=17 BUSTED=1
+verdicts: BUSTED=1 CANCELLED=103 FILLED=89 NEW=231 OK=80 PARTIALLY_FILLED=8 PENDING_TRIGGER=4 REDUCED=7 REJECTED=657
 rejections: ALREADY_BUSTED=1 DUPLICATE_CLIENT_ORDER_ID=1 FOK_CANNOT_FILL=41 INVALID_EXPIRY=1 INVALID_QUANTITY=2 MARKET_NO_LIQUIDITY=10 NEW_ORDERS_HALTED=178 NOTIONAL_OVERFLOW=1 ORDER_BELOW_MIN_NOTIONAL=2 ORDER_BELOW_MIN_QTY=2 ORDER_EXCEEDS_MAX_NOTIONAL=3 ORDER_EXCEEDS_MAX_QTY=3 ORDER_NOT_FOUND=225 POST_ONLY_WOULD_CROSS=14 PRICE_OUTSIDE_BAND=1 TOO_MANY_ORDERS=1 TRADING_HALTED=170 UNKNOWN_TRADE=1
-orderTypes: LIMIT=433 MARKET=27
-timeInForce: DAY=1 FOK=23 GTC=390 GTD=1 IOC=45
-stpModes: ALLOW=41 CANCEL_BOTH=44 CANCEL_NEWEST=33 CANCEL_OLDEST=39 DECREMENT=32
-policies: fifo=924 prorata=240
-trades 159
+orderTypes: LIMIT=454 MARKET=27
+timeInForce: DAY=1 FOK=23 GTC=411 GTD=1 IOC=45
+stpModes: ALLOW=41 CANCEL_BOTH=45 CANCEL_NEWEST=33 CANCEL_OLDEST=39 DECREMENT=36
+policies: fifo=940 prorata=240
+trades 162
 auctionTrades 16
 uncrosses 4
 triggers 6
-refills 18
+refills 23
 busts 1
 icebergRestores 2
 cascadeTerminals 1
