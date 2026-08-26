@@ -61,6 +61,13 @@ func (s *Server) serveMarketData() error {
 				return err
 			}
 		}
+		// The same admission gate the order-entry edge takes, against the same
+		// counter: MaxConns is a ceiling on the venue's sockets, and a cap one edge
+		// could be flooded past while the other held the line would not be one.
+		if !s.admit(conn) {
+			_ = conn.Close()
+			continue
+		}
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
@@ -70,7 +77,7 @@ func (s *Server) serveMarketData() error {
 }
 
 func (s *Server) handleSubscriber(conn net.Conn) {
-	s.trackConn(conn)
+	// Admitted by the accept loop, which is what put it in the tracking map.
 	defer func() {
 		s.untrackConn(conn)
 		_ = conn.Close()

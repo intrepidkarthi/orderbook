@@ -9,6 +9,27 @@ versions may include breaking changes).
 
 ### Changed
 
+- **A session may have one `Query` in flight at a time.** `MsgQuery` was the only
+  client command with no admission control on it at all: every other command passes
+  `gate.Allow`, but that gate is order-shaped — it rates an *order* against a per-book
+  token bucket — and a query is not an order, so nothing stood between a client's read
+  loop and an unbounded fan of goroutines, each enqueuing on the same matching-engine
+  command queue that carries real order flow and then waiting on the answer. A second
+  query issued before the first answers asks a question the first is already answering,
+  so the bound is on concurrency rather than on rate; the extra is refused with
+  `ReasonThrottled`. With `-max-conns` this bounds the venue's query goroutines
+  venue-wide and not merely per client, and an honest client that waits for its
+  `QueryEnd` never sees it.
+
+- **`waitForStream` blocks instead of polling.** It re-read an atomic every
+  millisecond until the connection had queued the sequence a reply was about to claim.
+  Correct, and it cost waiters × time rather than costing events — every outstanding
+  waiter was a goroutine waking a thousand times a second, which is backwards for
+  something whose whole job is to wait. It now parks on a channel the emitter closes.
+  The channel is taken *before* the counter is read and the emitter stores *before* it
+  wakes, which is what leaves no window where the sequence advanced and a waiter is
+  parked on something nobody will touch.
+
 - **Self-trade prevention: a `DECREMENT` that takes a maker to zero now sets its status
   to `CANCELLED`.** The branch removed the order from the book and published a
   `CANCELED` for it without touching `Order.Status`, so the event and the field it
@@ -46,6 +67,24 @@ versions may include breaking changes).
   argument across four separate paragraphs.
 
 ### Added
+
+- **`-max-conns`: a concurrent-connection ceiling, enforced at the accept.** The accept
+  loop admitted every socket unconditionally, on both edges. Everything spent between
+  an accept and a login — a goroutine, a `wire.MaxPayload` read buffer, a descriptor,
+  an entry in the tracking map — is spent on a peer that has not proved it is anybody,
+  and the only other bound on an unauthenticated connection was a ten-second login
+  timeout that a client reconnecting on each timeout outruns trivially. Past the cap a
+  connection is accepted and closed at once rather than left in the kernel's backlog —
+  a refusal a client can see beats a venue that looks reachable and never answers — and
+  it is counted (`obgw_connections_refused_total`), so an operator sees the ceiling
+  being reached instead of inferring it from a flat connection count. Default **512**,
+  chosen against the common soft `RLIMIT_NOFILE` rather than against a throughput
+  target; `-max-conns=-1` restores the old unbounded behaviour explicitly.
+
+  Admission happens on the accept goroutine and not inside the handler, which is also
+  where the tracking map is now written. Tracking a connection in the goroutine that
+  serves it leaves a window between the accept and the insert during which a flood is
+  unbounded, and a flood is precisely what finds small windows.
 
 - **`make cover-check`: a coverage floor CI enforces, and deliberately not a coverage
   badge.** There was no coverage figure anywhere, so the only way to know it was to run

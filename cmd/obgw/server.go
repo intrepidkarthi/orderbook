@@ -56,6 +56,23 @@ type Config struct {
 	// sends credentials in the clear, which is a thing to do on a loopback interface
 	// during development and nowhere else.
 	TLS *tls.Config
+	// MaxConns caps how many client sockets the venue will hold open at once,
+	// across the order-entry and market-data edges together. It is admission
+	// control at the ACCEPT, ahead of authentication, because everything after the
+	// accept — a goroutine, a wire.MaxPayload read buffer, a file descriptor, an
+	// entry in the tracking map — is spent on a peer that has not yet proved it is
+	// anybody, and the only other bound on an unauthenticated connection is a
+	// ten-second login timeout that a reconnecting client outruns trivially.
+	//
+	// Past the cap a new connection is accepted and closed immediately rather than
+	// left in the kernel's backlog: a refusal a client can see beats a venue that
+	// looks reachable and never answers, and it is counted
+	// (obgw_connections_refused_total) so the page shows the ceiling being reached
+	// instead of leaving an operator to infer it from a flat connection count.
+	//
+	// Zero takes the default. Negative disables the cap, which is the pre-existing
+	// behaviour and is spelled out rather than reached by accident.
+	MaxConns int
 	// OutboundDepth bounds each connection's send queue. A client that stops
 	// reading is disconnected rather than allowed to back up into the venue.
 	OutboundDepth int
@@ -186,6 +203,9 @@ func (c *Config) applyDefaults() {
 	if c.Symbol == "" {
 		c.Symbol = c.Symbols[0]
 	}
+	if c.MaxConns == 0 {
+		c.MaxConns = defaultMaxConns
+	}
 	if c.OutboundDepth <= 0 {
 		c.OutboundDepth = 1024
 	}
@@ -313,7 +333,20 @@ type Server struct {
 	// sockets, so without this Close waits forever on its own handlers.
 	connMu sync.Mutex
 	conns  map[net.Conn]struct{}
+	// connsRefused counts sockets turned away at the cap. Registered whether or not
+	// it ever moves, for the reason every other refusal series is.
+	connsRefused *observability.Counter
 }
+
+// defaultMaxConns is the concurrent-connection ceiling a venue gets without asking.
+//
+// It is chosen against the file-descriptor limit rather than against a throughput
+// target: a gateway spends one descriptor per connection plus a fixed handful, and
+// the common soft RLIMIT_NOFILE is 1024 on Linux and 256 on macOS. A cap that a
+// default install cannot reach is a cap that never fires, and running out of
+// descriptors is a worse failure than refusing a connection — accept() starts
+// returning EMFILE, which this loop treats as a fatal listener error.
+const defaultMaxConns = 512
 
 // NewServer builds a server and its engine. With WALPath set it recovers from
 // disk first, then serves — which is the whole point of shipping a log.
@@ -739,6 +772,15 @@ func (s *Server) Serve() error {
 				return err
 			}
 		}
+		// Admission happens HERE, on the accept goroutine, and not inside handle.
+		// Tracking a connection in the goroutine that serves it leaves a window
+		// between the accept and the insert during which a flood is unbounded — the
+		// window is small and a flood is precisely the thing that finds small
+		// windows. One connection is admitted or refused before the next accept.
+		if !s.admit(conn) {
+			_ = conn.Close()
+			continue
+		}
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
@@ -1068,10 +1110,21 @@ func (s *Server) checkDiskSpace(b *symbolBook, walPath string) {
 	}
 }
 
-func (s *Server) trackConn(c net.Conn) {
+// admit takes a connection under the concurrent-connection cap, reporting whether
+// there was room. It is the only place a connection enters the tracking map, so the
+// map's size IS the number of admitted connections and the cap cannot be raced past.
+func (s *Server) admit(c net.Conn) bool {
 	s.connMu.Lock()
+	if s.cfg.MaxConns > 0 && len(s.conns) >= s.cfg.MaxConns {
+		s.connMu.Unlock()
+		if s.connsRefused != nil {
+			s.connsRefused.Add(1)
+		}
+		return false
+	}
 	s.conns[c] = struct{}{}
 	s.connMu.Unlock()
+	return true
 }
 
 func (s *Server) untrackConn(c net.Conn) {
@@ -1105,6 +1158,13 @@ type session struct {
 	// connection. Anything that claims "everything up to Seq has reached you" has to
 	// wait on this, not merely on the publisher — see waitForStream.
 	emitted atomic.Uint64
+	// emittedCh is closed and replaced whenever emitted advances, so a waiter blocks
+	// instead of re-reading emitted on a timer. See waitForStream.
+	emittedMu sync.Mutex
+	emittedCh chan struct{}
+	// querying is held for the lifetime of one Query, so a session has at most one
+	// outstanding. See the MsgQuery case in the read loop.
+	querying atomic.Bool
 
 	// entered remembers which instrument each client id was sent for, so a cancel,
 	// reduce or replace naming only a ClOrdID can be routed to the right book.
@@ -1192,7 +1252,7 @@ func (sess *session) bookForClOrdID(clOrdID string) *symbolBook {
 }
 
 func (s *Server) handle(conn net.Conn) {
-	s.trackConn(conn)
+	// Admitted by the accept loop, which is what put it in the tracking map.
 	defer func() {
 		s.untrackConn(conn)
 		_ = conn.Close()
@@ -1256,11 +1316,12 @@ func (s *Server) handle(conn net.Conn) {
 	}
 
 	sess := &session{
-		srv:     s,
-		conn:    conn,
-		account: req.Username,
-		out:     make(chan []byte, s.cfg.OutboundDepth),
-		closed:  make(chan struct{}),
+		srv:       s,
+		conn:      conn,
+		account:   req.Username,
+		out:       make(chan []byte, s.cfg.OutboundDepth),
+		closed:    make(chan struct{}),
+		emittedCh: make(chan struct{}),
 	}
 	defer sess.close()
 	// The sweep runs after the read loop returns, i.e. once the connection is
@@ -1357,7 +1418,28 @@ func (sess *session) apply(payload []byte) {
 	case wire.MsgCancelOnDisconnect:
 		sess.setCancelOnDisconnect(payload)
 	case wire.MsgQuery:
-		go sess.reportOpenOrders() // reads the book and drains the pump; not on the read loop
+		// One Query in flight per session, and this is the only admission control on
+		// this message. Every other command passes gate.Allow, but that gate is
+		// order-shaped — it rates an *order* against a per-book token bucket — and a
+		// Query is not an order, so there was nothing between a client's read loop
+		// and an unbounded fan of goroutines, each of which enqueues on the same
+		// matching-engine command queue that carries real order flow and then waits
+		// on the answer.
+		//
+		// A cap of one rather than a rate: a Query returns the account's whole open
+		// order set as of one instant, so a second one issued before the first
+		// answers asks a question the first is already answering. Bounding the
+		// concurrency bounds what the flood can cost — with MaxConns, the venue's
+		// query goroutines are bounded venue-wide and not just per client — and
+		// leaves an honest client, which waits for its QueryEnd, entirely unaffected.
+		if !sess.querying.CompareAndSwap(false, true) {
+			sess.reject("", orderentry.ReasonThrottled)
+			return
+		}
+		go func() {
+			defer sess.querying.Store(false)
+			sess.reportOpenOrders() // reads the book and drains the pump; not on the read loop
+		}()
 	default:
 		sess.reject("", orderentry.ReasonMalformed)
 	}
@@ -1775,21 +1857,59 @@ func (sess *session) reduce(payload []byte) {
 // anyway rather than never getting one, since a late boundary is recoverable and a
 // missing terminator is not.
 func (sess *session) waitForStream(target uint64, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	for sess.emitted.Load() < target {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		// The channel is taken BEFORE the counter is read, and that order is the whole
+		// correctness argument. noteEmitted stores the sequence and then closes the
+		// channel, so a waiter that misses the store is still holding the channel that
+		// the store's close is about to fire — there is no window where the counter
+		// advanced and the waiter is parked on a channel nobody will touch.
+		//
+		// It used to re-read the counter every millisecond instead. Correct, and it
+		// turned every outstanding waiter into a goroutine waking a thousand times a
+		// second — cost proportional to waiters × time rather than to events, which is
+		// exactly backwards for something whose whole job is to wait.
+		wait := sess.emittedWait()
+		if sess.emitted.Load() >= target {
+			return
+		}
 		select {
+		case <-wait:
 		case <-sess.closed:
 			return
 		case <-sess.srv.quit:
 			return
-		default:
-		}
-		if time.Now().After(deadline) {
+		case <-timer.C:
 			log.Printf("obgw: %s stream lagged past %v waiting for seq %d", sess.account, timeout, target)
 			return
 		}
-		time.Sleep(time.Millisecond)
 	}
+}
+
+// noteEmitted publishes that this connection has queued everything through seq.
+//
+// Store first, then wake: see waitForStream for why the order matters.
+func (sess *session) noteEmitted(seq uint64) {
+	sess.emitted.Store(seq)
+	sess.emittedMu.Lock()
+	// Nil-tolerant for the same reason the metric helpers are: a session assembled
+	// field-by-field — which the refusal drills do — must not panic here.
+	if sess.emittedCh != nil {
+		close(sess.emittedCh)
+	}
+	sess.emittedCh = make(chan struct{})
+	sess.emittedMu.Unlock()
+}
+
+// emittedWait returns a channel closed the next time emitted advances.
+func (sess *session) emittedWait() <-chan struct{} {
+	sess.emittedMu.Lock()
+	defer sess.emittedMu.Unlock()
+	if sess.emittedCh == nil {
+		sess.emittedCh = make(chan struct{})
+	}
+	return sess.emittedCh
 }
 
 // replaceOrder cancels one order and enters another atomically.
@@ -2140,11 +2260,11 @@ func (sess *session) writeLoop() {
 // variable. It is called out here rather than left for a reader to discover.
 func (sess *session) followStream(stream *orderentry.Stream, from uint64, backlog []orderentry.Msg) {
 	cursor := from
-	sess.emitted.Store(from)
+	sess.noteEmitted(from)
 	for _, m := range backlog {
 		sess.emit(m)
 		cursor = m.Seq
-		sess.emitted.Store(m.Seq)
+		sess.noteEmitted(m.Seq)
 	}
 	tick := time.NewTicker(2 * time.Millisecond)
 	defer tick.Stop()
@@ -2163,7 +2283,7 @@ func (sess *session) followStream(stream *orderentry.Stream, from uint64, backlo
 			for _, m := range msgs {
 				sess.emit(m)
 				cursor = m.Seq
-				sess.emitted.Store(m.Seq)
+				sess.noteEmitted(m.Seq)
 			}
 		}
 	}

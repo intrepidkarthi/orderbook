@@ -30,6 +30,7 @@ const (
 	refusedMetric          = "obgw_refused_total"
 	loginRefusedMetric     = "obgw_login_refused_total"
 	shedUnreportedMetric   = "obgw_shed_unreported_total"
+	connsRefusedMetric     = "obgw_connections_refused_total"
 	walAppendLatencyMetric = "obgw_wal_append_latency_ns"
 	walSyncLatencyMetric   = "obgw_wal_sync_latency_ns"
 	snapshotAgeMetric      = "orderbook_snapshot_age_seconds"
@@ -135,6 +136,11 @@ func (s *Server) registerRefusalCounters() {
 		s.loginRefused[code] = s.metrics.Counter(loginRefusedMetric, loginRefusedHelp,
 			observability.Label{Name: "reason", Value: name})
 	}
+	s.connsRefused = s.metrics.Counter(connsRefusedMetric,
+		"Sockets accepted and closed immediately because MaxConns was already reached, across both edges. "+
+			"Disjoint from every other refusal series here: this peer never sent a byte and never got a session, "+
+			"so it appears in neither obgw_refused_total nor obgw_login_refused_total. "+
+			"Any increase means legitimate clients are being turned away as well — raise MaxConns or find what is holding sockets open.")
 	s.shedUnreported = s.metrics.Counter(shedUnreportedMetric,
 		"Work the venue dropped and told NOBODY about, because there was nobody left to tell. "+
 			"Not a delay, a loss: orders stay resting for a client that asked for them to be pulled. Alert on any increase.",

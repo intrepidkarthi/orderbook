@@ -163,7 +163,11 @@ What they still do not cover, and this is the gap that matters for a production 
   connections for 17% more CPU, which retired an earlier and wrong "connection wall"
   conclusion ([SOAK.md](SOAK.md) §"Connection scaling"). So *a few dozen* is now
   measured; *hundreds* is still the open question, and the goroutine-per-connection
-  model is fine in principle and unproven past 80.
+  model is fine in principle and unproven past 80. The venue now refuses past a
+  concurrent-connection ceiling (`-max-conns`, 512 by default) rather than accepting
+  whatever arrives, which bounds the untested region instead of closing it: a cap
+  chosen against the file-descriptor limit is not evidence about what 500 live
+  sessions cost.
 - **There is no capacity plan, and the first attempt at one was wrong.** The rates
   originally published here did not reproduce four hours later on the same machine and
   the same code — 7,000/s clean became 3,500/s clean — because the measurement never
@@ -260,7 +264,12 @@ v0.21.0; neither has a rehearsal by a human under pressure, which is the sentenc
 
 What exists now: TLS on every listener (`-tls-cert`/`-tls-key`, TLS 1.2 floor,
 handshake on the connection's own goroutine so a stalled peer cannot hold up the accept
-loop). Credentials load from a permission-checked file rather than a command line, and
+loop) and admission control at the accept itself: `-max-conns` caps concurrent sockets
+across both edges, refusing past the ceiling and counting it
+(`obgw_connections_refused_total`), because everything spent between an accept and a
+login — a goroutine, a read buffer, a descriptor — is spent on a peer that has not
+proved it is anybody, and a ten-second login timeout is not a bound a reconnecting
+client cannot outrun. Credentials load from a permission-checked file rather than a command line, and
 neither path ever logs a secret — a malformed entry is reported by line number, because
 the obvious version of that parser printed the offending line and a log is kept, shipped
 and indexed. `orderentry.Authenticator` is the seam for where credentials actually live;
@@ -279,8 +288,14 @@ file. The doc comment on `HashedAccounts` defends the fast hash (a memory-hard o
 the pre-auth path is a DoS amplifier aimed at the accept loop); if your secrets are
 human-chosen, the fix is a real credential system behind the seam, not a slower hash.
 
-What does not exist: rotation, revocation, expiry, and any per-account authorisation
-beyond authentication. `StaticAccounts`, the plaintext built-in, remains what its own
+What does not exist: rotation, revocation, expiry, any per-account authorisation
+beyond authentication, and per-source login throttling. The last one is a deliberate
+omission rather than an oversight: a failed login already closes the connection, so an
+attempt costs a full TCP handshake that dwarfs the one SHA-256 it buys, the
+concurrent-connection cap bounds how many can be in flight, and per-IP state keyed by
+a value the attacker chooses is a memory-growth vector of its own. A venue issuing
+human-chosen secrets needs this and needs a real credential system behind the seam
+more. `StaticAccounts`, the plaintext built-in, remains what its own
 documentation says it is — a correct *default*, not a credential store. Market data is
 anonymous by design.
 

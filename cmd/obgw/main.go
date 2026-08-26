@@ -129,6 +129,7 @@ func main() {
 		tlsKey        = flag.String("tls-key", "", "PEM private key")
 		rate          = flag.Float64("rate", 1000, "per-account orders/second")
 		burst         = flag.Float64("burst", 200, "per-account burst allowance")
+		maxConns      = flag.Int("max-conns", 0, "concurrent client sockets across both edges, refused past the ceiling (0 = 512, negative = unlimited)")
 		walPath       = flag.String("wal", "", "write-ahead log path (empty = no durability)")
 		snapPath      = flag.String("snapshot", "", "snapshot path, used with -wal to bound how much log a restart replays and parses")
 		ckpt          = flag.Duration("checkpoint", 30*time.Second, "checkpoint interval")
@@ -172,6 +173,7 @@ func main() {
 		DataDir:           *dataDir,
 		Auth:              auth,
 		TLS:               tlsCfg,
+		MaxConns:          *maxConns,
 		RatePerSec:        *rate,
 		Burst:             *burst,
 		WALPath:           *walPath,
