@@ -237,3 +237,104 @@ func TestMonitor_Aggregates(t *testing.T) {
 		t.Errorf("monitor should have one spoofing alert, got %+v", m.Alerts())
 	}
 }
+
+// TestDetectorsForgetFullyFilledOrders. Every per-order map here was populated on
+// OrderPlaced and cleared only on OrderCancelled, and the event model has no "this
+// order is finished" — so an order that FILLED, which is most of them on a venue
+// anyone is trading, left an entry nothing would ever remove. The state each
+// detector held then grew with the venue's lifetime volume instead of with the
+// resting orders it is meant to be watching.
+func TestDetectorsForgetFullyFilledOrders(t *testing.T) {
+	// Each case places two orders, prints a trade that exhausts both, and asks the
+	// detector how much per-order state it is still holding.
+	t.Run("spoof", func(t *testing.T) {
+		d := spoofDet()
+		d.Observe(placed(1, "maker", 1, 100))
+		d.Observe(placed(2, "taker", 2, 100))
+		d.Observe(trade(3, 1, 2, 100))
+		if n := len(d.live); n != 0 {
+			t.Errorf("SpoofDetector.live holds %d entries after both orders filled, want 0", n)
+		}
+	})
+
+	t.Run("otr", func(t *testing.T) {
+		d := NewOTRDetector(OTRConfig{Window: 100, MinOrders: 5, MaxRatio: 4})
+		d.Observe(placed(1, "maker", 1, 100))
+		d.Observe(placed(2, "taker", 2, 100))
+		d.Observe(trade(3, 1, 2, 100))
+		if n := len(d.orderUser); n != 0 {
+			t.Errorf("OTRDetector.orderUser holds %d entries after both orders filled, want 0", n)
+		}
+	})
+
+	t.Run("close-marking", func(t *testing.T) {
+		d := NewCloseMarkingDetector(CloseMarkingConfig{Window: 100, MinVolume: 1000, MaxShare: 0.7})
+		d.Observe(placed(1, "maker", 1, 100))
+		d.Observe(placed(2, "taker", 2, 100))
+		d.Observe(trade(3, 1, 2, 100))
+		if n := len(d.orderUser); n != 0 {
+			t.Errorf("CloseMarkingDetector.orderUser holds %d entries after both orders filled, want 0", n)
+		}
+	})
+
+	t.Run("ramping", func(t *testing.T) {
+		d := NewRampingDetector(RampingConfig{Window: 100, MinTrades: 5, MinMoveTicks: 10})
+		d.Observe(placed(1, "maker", 1, 100))
+		d.Observe(placed(2, "taker", 2, 100))
+		d.Observe(tradeAt(3, 1, 2, 100, 500))
+		if n := len(d.orderUser); n != 0 {
+			t.Errorf("RampingDetector.orderUser holds %d entries after both orders filled, want 0", n)
+		}
+		if n := len(d.orderSide); n != 0 {
+			t.Errorf("RampingDetector.orderSide holds %d entries after both orders filled, want 0", n)
+		}
+	})
+
+	t.Run("pinging", func(t *testing.T) {
+		d := NewPingingDetector(PingingConfig{MaxSize: 5, MaxLifetime: 3, Window: 100, MinCount: 3})
+		d.Observe(placed(1, "maker", 1, 2))
+		d.Observe(placed(2, "taker", 2, 2))
+		d.Observe(trade(3, 1, 2, 2))
+		if n := len(d.live); n != 0 {
+			t.Errorf("PingingDetector.live holds %d entries after both orders filled, want 0", n)
+		}
+	})
+}
+
+// TestPartialFillsAreStillWatched is the other half: an order with quantity left is
+// still resting, and evicting it on the first print would blind every detector to
+// the rest of its life.
+func TestPartialFillsAreStillWatched(t *testing.T) {
+	d := spoofDet()
+	d.Observe(placed(1, "spoofer", 1, 100))
+	d.Observe(trade(2, 1, 99, 1)) // one lot of a hundred
+	if len(d.live) != 1 {
+		t.Fatalf("a 1%%-filled order was evicted: live holds %d entries", len(d.live))
+	}
+	// And it is still scored on cancel — as not-a-spoof, because it traded.
+	if alerts := d.Observe(cancelled(3, "spoofer", 1)); len(alerts) != 0 {
+		t.Errorf("an order that traded was flagged as a spoof: %+v", alerts)
+	}
+	if len(d.live) != 0 {
+		t.Errorf("live holds %d entries after the cancel, want 0", len(d.live))
+	}
+}
+
+// TestAFilledOrderCancelledLaterRaisesNothing. Eviction on fill has to cost no
+// alert: a later OrderCancelled naming an order that already filled finds nothing,
+// and that is the same answer the filled-quantity guard gave before.
+func TestAFilledOrderCancelledLaterRaisesNothing(t *testing.T) {
+	d := spoofDet()
+	d.Observe(placed(1, "u", 1, 100))
+	d.Observe(trade(2, 1, 99, 100))
+	if alerts := d.Observe(cancelled(3, "u", 1)); len(alerts) != 0 {
+		t.Errorf("a filled order's late cancel raised %+v, want nothing", alerts)
+	}
+
+	p := NewPingingDetector(PingingConfig{MaxSize: 5, MaxLifetime: 3, Window: 100, MinCount: 1})
+	p.Observe(placed(1, "u", 1, 2))
+	p.Observe(trade(2, 1, 99, 2))
+	if alerts := p.Observe(cancelled(3, "u", 1)); len(alerts) != 0 {
+		t.Errorf("a filled tiny order's late cancel was counted as a ping: %+v", alerts)
+	}
+}

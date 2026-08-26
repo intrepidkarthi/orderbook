@@ -83,6 +83,65 @@ type SpoofConfig struct {
 	MaxLifetime uint64 // cancelled within this many events of placement
 }
 
+// openSizes tracks how much of each placed order is still unfilled, derived from the
+// events the detectors already receive.
+//
+// It exists because the event model has three kinds and none of them is "this order
+// is finished". Every per-order map in this file was populated on OrderPlaced and
+// cleared on OrderCancelled, so an order that FILLED — which on a venue anyone is
+// trading is most of them — left an entry that nothing would ever remove. The memory
+// a detector held then grew with the venue's lifetime volume rather than with the
+// resting orders it is meant to be watching, which is the opposite of the quantity
+// each of these maps is named for.
+//
+// Deriving the signal here rather than adding a fourth EventKind is deliberate. Kind
+// is exported, and a new one only helps producers that learn to emit it — the leak
+// would survive in every adapter that did not. OrderPlaced already carries Quantity
+// and Trade already carries both order ids and the printed quantity, so this is
+// arithmetic on what a producer sends today and no adapter has to change.
+//
+// What it does NOT cover, stated so it is not mistaken for complete: an order that
+// leaves the book with quantity still on it and no OrderCancelled behind it — an IOC
+// remainder, a rejected taker — is invisible to every kind in the model, so its entry
+// still outlives it. That is a gap in what producers report, not one this side can
+// close, and it is bounded by orders that partially fill rather than by all of them.
+type openSizes struct{ left map[int64]int64 }
+
+func newOpenSizes() openSizes { return openSizes{left: make(map[int64]int64)} }
+
+// place starts tracking an order. A detector calls it exactly where it records its
+// own entry, so an order a detector filters out (PingingDetector's size cut) is not
+// tracked here either.
+func (o openSizes) place(id, qty int64) {
+	if qty <= 0 {
+		return
+	}
+	o.left[id] = qty
+}
+
+// fill applies a print and returns the tracked orders it finished — at most the two
+// named by the trade. A caller deletes its own entries for each id returned.
+func (o openSizes) fill(e Event) []int64 {
+	var done []int64
+	for _, id := range [2]int64{e.MakerOrderID, e.TakerOrderID} {
+		left, ok := o.left[id]
+		if !ok {
+			continue
+		}
+		left -= e.Quantity
+		if left > 0 {
+			o.left[id] = left
+			continue
+		}
+		delete(o.left, id)
+		done = append(done, id)
+	}
+	return done
+}
+
+// drop stops tracking an order that left the book some other way.
+func (o openSizes) drop(id int64) { delete(o.left, id) }
+
 // SpoofDetector flags large resting orders that are cancelled, unfilled, very
 // soon after being placed — the signature of a spoof (post size to fake
 // pressure, then pull it before it trades). Repeated on one side, this is
@@ -90,6 +149,7 @@ type SpoofConfig struct {
 type SpoofDetector struct {
 	cfg  SpoofConfig
 	live map[int64]*orderRec
+	open openSizes
 }
 
 type orderRec struct {
@@ -101,7 +161,7 @@ type orderRec struct {
 
 // NewSpoofDetector builds a spoof detector.
 func NewSpoofDetector(cfg SpoofConfig) *SpoofDetector {
-	return &SpoofDetector{cfg: cfg, live: make(map[int64]*orderRec)}
+	return &SpoofDetector{cfg: cfg, live: make(map[int64]*orderRec), open: newOpenSizes()}
 }
 
 // Observe implements Detector.
@@ -109,6 +169,7 @@ func (d *SpoofDetector) Observe(e Event) []Alert {
 	switch e.Kind {
 	case OrderPlaced:
 		d.live[e.OrderID] = &orderRec{user: e.UserID, placedSeq: e.Seq, size: e.Quantity, filled: 0}
+		d.open.place(e.OrderID, e.Quantity)
 
 	case Trade:
 		if r, ok := d.live[e.MakerOrderID]; ok {
@@ -117,8 +178,15 @@ func (d *SpoofDetector) Observe(e Event) []Alert {
 		if r, ok := d.live[e.TakerOrderID]; ok {
 			r.filled += e.Quantity
 		}
+		// A fully-filled order is not a spoof and is never cancelled, so nothing here
+		// will read it again. Dropping it costs no alert: the branch below already
+		// refuses to flag anything with a fill against it.
+		for _, id := range d.open.fill(e) {
+			delete(d.live, id)
+		}
 
 	case OrderCancelled:
+		d.open.drop(e.OrderID)
 		r, ok := d.live[e.OrderID]
 		if !ok {
 			return nil
@@ -205,6 +273,7 @@ type OTRConfig struct {
 // explainable analog. Alert-only — enforcement belongs to the gateway.
 type OTRDetector struct {
 	cfg       OTRConfig
+	open      openSizes
 	orderUser map[int64]string    // orderID -> owner, for attributing fills
 	places    map[string][]uint64 // per-user placement seqs (rolling)
 	fills     map[string][]uint64 // per-user fill seqs (rolling)
@@ -214,6 +283,7 @@ type OTRDetector struct {
 func NewOTRDetector(cfg OTRConfig) *OTRDetector {
 	return &OTRDetector{
 		cfg:       cfg,
+		open:      newOpenSizes(),
 		orderUser: make(map[int64]string),
 		places:    make(map[string][]uint64),
 		fills:     make(map[string][]uint64),
@@ -226,6 +296,7 @@ func (d *OTRDetector) Observe(e Event) []Alert {
 	switch e.Kind {
 	case OrderPlaced:
 		d.orderUser[e.OrderID] = e.UserID
+		d.open.place(e.OrderID, e.Quantity)
 		d.places[e.UserID] = append(d.places[e.UserID], e.Seq)
 		return d.rate(e.UserID, e.Seq)
 	case Trade:
@@ -235,7 +306,13 @@ func (d *OTRDetector) Observe(e Event) []Alert {
 		if u, ok := d.orderUser[e.TakerOrderID]; ok {
 			d.fills[u] = append(d.fills[u], e.Seq)
 		}
+		// The attribution map is only read to credit a fill, and an order with
+		// nothing left cannot print again.
+		for _, id := range d.open.fill(e) {
+			delete(d.orderUser, id)
+		}
 	case OrderCancelled:
+		d.open.drop(e.OrderID)
 		delete(d.orderUser, e.OrderID)
 	}
 	return nil
@@ -407,6 +484,7 @@ type CloseMarkingConfig struct {
 // algo showed — >70% of the last-seconds volume (SEC 2014). Alert-only.
 type CloseMarkingDetector struct {
 	cfg       CloseMarkingConfig
+	open      openSizes
 	orderUser map[int64]string // taker order -> owner
 	window    []takerFill      // (seq, user, qty), oldest first
 	perUser   map[string]int64 // in-window taker volume per user
@@ -423,6 +501,7 @@ type takerFill struct {
 func NewCloseMarkingDetector(cfg CloseMarkingConfig) *CloseMarkingDetector {
 	return &CloseMarkingDetector{
 		cfg:       cfg,
+		open:      newOpenSizes(),
 		orderUser: make(map[int64]string),
 		perUser:   make(map[string]int64),
 	}
@@ -433,10 +512,17 @@ func (d *CloseMarkingDetector) Observe(e Event) []Alert {
 	switch e.Kind {
 	case OrderPlaced:
 		d.orderUser[e.OrderID] = e.UserID
+		d.open.place(e.OrderID, e.Quantity)
 	case OrderCancelled:
+		d.open.drop(e.OrderID)
 		delete(d.orderUser, e.OrderID)
 	case Trade:
 		user, ok := d.orderUser[e.TakerOrderID]
+		// Read the aggressor first, then evict: this print is the last one an order
+		// with nothing left can be named on, and the map is only read to name it.
+		for _, id := range d.open.fill(e) {
+			delete(d.orderUser, id)
+		}
 		if !ok {
 			return nil
 		}
@@ -493,6 +579,7 @@ type RampingConfig struct {
 // model). Alert-only.
 type RampingDetector struct {
 	cfg       RampingConfig
+	open      openSizes
 	orderUser map[int64]string     // taker order -> owner
 	orderSide map[int64]types.Side // taker order -> aggressor side
 	hist      map[string][]rampPt  // per-user windowed aggressive trades
@@ -508,6 +595,7 @@ type rampPt struct {
 func NewRampingDetector(cfg RampingConfig) *RampingDetector {
 	return &RampingDetector{
 		cfg:       cfg,
+		open:      newOpenSizes(),
 		orderUser: make(map[int64]string),
 		orderSide: make(map[int64]types.Side),
 		hist:      make(map[string][]rampPt),
@@ -520,15 +608,22 @@ func (d *RampingDetector) Observe(e Event) []Alert {
 	case OrderPlaced:
 		d.orderUser[e.OrderID] = e.UserID
 		d.orderSide[e.OrderID] = e.Side
+		d.open.place(e.OrderID, e.Quantity)
 	case OrderCancelled:
+		d.open.drop(e.OrderID)
 		delete(d.orderUser, e.OrderID)
 		delete(d.orderSide, e.OrderID)
 	case Trade:
 		user, ok := d.orderUser[e.TakerOrderID]
+		side := d.orderSide[e.TakerOrderID]
+		// Both reads happen before the eviction, for the reason CloseMarking gives.
+		for _, id := range d.open.fill(e) {
+			delete(d.orderUser, id)
+			delete(d.orderSide, id)
+		}
 		if !ok {
 			return nil
 		}
-		side := d.orderSide[e.TakerOrderID]
 		pts := append(d.hist[user], rampPt{e.Seq, e.Price, side})
 		cutoff := windowCutoff(e.Seq, d.cfg.Window)
 		kept := pts[:0]
@@ -575,6 +670,7 @@ type PingingConfig struct {
 // message-rate limit but cluster in this detector. Alert-only.
 type PingingDetector struct {
 	cfg   PingingConfig
+	open  openSizes
 	live  map[int64]pingRec   // tiny live orders
 	pings map[string][]uint64 // per-user ping seqs (rolling)
 }
@@ -589,6 +685,7 @@ type pingRec struct {
 func NewPingingDetector(cfg PingingConfig) *PingingDetector {
 	return &PingingDetector{
 		cfg:   cfg,
+		open:  newOpenSizes(),
 		live:  make(map[int64]pingRec),
 		pings: make(map[string][]uint64),
 	}
@@ -600,6 +697,7 @@ func (d *PingingDetector) Observe(e Event) []Alert {
 	case OrderPlaced:
 		if e.Quantity <= d.cfg.MaxSize {
 			d.live[e.OrderID] = pingRec{user: e.UserID, placedSeq: e.Seq}
+			d.open.place(e.OrderID, e.Quantity)
 		}
 	case Trade:
 		if r, ok := d.live[e.MakerOrderID]; ok {
@@ -610,7 +708,13 @@ func (d *PingingDetector) Observe(e Event) []Alert {
 			r.filled = true
 			d.live[e.TakerOrderID] = r
 		}
+		// A tiny order that filled is not a ping, and the cancel branch below already
+		// refuses to count one — so dropping it here costs no alert either.
+		for _, id := range d.open.fill(e) {
+			delete(d.live, id)
+		}
 	case OrderCancelled:
+		d.open.drop(e.OrderID)
 		r, ok := d.live[e.OrderID]
 		if !ok {
 			return nil

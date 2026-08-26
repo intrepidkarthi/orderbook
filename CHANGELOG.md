@@ -76,6 +76,29 @@ versions may include breaking changes).
 
 ### Fixed
 
+- **Surveillance detectors no longer keep per-order state forever for every order
+  that fills.** All five of them — spoofing, order-to-trade ratio, close-marking,
+  ramping and pinging — populated a per-order map on `OrderPlaced` and cleared it only
+  on `OrderCancelled`, and the event model has three kinds with no "this order is
+  finished" among them. So an order that **filled** rather than being cancelled, which
+  on a venue anyone is trading is most of them, left an entry nothing would ever
+  remove: the memory each detector held grew with the venue's lifetime volume instead
+  of with the resting orders it is meant to be watching.
+
+  The signal is derived rather than added to the event model. `Kind` is exported, and a
+  fourth kind would only help producers that learned to emit it — the leak would
+  survive in every adapter that did not. `OrderPlaced` already carries `Quantity` and
+  `Trade` already carries both order ids and the printed quantity, so a detector can do
+  the arithmetic on what producers send today and no adapter has to change. Eviction
+  costs no alert: a filled order is not a spoof and not a ping, and both branches
+  already refused to flag one.
+
+  One gap stays, and is written down in the code rather than left to be found: an order
+  that leaves the book with quantity still on it and no `OrderCancelled` behind it — an
+  IOC remainder, a rejected taker — is invisible to every kind in the model. That is a
+  gap in what producers report, and it is bounded by orders that *partially* fill
+  rather than by all of them.
+
 - **`Histogram.Quantile` reports the rank it was asked for.** The nearest-rank index
   was `int64(q * total)`, a truncation where the definition is a ceiling, so every
   quantile came back one rank low. At a thousand samples that is invisible; at three
