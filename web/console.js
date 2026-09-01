@@ -41,6 +41,7 @@
   const push = (arr, v) => { arr.push(v); if (arr.length > RING) arr.shift(); };
   const fmtP = (v) => v ? v.toFixed(2) : "—";
   const fmtS = (v, dp = 2) => (v > 0 ? "+" : "") + v.toFixed(dp);
+  const syncSeedURL = (seed) => history.replaceState(null, "", `?seed=${encodeURIComponent(seed)}`);
 
   if (!running) $("c-run").textContent = "Run";
 
@@ -146,7 +147,7 @@
   const tapeEl = $("tape");
   let tapeCount = 0;
   function appendTrades(trades) {
-    if (!trades.length) return;
+    if (!trades || !trades.length) return;
     if (tapeCount === 0) tapeEl.innerHTML = "";
     for (const t of trades) {
       const buy = t.taker_side === "BUY";
@@ -224,7 +225,9 @@
   });
   $("c-speed").addEventListener("change", (e) => { speed = +e.target.value; });
   $("c-reset").addEventListener("click", () => {
-    obReset(+($("c-seed").value || 1));
+    const seed = +($("c-seed").value || 1);
+    syncSeedURL(seed);
+    obReset(seed);
     mids.length = ofis.length = cvds.length = 0;
     tapeEl.innerHTML = '<div class="tape-empty">No prints yet.</div>';
     tapeCount = 0;
@@ -236,6 +239,20 @@
     refresh();
   });
 
+  $("c-share").addEventListener("click", async () => {
+    const seed = +($("c-seed").value || 1);
+    syncSeedURL(seed);
+    const button = $("c-share");
+    try {
+      await navigator.clipboard.writeText(location.href);
+      button.textContent = "Copied";
+      setTimeout(() => { button.textContent = "Copy link"; }, 1800);
+    } catch {
+      button.textContent = "Copy failed";
+      setTimeout(() => { button.textContent = "Copy link"; }, 1800);
+    }
+  });
+
   const showErr = (msg) => {
     $("t-err").textContent = msg;
     setTimeout(() => { if ($("t-err").textContent === msg) $("t-err").textContent = ""; }, 5000);
@@ -244,17 +261,20 @@
     e.preventDefault();
     const res = JSON.parse(obSubmit("you", $("t-side").value, "LIMIT", $("t-price").value, $("t-qty").value));
     if (res.error) { showErr(res.error); return; }
+    appendTrades(res.trades);
     refresh();
   });
   $("c-buy").addEventListener("click", () => {
     const res = JSON.parse(obSubmit("you", "BUY", "MARKET", "0", $("t-qty").value || "1.0"));
     if (res.error) showErr(res.error);
-    tick();
+    appendTrades(res.trades);
+    refresh();
   });
   $("c-sell").addEventListener("click", () => {
     const res = JSON.parse(obSubmit("you", "SELL", "MARKET", "0", $("t-qty").value || "1.0"));
     if (res.error) showErr(res.error);
-    tick();
+    appendTrades(res.trades);
+    refresh();
   });
 
   // A provocation button disables until its detector has actually spoken (new
@@ -262,9 +282,14 @@
   // (e.g. an empty book) cannot wedge the button.
   function provoke(btn, restLabel, busyLabel, call) {
     btn.addEventListener("click", () => {
+      const baseline = alertCount;
       const res = JSON.parse(call());
       if (res.error) return;
-      const baseline = alertCount;
+      if (!running) {
+        const out = JSON.parse(obStep(3));
+        appendTrades(out.trades);
+      }
+      refresh();
       btn.disabled = true;
       btn.textContent = busyLabel;
       const started = Date.now();

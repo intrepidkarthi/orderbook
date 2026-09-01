@@ -19,6 +19,7 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
     }
     .mkt-bar .sym { font-weight: 700; letter-spacing: .06em; }
+    .mkt-bar .sim-label { color: var(--gold); font-size: 11px; letter-spacing: .08em; }
     .mkt-bar .kv { color: var(--muted); }
     .mkt-bar .kv b { color: var(--fg); font-weight: 600; margin-left: 6px; }
     .mkt-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
@@ -166,10 +167,12 @@
           <li>Place a limit order away from the touch. It will rest and appear with a <b>●</b>.</li>
           <li>Send a market order, then read the print in the tape.</li>
           <li>Press <b>Run a spoof</b>. <code>pkg/surveillance</code> raises the alert you see, not the page.</li>
+          <li>Change the seed and press <b>Copy link</b> to share the same starting market.</li>
         </ol>
       </details>
       <div class="mkt-bar">
         <span class="sym">DEMO</span>
+        <span class="sim-label">SIMULATED FLOW · REAL ENGINE</span>
         <span class="kv">mid<b id="mv-mid">—</b></span>
         <span class="kv">spread<b id="mv-spread">—</b></span>
         <span class="kv">last<b id="mv-last">—</b></span>
@@ -185,6 +188,7 @@
           <label class="kv" for="c-seed">seed</label>
           <input id="c-seed" class="cinp" type="number" value="1" />
           <button id="c-reset" class="cbtn">Reset</button>
+          <button id="c-share" class="cbtn" title="Copy a link with this seed">Copy link</button>
           <span class="sep"></span>
           <button id="c-spoof" class="cbtn warn">Run a spoof</button>
           <button id="c-flood" class="cbtn warn">Run a flood</button>
