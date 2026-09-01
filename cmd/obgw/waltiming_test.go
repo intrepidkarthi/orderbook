@@ -185,7 +185,12 @@ func TestAppendLatencyExcludesTheSync(t *testing.T) {
 
 	c := dial(t, srv)
 	c.mustLogin("alice", "pw1")
-	const orders = 60
+	// Enough appends that p99 is a tail and not a maximum. Quantile takes the
+	// NEAREST rank, so ceil(0.99*n) with n=60 is n itself: the assertions below
+	// would be reading the single worst append, and one scheduler pause under
+	// -race is enough to fail a claim about the ninety-ninth percentile. At 300
+	// the rank is 297, which spends three samples on exactly that noise.
+	const orders = 300
 	for i := 0; i < orders; i++ {
 		c.enter("s"+itoa(i), wire.SideBuy, wire.TypeLimit, wire.TIFGoodTillCancel, 100+int64(i%9), 10)
 		if _, ok := c.awaitType(t, wire.MsgAccepted, 5*time.Second); !ok {
@@ -211,8 +216,14 @@ func TestAppendLatencyExcludesTheSync(t *testing.T) {
 	// And the two are separately readable, which is the whole point: the append is
 	// the venue's own work, the sync is the storage device, and a per-command venue's
 	// real cost is the sum — one term each rather than one averaged number.
-	if p99, syncP50 := appends.Quantile(0.99), syncs.Quantile(0.5); p99 >= syncP50 {
-		t.Errorf("append p99 %d ns >= sync p50 %d ns; the two histograms are not disjoint", p99, syncP50)
+	// Equality is allowed because a bucketed quantile cannot resolve below its own
+	// bucket width: on storage fast enough that an fsync lands in the same bucket as
+	// a buffered write, two readings being equal says the instrument ran out of
+	// resolution, not that the append contained the sync. The containment case is
+	// what the Sum comparison above catches, and it catches it exactly — an append
+	// wrapped outside the sync reports p99 near the sync's own p99, not at its p50.
+	if p99, syncP50 := appends.Quantile(0.99), syncs.Quantile(0.5); p99 > syncP50 {
+		t.Errorf("append p99 %d ns > sync p50 %d ns; the two histograms are not disjoint", p99, syncP50)
 	}
 	if p99 := appends.Quantile(0.99); p99 > int64(time.Millisecond) {
 		t.Errorf("append p99 = %d ns, above the 1 ms alert threshold docs/RUNBOOKS.md publishes, on a buffered write", p99)
