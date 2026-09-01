@@ -36,16 +36,17 @@
       The engine below is the real thing — compiled to WebAssembly, running in your browser.
     </p>
     <div class="hero-cta">
-      <a class="btn primary" href="#start">Get started</a>
-      <a class="btn" href="#features">See the features</a>
-      <a class="btn ghost" href="https://github.com/intrepidkarthi/orderbook">View source</a>
+      <a class="btn primary" href="console.html">Run the live console</a>
+      <a class="btn" href="#start">Get started</a>
+      <a class="btn ghost" href="docs.html#performance">Read the benchmark notes</a>
     </div>
     <div class="stat-row">
-      <div><b>6&nbsp;ns</b><span>best bid/ask read</span></div>
-      <div><b>~3.0M/s</b><span>match round-trip</span></div>
-      <div><b>0</b><span>alloc on the hot path</span></div>
-      <div><b>int64</b><span>exact pricing, no floats</span></div>
+      <div><b>5.8&nbsp;ns</b><span>best bid/ask read</span></div>
+      <div><b>~3.0M/s</b><span>maker+taker match / core</span></div>
+      <div><b>0</b><span>allocs with caller buffer</span></div>
+      <div><b>int64</b><span>exact ticks and lots</span></div>
     </div>
+    <p class="hint">Apple M4, Go 1.23.5, single-threaded. These are core measurements, not venue capacity. <a href="docs.html#performance">Read the method →</a></p>
   </header>
 
   <main>
@@ -200,10 +201,11 @@
         </div>
         <div class="prod">
           <h3>Fast, with real numbers</h3>
-          <p>O(1) best bid/ask, O(1) cancel, O(log n) inserts via a map + binary-search price
-          ladder. Measured: <b>~6&nbsp;ns</b> top-of-book reads, <b>~3.0M</b> match round-trips/s
-          per core, and <b>0</b> allocations on the submit/cancel/match hot path. Benchmarks run
-          in CI on every push.</p>
+          <p>O(1) best bid/ask and O(1) cancel through indexed price levels and intrusive
+          queues. Measured: <b>5.8&nbsp;ns</b> top-of-book reads, <b>~3.0M</b> maker+taker
+          matches/s in the core, and <b>0</b> allocations for <code>Match</code> with a reused
+          trade buffer. <code>Process</code> is the allocating convenience API. Benchmarks run
+          in CI; the method and limits are published.</p>
         </div>
         <div class="prod">
           <h3>Tested hard</h3>
