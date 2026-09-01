@@ -174,17 +174,35 @@ Mapped to the patterns above, we are already on the canonical path:
 
 ## Where we diverge — the gaps this research surfaces
 
-These become the roadmap (see the accompanying plan). In priority order of
-real-world risk: (1) the match path still reads `time.Now()` for timestamps — a
-determinism leak that must be injected as a logical clock; (2) no self-output
-kill switch (the Knight gap); (3) no replay-equivalence / zero-alloc **CI gate**
-to weaponize determinism as a deploy check; (4) no typed, sequence-numbered
-**event stream** as the integration seam (the linchpin for every recovery/
-market-data/drop-copy adapter); (5) exotic order types aren't individually
-feature-flagged; (6) no first-class **degraded modes** (cancel-only/halt) or
-bounded backpressure; (7) snapshots aren't yet a resume-from-sequence recovery
-primitive; (8) no mark/index-driven band, liquidation-injection hook, or
-per-symbol shard manager.
+The core now has the matching, replay, event, risk, degraded-state, snapshot,
+market-data, and per-symbol sharding pieces described above. The remaining gap is
+not another order type. It is the venue around the matcher, plus a fair comparison
+against other implementations. The current work is tracked in
+[`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md).
+
+In order of risk:
+
+1. **Ingress ordering needs a venue contract.** The `Runner` preserves queue order,
+   but concurrent producers still need an explicit sequencing policy for gateway
+   arrival, timestamp ties, retries, and failover.
+2. **Acknowledgement and commit states need to be explicit.** Group-committed WAL,
+   primary durability, replica application, and client acknowledgement are different
+   points. A venue must choose which one each response means.
+3. **HA has detection, not split-brain prevention.** The reference primary-backup
+   path has replay, promotion seams, and an incarnation fence. It does not provide
+   quorum, leases, fencing, or automatic failover.
+4. **Performance evidence is not yet cross-language or end to end.** The repository
+   has core benchmarks and soak data. A committed Go/C++/Rust tape, controlled
+   hardware matrix, and gateway-to-report latency envelope remain to be built.
+5. **Independent reconciliation is still a venue responsibility.** A production
+   deployment needs a ledger that compares client requests, WAL, executions, market
+   data, replicas, positions, and settlement independently of the matcher.
+6. **Clearing, settlement, margin, fees, credentials, and regulatory operations are
+   outside this library by design.** They remain required before a real venue can
+   trade customer money.
+
+This is the useful distinction: the engine can become a high-performance component;
+calling the surrounding deployment a venue requires the systems above it.
 
 ---
 
