@@ -1,7 +1,7 @@
 # orderbook
 
 <p align="center">
-  <a href="https://intrepidkarthi.github.io/orderbook/"><img src=".github/readme/demo.gif" alt="orderbook — a limit order book and matching engine in Go: a market order crosses the spread and trades at the maker's price" width="820"></a>
+  <a href="https://intrepidkarthi.github.io/orderbook/console.html"><img src=".github/readme/demo.gif" alt="orderbook live console: a user order rests in the book, trades print on the tape, and surveillance flags a flood" width="820"></a>
 </p>
 
 <p align="center"><b><a href="https://intrepidkarthi.github.io/orderbook/">▶ Live demo</a></b> — the real engine, compiled to WebAssembly, running in your browser · <b><a href="https://intrepidkarthi.github.io/orderbook/console.html">▶ Live console</a></b> — a running market with signals and surveillance, every panel titled by the call that produces it.</p>
@@ -14,16 +14,17 @@
 
 An embeddable limit order book and matching engine in Go. Integer-exact `int64`
 pricing with no floating point on the money path, a match path that allocates
-**0 B/op**, a lock-free single-writer core (the LMAX model), deterministic crash
-recovery gated in CI against a 2,000-command tape, and `cmd/obgw` — a reference
-TCP gateway speaking a frozen binary protocol on both edges, order entry and
-public market data. `go get` it into an exchange, a simulator, or a backtester:
-the core owns the book, the matching algorithm, order lifecycle, sequencing and
-market-data snapshots, while `pkg/wal` (durable persistence), `pkg/surveillance`
-(market-abuse detection), `pkg/gateway` (pre-trade admission) and `pkg/auction`
-(uniform-price call auction) cover the layers around it. It has never run a live
-market, and [what that costs you](#experimental-use-at-your-own-risk) is written
-down rather than implied.
+**0 B/op**, a single-writer core with no lock contention on the match path,
+deterministic crash recovery gated in CI against a 2,000-command tape, and
+`cmd/obgw` — a reference TCP gateway speaking a frozen binary protocol on both
+edges, order entry and public market data. `go get` it into an exchange, a
+simulator, or a backtester: the core owns the book, the matching algorithm,
+order lifecycle, sequencing and market-data snapshots, while `pkg/wal` (durable
+persistence), `pkg/surveillance` (market-abuse detection), `pkg/gateway`
+(pre-trade admission) and `pkg/auction` (uniform-price call auction) cover the
+layers around it. It has never run a live market, and
+[what that costs you](#experimental-use-at-your-own-risk) is written down rather
+than implied.
 
 ---
 
@@ -35,12 +36,25 @@ go get github.com/intrepidkarthi/orderbook/pkg/matching
 
 Requires Go 1.23 or later.
 
+Before evaluating a change or trusting a claim, run the local gate:
+
+```sh
+go vet ./...
+go test ./...
+go test -race ./...
+make bench
+```
+
+The benchmarks are regression checks for the core, not an end-to-end venue capacity test. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the measurement boundary and [docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) before using the gateway with anything valuable.
+
 ---
 
 ## Quickstart
 
 The engine works in integer ticks and lots. Pass them directly, or use an
-`Instrument` to convert from decimals at the boundary.
+`Instrument` to convert from decimals at the boundary. The snippets below are
+API excerpts; [examples/basic](examples/basic/main.go) is the complete program
+with imports and error handling.
 
 ```go
 eng := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
@@ -73,15 +87,23 @@ buf := make([]types.Trade, 0, 8)
 buf, status, _ := eng.Match(order, buf[:0])
 ```
 
-Or run the reference gateway and talk to it over a socket:
+Or run the reference gateway and talk to it over a socket. Use a protected
+accounts file; credentials passed with `-accounts` are visible in the host's
+process list:
 
 ```sh
-go run ./cmd/obgw -addr 127.0.0.1:9000 -symbol BTC-USD -accounts alice:s3cret
+go run ./cmd/obgw -addr 127.0.0.1:9000 -symbol BTC-USD \
+  -accounts-file /path/to/accounts -tls-cert server.crt -tls-key server.key
 ```
 
-`cmd/obgw`'s tests are a working client — login, enter, cancel, reduce, query,
-resume — and are the most useful reference for writing another one. The protocol
-helpers live in `server_test.go`.
+`go run ./cmd/obgw -h` gives the account-file format and every other flag;
+[docs/PROTOCOL.md](docs/PROTOCOL.md) says what the transport does and does not
+protect. Without `-tls-cert` and `-tls-key` the venue speaks plaintext, which is
+a loopback-development mode and nothing else. `cmd/obgw`'s tests are a
+working client — login, enter, cancel, reduce, query, resume — and are the most
+useful reference for writing another one. The protocol helpers live in
+`server_test.go`. The gateway is a reference edge, not a claim that the
+repository is a complete production venue.
 
 Runnable, testable examples render on
 [pkg.go.dev](https://pkg.go.dev/github.com/intrepidkarthi/orderbook/pkg/matching#pkg-examples).
@@ -161,9 +183,11 @@ gaps no library work can close, because they are properties of your deployment.
   levels, and a caller-buffer match path that allocates **0 B/op**. A realistic
   cancel-heavy flow runs at **p50 83 ns · p99 167 ns · p999 250 ns** per
   operation.
-- **Single-writer core.** One matching goroutine owns the book with no lock on
-  the hot path (the LMAX model). A `Runner` fronts it with an MPSC command queue
-  so many producers can submit concurrently.
+- **Single-writer core.** One matching goroutine owns the book, so nothing
+  contends its mutex on the match path (the LMAX model). A `Runner` fronts it
+  with an MPSC command queue so many producers can submit concurrently. Queue
+  order is the engine's order; deployments that need a venue-wide ingress policy
+  must sequence commands before they reach the runner.
 - **Deterministic and recoverable.** The same ordered command stream produces
   byte-identical trades and book state — enabling command-log replay, durable
   WAL crash recovery (`pkg/wal`: write-ahead log + snapshots), and reproducible
@@ -250,7 +274,7 @@ gaps no library work can close, because they are properties of your deployment.
 | | `matching.Engine` | `matching.Runner` |
 |---|---|---|
 | Contract | single writer — drive from **one** goroutine | safe for **concurrent** producers |
-| Mechanism | direct calls, no lock on the hot path | MPSC command queue → one matching goroutine |
+| Mechanism | direct calls, uncontended book mutex | MPSC command queue → one matching goroutine |
 | Submit | `Process` (result) · `Match` (zero-alloc, into a buffer) | `Process` (enqueue + wait) · `SubmitAsync` (non-blocking) |
 | Reads | `BestBid` / `Snapshot` / … (book has its own RW-lock) | same, delegated to the engine |
 | Use when | you own the sequencing loop; benchmarks | any multi-goroutine service |
@@ -473,7 +497,7 @@ or discussion if you want to talk through an idea first.
 - **More surveillance** — a quote-fading detector, or a wash-trade detector keyed
   on beneficial-ownership groups (the cross-account case the core can't see).
 - **More signals** — micro-price, VPIN, or a queue-position model in `pkg/signals`.
-- **GTD / DAY time-in-force** with expiry, and richer `Instrument` validation.
+- **Performance work** — shared Go/C++/Rust benchmark tapes, alternative price-level structures, and end-to-end latency measurements. See [docs/PERFORMANCE-ROADMAP.md](docs/PERFORMANCE-ROADMAP.md).
 
 If the library is useful to you, a ⭐ helps other developers find it.
 
