@@ -28,6 +28,23 @@ CI also runs these on every push and publishes the numbers to the
 [**Benchmarks** workflow](https://github.com/intrepidkarthi/orderbook/actions/workflows/bench.yml)
 run summary (neutral GitHub-hosted hardware).
 
+## How to read these numbers
+
+These results describe the matching core. They do not describe a complete venue.
+The measured path excludes protocol decoding, authentication, network I/O, WAL sync,
+market-data publication, replication, and client response latency. The durable-path
+numbers later on this page include some of those costs; the end-to-end envelope is
+still a separate benchmark the project needs to build.
+
+The project will call a comparison fair only when Go, C++, and Rust consume the same
+command tape, produce the same result digest, and run on the same controlled machine.
+Until that harness exists, this page makes no language-superiority claim. The
+comparison plan is in [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) M10.
+
+A result is useful only with its workload, book size, compiler/runtime configuration,
+and percentile distribution. Throughput without those details is not a capacity
+number.
+
 ## Results
 
 Apple M4, macOS 26.5, `go1.23.5 darwin/arm64`, single-threaded (`-benchmem`).
