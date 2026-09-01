@@ -655,14 +655,19 @@ It is never told it is up to date when it is not.
 ## Running it
 
 ```sh
-go run ./cmd/obgw -addr 127.0.0.1:9000 -symbol BTC-USD -accounts alice:s3cret,bob:hunter2
+go run ./cmd/obgw -addr 127.0.0.1:9000 -symbol BTC-USD -accounts-file ./accounts
 ```
+
+The file holds `user:password` or `user:sha256:<64 hex>` lines, `#` comments allowed;
+`-hash-secret` reads a secret on stdin and prints its hashed form. `-accounts
+alice:s3cret,bob:hunter2` works too and is what the tests use, but argv is visible in
+`ps` to every account on the host — a development convenience, not a deployment form.
 
 With durability:
 
 ```sh
 go run ./cmd/obgw -addr 127.0.0.1:9000 -symbol BTC-USD \
-  -accounts alice:s3cret -wal obgw.wal -snapshot obgw.snap -checkpoint 30s
+  -accounts-file ./accounts -wal obgw.wal -snapshot obgw.snap -checkpoint 30s
 ```
 
 `cmd/obgw/server_test.go` is a working client: login, enter, cancel, resume, and
