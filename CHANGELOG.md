@@ -7,6 +7,31 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- **Links to the site now unfurl with a card.** None of the four pages carried an
+  `og:image` or a Twitter card, so a link to the demo, the console or the docs showed up
+  on Hacker News, Reddit, X or Slack as a bare title. Each page now carries Open Graph
+  and `summary_large_image` tags pointing at `web/og.png`: words beside a depth ladder
+  captured from the running console, and no figures, since a number baked into an
+  image cannot be corrected by the PR that corrects the number.
+
+- **The README's media has a recipe.** `python3 .github/readme/capture.py` builds the
+  engine to WebAssembly, serves a copy of `web/`, and drives headless Chrome under
+  virtual time, so every frame is one 100 ms tick of the page and the same seed records
+  the same film. It refuses to write one where a panel overflows its frame or the spoof
+  raised no alert. Standard library only, plus Chrome, Go and ffmpeg.
+
+### Changed
+
+- **The README's hero can be read at the width it is shown.** The old GIF was the full
+  1280 px page shrunk to 820 px, so the monospace text reached the reader at about
+  two-thirds size, and a quarter of every frame was the first-run guide. The new one is
+  the console at 1100 px in dark mode, captured at 2× and cropped to the market bar, the
+  grid and the surveillance panel. In it a bid rests in the ladder, a market buy prints
+  on the tape, and the shipping `SpoofDetector` names a spoofer. It weighs 3.7 MB
+  against 0.2 MB before.
+
 ## [0.27.0] - 2026-09-29
 
 ### Changed
