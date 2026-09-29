@@ -9,6 +9,52 @@ versions may include breaking changes).
 
 ### Changed
 
+- **`matching.SemanticsVersion` is 3 → 4**, covering the two self-trade-prevention
+  entries below: a `DECREMENT` that takes a maker to zero now sets `CANCELLED`, and
+  every STP removal of an iceberg takes its hidden reserve with it. The `stp-iceberg`
+  corpus scenario was added first, appended last so it moves no existing line, and the
+  bump rests on the 22 lines that moved when the fix under it was reverted. Recovery
+  on this build refuses to replay a 0.26.0 record the snapshot does not cover unless
+  the operator names the version it accepts — take a checkpoint before upgrading, per
+  [SEMANTICS-VERSION.md](docs/SEMANTICS-VERSION.md) §3.
+
+- **The README no longer calls the core "lock-free".** The match path calls
+  `book.Add`, `book.Remove` and `book.UpdateOrderQuantity`, and each takes the book's
+  `RWMutex`. Nothing contends it, because one goroutine writes — which is the real
+  property, and the one now claimed in the opening paragraph, the feature bullet and
+  the Engine/Runner table. The same pass names the benchmark boundary where the
+  benchmarks first appear, links [PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md)
+  before the gateway is suggested for anything valuable, and says the quickstart
+  snippets are excerpts of `examples/basic`.
+
+- **Gateway examples pass accounts by file, not on the command line.** `-accounts`
+  puts every account's secret in `ps` output for anyone on the host. The README and
+  both runbook commands in [PROTOCOL.md](docs/PROTOCOL.md) now use `-accounts-file`;
+  the flag itself stays, since the tests use it, with its cost written beside it.
+
+### Added
+
+- **A console run can be shared by its seed.** The console already read `?seed=` at
+  load and nothing ever wrote it, so a run could not be handed to anyone. Reset and a
+  new *Copy link* button now put the seed in the URL.
+
+### Fixed
+
+- **Your own fill never reached the console's tape.** A trade made inside a submit was
+  returned to the handler and announced nowhere — while step 3 of the tutorial says to
+  send a market order and read the print. The submit handlers now append what they got
+  back. Two smaller fixes on the provocation buttons: an alert raised while the call is
+  still running can no longer be missed and wedge the button, and one pressed while the
+  sim is paused steps it far enough to show its own consequence.
+
+- **`TestAppendLatencyExcludesTheSync` read the single worst sample as its p99.** At
+  about sixty samples the nearest rank of p99 *is* the count, so one scheduler pause
+  under `-race` failed a claim about the ninety-ninth percentile on the strength of the
+  hundredth — 4 runs in 10 locally, both jobs on CI. Three hundred orders puts the rank
+  at 297. Equal bucket readings for append and fsync now pass, because that says the
+  histogram ran out of resolution rather than that the append contained the sync;
+  containment is still caught, exactly, by the sum comparison above it.
+
 - **`pages.yml` scopes its permissions per job rather than workflow-wide.** The
   workflow-level block handed both jobs `pages: write` *and* `id-token: write`, so
   `build` — the job that checks out the repo and runs `go build` and a shell script —
