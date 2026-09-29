@@ -22,6 +22,9 @@ python3 -m http.server -d web 8080
 - `app.js` — boots the WASM engine and drives the ladder, imbalance meter, and
   trade tape via the `obReset` / `obSubmit` / `obSnapshot` JS bridge.
 - `obook.wasm`, `wasm_exec.js` — generated; not committed.
+- `og.png` — the 1280×640 social-preview card the pages' `og:image` tags point at.
+  Generated from the running console by `python3 .github/readme/capture.py card`;
+  committed, because Pages serves it as a static file.
 
 ## Roadmap
 
