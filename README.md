@@ -1,7 +1,7 @@
 # orderbook
 
 <p align="center">
-  <a href="https://intrepidkarthi.github.io/orderbook/console.html"><img src=".github/readme/demo.gif" alt="orderbook live console: a user order rests in the book, trades print on the tape, and surveillance flags a flood" width="820"></a>
+  <a href="https://intrepidkarthi.github.io/orderbook/console.html"><img src=".github/readme/demo.gif" alt="orderbook live console: a bid you place rests in the ladder, your market order prints on the tape, and surveillance names the spoofer" width="820"></a>
 </p>
 
 <p align="center"><b><a href="https://intrepidkarthi.github.io/orderbook/">▶ Live demo</a></b> — the real engine, compiled to WebAssembly, running in your browser · <b><a href="https://intrepidkarthi.github.io/orderbook/console.html">▶ Live console</a></b> — a running market with signals and surveillance, every panel titled by the call that produces it.</p>
