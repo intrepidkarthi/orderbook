@@ -9,6 +9,14 @@ versions may include breaking changes).
 
 ### Added
 
+- **How the engine is tested, as a page.** `docs/differential-testing.html` on the site
+  tells the reference-matcher story without the 1,400-line design document: the
+  four-command bug where a rejected order printed a trade between two other accounts,
+  the slow model, the whole-state comparison, the shrinkable tapes and the 21
+  mutations. It also says plainly that the model comparison found only one of the
+  three defects. It links REFERENCE-MATCHER.md and DIFFERENTIAL-FINDINGS.md, which
+  remain the source.
+
 - **Links to the site now unfurl with a card.** None of the four pages carried an
   `og:image` or a Twitter card, so a link to the demo, the console or the docs showed up
   on Hacker News, Reddit, X or Slack as a bare title. Each page now carries Open Graph
@@ -23,6 +31,10 @@ versions may include breaking changes).
   raised no alert. Standard library only, plus Chrome, Go and ffmpeg.
 
 ### Changed
+
+- **The docs page fits a phone.** At 390 px it laid out 736 px wide, because the
+  mobile grid track and a global `main { margin: 0 auto }` let the widest code block set
+  the width of every paragraph. Code now scrolls inside its own box.
 
 - **The README's hero can be read at the width it is shown.** The old GIF was the full
   1280 px page shrunk to 820 px, so the monospace text reached the reader at about
