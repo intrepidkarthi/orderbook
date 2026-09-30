@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>A rejected order that caused someone else&#x27;s trade · orderbook</title>
+  <meta name="description" content="A differential test harness for a Go matching engine: a slow reference matcher, whole-state comparison, shrinkable tapes, what it found, and what it cannot see." />
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="orderbook" />
+  <meta property="og:title" content="A rejected order that caused someone else&#x27;s trade" />
+  <meta property="og:description" content="A differential test harness for a Go matching engine: a slow reference matcher, whole-state comparison, shrinkable tapes, what it found, and what it cannot see." />
+  <meta property="og:url" content="https://intrepidkarthi.github.io/orderbook/docs/differential-testing.html" />
+  <meta property="og:image" content="https://intrepidkarthi.github.io/orderbook/og.png" />
+  <meta property="og:image:width" content="1280" />
+  <meta property="og:image:height" content="640" />
+  <meta property="og:image:alt" content="orderbook, an embeddable limit order book and matching engine in Go, beside a depth ladder captured from the live console" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="stylesheet" href="../style.css" />
+  <style>
+    .docs-main ol { margin: 0 0 14px; padding-left: 22px; } .docs-main ol li { margin: 6px 0; }
+    .tbl.wide td:first-child { white-space: normal; }
+    .docs-main pre.code { overflow-x: auto; }
+    @media (max-width: 800px) { .tbl.wide { display: block; overflow-x: auto; } .docs-top { padding-left: 16px; padding-right: 16px; } .docs-toplinks { gap: 14px; } .docs-toplinks a { white-space: nowrap; } }
+    .docs-meta { color: var(--muted); font-size: 14px; margin: -6px 0 22px; }
+  </style>
+</head>
+<body class="docs-body">
+  <header class="docs-top">
+    <a class="brand" href="../">orderbook</a>
+    <nav class="docs-toplinks">
+      <a href="../">Home</a>
+      <a href="../docs.html">Docs</a>
+      <a href="../console.html">Live console</a>
+      <a href="https://github.com/intrepidkarthi/orderbook">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="docs">
+    <aside class="docs-nav">
+      <nav>
+        <span class="docs-nav-title">Differential testing</span>
+        <a href="#the-bug">The bug</a>
+        <a href="#why-the-existing-tests-missed-it">Why the existing tests missed it</a>
+        <a href="#a-matcher-written-to-be-slow">A matcher written to be slow</a>
+        <a href="#comparing-the-whole-thing">Comparing the whole thing</a>
+        <a href="#tapes-you-can-shrink">Tapes you can shrink</a>
+        <a href="#checking-the-checker">Checking the checker</a>
+        <a href="#what-it-found-and-how">What it found, and how</a>
+        <a href="#pin-first-decide-then-fix">Pin first, decide, then fix</a>
+        <a href="#what-it-still-can-t-do">What it still can&#x27;t do</a>
+      </nav>
+    </aside>
+
+    <main class="docs-main">
+      <section id="the-bug">
+        <h1>A rejected order that caused someone else&#x27;s trade</h1>
+        <p class="docs-meta">How the engine is tested against a second, deliberately slow matcher. The full design and every measurement are in
+        <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/REFERENCE-MATCHER.md">REFERENCE-MATCHER.md</a> and
+        <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/DIFFERENTIAL-FINDINGS.md">DIFFERENTIAL-FINDINGS.md</a>.</p>
+<p>Four commands, default configuration, nothing exotic switched on:</p>
+<ol>
+<li><code>u1</code> rests a sell, 3 lots at 100.</li>
+<li><code>u1</code> rests a sell, 5 lots at 105.</li>
+<li><code>u2</code> rests a buy stop, trigger 100, market for 2. Nothing has traded yet, so the last trade price is 0 and the stop waits.</li>
+<li><code>u3</code> sends a fill-or-kill buy, 5 at 100. It prints 3, can't fill the other 2, and every print is reversed. The order is rejected with no fills.</li>
+</ol>
+<p>After command 4, my matching engine's last trade price was 100. The stop had fired. Trade 2 had printed 2 lots at 100 between <code>u1</code> and <code>u2</code>, a real execution that took <code>u1</code>'s resting order from 3 lots to 1. The event stream for the whole command was one event: <code>REJECTED</code>, naming <code>u3</code>.</p>
+<p>A rejected order caused a trade between two other accounts, and neither of them was told.</p>
+<p>That was two bugs stacked. The first left the last trade price where the reversed print had set it, and stops trigger on that price. The second dropped every event recorded during a command that ended in rejection, including the stop's trigger and the trade it made. Each one alone is a bad day. Together they're a venue that moves client positions silently.</p>
+<p>This page is about the harness I built to find this class of bug. It's also about what the harness didn't find, which turned out to be the more useful lesson.</p>
+      </section>
+<section id="why-the-existing-tests-missed-it">
+<h2>Why the existing tests missed it</h2>
+<p>The engine (<a href="https://github.com/intrepidkarthi/orderbook">orderbook</a>, a limit order book and matching engine in Go) already had two kinds of test coverage, and both were good.</p>
+<p>Fuzzers ran random operations and checked invariants after every one: the book is never crossed, filled plus remaining equals quantity, nothing goes negative. And a hand-written suite of about twenty-five scenarios rebuilt the book from the event stream alone and compared it exactly, covering all five self-trade prevention modes, fill-or-kill both ways, iceberg refills, OCO and stop cascades.</p>
+<p>The two never met. No generated tape was checked against an expected answer, and no hand-written scenario ran more than a few dozen commands. The four commands above combine fill-or-kill with a resting stop. Nobody had written that scenario down, and the invariants were all satisfied: the book wasn't crossed, quantities balanced.</p>
+<p>That's the real gap. Invariants catch a matcher that does something impossible. They can't catch a matcher that is wrong the same way every time. Five wrong rules, all consistent with every invariant the fuzzers checked:</p>
+<table class="tbl wide">
+<thead><tr><th>Wrong rule</th><th>Book crossed?</th><th>Quantity conserved?</th><th>Caught?</th></tr></thead>
+<tbody>
+<tr><td>LIFO within a price level</td><td>no</td><td>yes</td><td>no</td></tr>
+<tr><td>Trade prints at the taker's price</td><td>no</td><td>yes</td><td>no</td></tr>
+<tr><td>Reduce re-queues instead of shrinking in place</td><td>no</td><td>yes</td><td>no</td></tr>
+<tr><td>Level total not decremented on a partial fill</td><td>no</td><td>yes</td><td>no</td></tr>
+<tr><td>Pro-rata remainder to the largest order, not the earliest</td><td>no</td><td>yes</td><td>no</td></tr>
+</tbody></table>
+<p>Four of those are one-token edits. The fourth is a single deleted line, and it corrupts every L2 market-data feed while leaving the order-level book perfect.</p>
+<p>To catch those you need an expected answer on generated input. So I wrote a second matcher.</p>
+</section>
+<section id="a-matcher-written-to-be-slow">
+<h2>A matcher written to be slow</h2>
+<p><code>internal/refmatch</code> is a limit order book written to be read. Each side is a sorted slice, scanned linearly and re-sorted on insert. Cancel is a linear search. Depth is a sum over the orders that are actually there. There is no index, no pool, no map from order id to node.</p>
+<p>The production book has all of those: a <code>map[int64]*node</code>, pooled nodes, a sorted price vector per side, and a level total maintained incrementally on every push and unlink. Every one of those is a place the engine can disagree with itself. The model has no level total to maintain. It adds up the orders, which is exactly why comparing the engine's maintained total against the model's computed one tells you something.</p>
+<p>The model must never be optimised. If the harness gets slow, the answer is shorter tapes or fewer seeds. A model with an index would share the engine's class of bugs.</p>
+<p>It also imports nothing from the module. That rule has a test, <code>TestReferenceMatcherImportsNothing</code>, which parses every file's imports with <code>go/parser</code> and fails on anything that isn't the standard library. The tempting exception was <code>pkg/types</code>, and I refused it. <code>types.Order.Fill</code> is where filled-plus-remaining-equals-quantity is maintained. A model that calls it inherits whatever that arithmetic does, and the invariant the harness then "checks" is one both sides get from the same seven lines. So the model declares its own plain int64 structs and does its own sums. The translation between the two vocabularies lives in one adapter file, the only file allowed to know both sides.</p>
+<p>A prose rule about imports survives until the first afternoon someone needs <code>types.Side</code>. The parser test survives that afternoon.</p>
+</section>
+<section id="comparing-the-whole-thing">
+<h2>Comparing the whole thing</h2>
+<p>After every command, both sides produce an <code>Observation</code>: the verdict, the trades in print order, the full order-level book with queue ranks, the L2 levels, the events, the trading state, the last trade price, and the next order and trade ids. <code>reflect.DeepEqual</code> decides.</p>
+<p>The comparison is over the whole struct, never a field list. A field list is where someone adds a field next year and it silently isn't compared. If something legitimately can't be compared, it doesn't go in the struct.</p>
+<p>I checked that the L2 comparison was earning its place by deleting it. Two planted engine mutations, the missing level-total decrement and a self-trade decrement that doesn't shrink the total, went green. Nothing else in the repo sees a level total drifting from the orders in it. That asymmetry, maintained against summed, is the whole point, and it would have been easy to "simplify" into two sums that agree by construction.</p>
+</section>
+<section id="tapes-you-can-shrink">
+<h2>Tapes you can shrink</h2>
+<p>The inputs are generated command tapes: submits, cancels, reduces, replaces, cancel-alls, halts. A failure on a two-thousand-command tape is a failure nobody debugs, so the harness shrinks it by deleting chunks and keeping any deletion that still fails.</p>
+<p>That only works if every subsequence of a valid tape is still a valid tape, and the first version broke that. A cancel named its target as an index into the ids created so far. Delete an earlier submit and every later cancel quietly retargets a different order, so the shrinker loses the bug and reports it gone. The fix was in the tape format: a command that refers to an earlier order refers to the tape position of the submit that created it. Delete that submit and the cancel names an order that never existed, which both sides reject the same way.</p>
+<p>The shrinker keeps a deletion only if the tape still fails with the same class of divergence (trade price, book rank, level total, event count and so on), so it can't wander off onto a different bug. What it prints is a Go literal you paste into a regression test:</p>
+<pre class="code"><code>// mutation 5, the level total. Only the L2 comparison sees this.
+[]tape.Cmd{
+    {Pos: 91, Kind: tape.Submit, User: &quot;u3&quot;, Sell: true, Price: 98, Qty: 7, STP: 1},
+    {Pos: 103, Kind: tape.Submit, User: &quot;u1&quot;, Price: 98, Qty: 3, STP: 3},
+}</code></pre>
+</section>
+<section id="checking-the-checker">
+<h2>Checking the checker</h2>
+<p>A test doesn't count until it has failed against code broken the way it claims to detect. So I planted 21 mutations in the engine: LIFO in a level, printing at the taker's price, reversing a fill without restoring the maker, reusing an order id, and so on.</p>
+<p>The committed sweep caught all 21. Every shrunk reproduction was 1 to 4 commands. And one seed on its own caught only 8 of the first 18. The ten it missed were self-trade prevention, the fill-or-kill unwind, the reduce path, post-only at the touch and the whole pro-rata profile. That number is why the sweep runs many seeds across three profiles. When it landed that was 16 tapes and 2,240 commands, compared in about a quarter of a second.</p>
+</section>
+<section id="what-it-found-and-how">
+<h2>What it found, and how</h2>
+<p>Building it surfaced three real bugs. It matters how each one surfaced, because two of them are not a win for the model comparison.</p>
+<p>The first two are the pair from the top of this post. I predicted both while writing the spec, by reading <code>recordLast</code> against the fill-or-kill unwind, and the rejection path's handling of pending events. The model was then written to reproduce the engine's position on both, deliberately, which means the differential comparison was silent about both bugs by construction. Two implementations written from the same wrong sentence agree. Hand-written tests pinned them instead.</p>
+<p>The second one got worse as I measured it. The same dropped-events line produced four defects, not one. The nastiest was an OCO: a client's protective stop leg was cancelled when a stranger's fill-or-kill consumed the primary, the fill-or-kill then failed, the primary was restored to the book, and the stop leg stayed cancelled. The only event was <code>REJECTED</code>, naming the stranger.</p>
+<p>The third was a genuine find, on the first pro-rata seed. Two commands: <code>u0</code> rests a sell 5 at 99, then <code>u0</code> buys 5 at 100. Under price-time priority, self-trade prevention cancels the taker. Under pro-rata, the matcher skipped the taker's own liquidity, found nothing else eligible at 99, ended the walk and rested the remainder. The book was 100 bid, 99 ask.</p>
+<p>It was worse than a crossed book. <code>matchProRata</code> never called self-trade prevention at all, so every one of the five modes produced the same crossed book. A venue configured to allow self-trades didn't get the trade it asked for, and one configured to cancel both orders cancelled neither. Pro-rata was silently overriding the venue's configuration. On the committed sweep the pro-rata profile sat crossed after 107 of its 700 commands.</p>
+<p>And the model comparison didn't catch this one either. The invariant checker did, running on the engine side of a generated tape. What won was the generated tape, and that was the gap from the start.</p>
+</section>
+<section id="pin-first-decide-then-fix">
+<h2>Pin first, decide, then fix</h2>
+<p>None of the three was fixed in the slice that found them. Each was pinned by a test asserting the wrong behaviour, carrying the sentence a fix would have to come and delete, because each had more than one defensible answer. A pinned bug is a known liability with a reproduction. A bug fixed in the wrong direction is a new rule nothing argues for, buried in a diff that the next person reads as intentional.</p>
+<p>The decision document found one rule that both of the first two break: after a command the venue refuses, its observable state equals what it was before, or every difference is on the event stream. That gives two remedies, revert or announce, and one test to pick between them: revert what the venue can restore without loss, announce what it can't. The last trade price is one derived number, so restoring it loses nothing, and it's reverted. A cancelled maker can't be put back without losing its queue position, so its cancellation is announced. The rule was already how the engine's <code>Cancel</code>, <code>Reduce</code> and expiry paths behaved. One function didn't follow it.</p>
+<p>Pro-rata had five options on the table. The one chosen deletes a rule instead of adding one: a pro-rata taker doesn't skip its own liquidity, and self-trade prevention applies exactly as it does under price-time priority. The crossed count on the sweep is now 0.</p>
+<p>Every fix touched three places: the engine, the model, and the pinning test, inverted. Fix only the engine and the suite goes red across several seeds, and the next person relaxes the comparison to make it pass. Fix only the model and the suite goes green while the venue still does it.</p>
+</section>
+<section id="what-it-still-can-t-do">
+<h2>What it still can't do</h2>
+<p>The harness enforces mechanical independence: no shared code, no shared types, no shared arithmetic. It does not have derivation independence, and I can show you the evidence. Some comment lines are byte-identical between the model and the engine. The five self-trade prevention branches appear in the same order with the same shape. The pro-rata function is close to a line-for-line parallel. The model was not written blind to the engine, and it shows.</p>
+<p>Mutation testing still works, because a mutation changes one side only. What it can't see is a rule I got wrong in both places. The honest fix is a second model written from the spec by someone who has never read <code>engine.go</code>. Rewording the duplicated comments would remove the evidence and none of the dependence.</p>
+<p>If you want to try that, the spec is <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/REFERENCE-MATCHER.md">REFERENCE-MATCHER.md</a> sections 2.3 and 3.4, and the decisions are in <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/DIFFERENTIAL-FINDINGS.md">DIFFERENTIAL-FINDINGS.md</a>. The whole sweep runs in under a second:</p>
+<pre class="code"><code>go test ./pkg/matching -run TestDifferentialTape</code></pre>
+</section>
+    </main>
+  </div>
+
+  <script>
+    // Highlight the current section in the sidebar as you scroll.
+    const links = [...document.querySelectorAll(".docs-nav a")];
+    const map = new Map(links.map((a) => [a.getAttribute("href").slice(1), a]));
+    const obs = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            links.forEach((a) => a.classList.remove("on"));
+            const a = map.get(e.target.id);
+            if (a) a.classList.add("on");
+          }
+        });
+      },
+      { rootMargin: "-10% 0px -80% 0px" }
+    );
+    document.querySelectorAll(".docs-main section").forEach((s) => obs.observe(s));
+  </script>
+</body>
+</html>

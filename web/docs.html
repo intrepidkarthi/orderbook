@@ -309,6 +309,7 @@ types      (Order, Trade, iceberg, errors)</code></pre>
         <table class="tbl">
           <thead><tr><th>Document</th><th>What's inside</th></tr></thead>
           <tbody>
+            <tr><td><a href="docs/differential-testing.html">Differential testing</a></td><td>How the engine is checked against a second, deliberately slow matcher: whole-state comparison, shrinkable tapes, the bugs it surfaced, and what it still cannot see.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/THREAT-MODEL.md">THREAT-MODEL.md</a></td><td>Order-book attacks &amp; defenses: 27-attack catalogue with real enforcement cases, top-ten deep dives, what the engine defends, and the core-vs-layer boundary.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/CONFIG.md">CONFIG.md</a></td><td>Every configuration knob — instrument grid, engine policy, and all pre-trade risk controls — with defaults and validation.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/INTEGRATION.md">INTEGRATION.md</a></td><td>Embedding &amp; operating the engine: reference architecture, WAL/recovery, market integrity, backpressure, scaling, and a production checklist.</td></tr>
