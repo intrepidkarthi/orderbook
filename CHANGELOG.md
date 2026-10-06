@@ -9,6 +9,22 @@ versions may include breaking changes).
 
 ### Added
 
+- **The benchmark gate runs on CI, and has failed what it should.** `bench-gate.yml`
+  compares base against head on every push that touches the matcher. It runs
+  report-only, with dispatch modes `compare`, `aa` (head against itself, code layout
+  moved) and `anchor` (against the last release, weekly). The judge is built from the
+  base tree, and a step re-derives the digest vector's hashes with `perl` and
+  `sha256sum`. Measured on `ubuntu-latest`:
+  - Ten A/A runs with enforcement on, across three CPU models, all passed. The worst
+    median was 1.087, held off by its lower bound of 0.989.
+  - A planted ~2× slowdown in `Engine.Match` failed four benchmarks.
+  - A ~14% one failed `Engine_MatchInto` with its lower bound at 1.074.
+  - One extra allocation per match failed the allocation check on four benchmarks.
+
+  The numbers, and seven places the spec was wrong about its own design, are in
+  [BENCH-GATE.md](docs/BENCH-GATE.md) §12. Enforcement on push waits for the 60-run
+  calibration in §9.4.
+
 - **Benchmarks that can fail, base against head.** `cmd/benchgate` builds two trees
   and runs each gated benchmark for 10 interleaved rounds (A B B A / B A A B). Before
   every run it takes two machine probes, an ALU loop and a 64 MiB memory walk. A
