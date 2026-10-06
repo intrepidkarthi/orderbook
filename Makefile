@@ -81,7 +81,7 @@ bench-check: ## Gate: benchmarks of the working tree against the merge base (ENF
 		git worktree add --detach -q "$$tmp/base" "$$base" || exit 2; \
 		if [ -d "$$tmp/base/cmd/benchgate" ]; then \
 			(cd "$$tmp/base" && $(GO) build -o "$$tmp/benchgate" ./cmd/benchgate) && \
-			"$$tmp/benchgate" compare -base-dir "$$tmp/base" -head-dir . $(if $(ENFORCE),-enforce) $(if $(BENCH_ONLY),-only '$(BENCH_ONLY)') -out bench-result.json; \
+			"$$tmp/benchgate" compare -base-dir "$$tmp/base" -head-dir . $(if $(ENFORCE),-enforce) $(if $(BENCH_ONLY),-only '$(value BENCH_ONLY)') -out bench-result.json; \
 			status=$$?; \
 		else \
 			echo "benchgate: not compared: no base gate at $$base"; status=0; \
