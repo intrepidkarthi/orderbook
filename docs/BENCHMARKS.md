@@ -5,10 +5,11 @@ the harness is in-repo so anyone can reproduce them.
 
 > **The figures on this page are not regression targets.** A regression is caught by a
 > different mechanism: [`BENCH-GATE.md`](BENCH-GATE.md). It compares base against head
-> in one job on one runner, interleaved, with no stored baseline, and it is report-only
-> on push until its A/A calibration has run. It gates the timing of five benchmarks,
-> including a replay of a committed 50,000-command tape, and the allocations of every
-> core benchmark. The numbers below are a local measurement on one machine and are
+> in one job on one runner, interleaved, with no stored baseline. Since its 60-run A/A
+> calibration it fails a push on any allocation increase in a core benchmark and on a
+> timing regression in `Engine_CancelReplaceInto` (it caught a ~1.20× slowdown in 20 of
+> 20 runs). It measures and reports the timing of four more, including a replay of a
+> committed 50,000-command tape, without failing on them. The numbers below are a local measurement on one machine and are
 > not what the gate compares. The three allocation ratios in
 > `pkg/orderbook/alloc_test.go` (`TestCancelIsAllocationFree`,
 > `TestCancelReplaceIsAllocationFree`, `TestAddAloneDoesAllocate`) still fail ordinary

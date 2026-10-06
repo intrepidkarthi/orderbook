@@ -1,6 +1,6 @@
 # Benchmark Gate — A Slowdown That Can Fail a Build, and a Tape Another Matcher Can Replay
 
-Status: **built (slice A); slice B in progress (§14)** — part of milestone M10 in
+Status: **built: slice A, and slice B's calibration and enforcement (§15); `pull_request` pending** — part of milestone M10 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md), written before the code, as this
 repository does it · Author: Karthikeyan NG · Last updated: 2026-10-06
 
@@ -913,6 +913,64 @@ threshold after seeing which one the data allows is not calibration.
 
 Each is independent and none blocks enforcement: allocation classes for `pkg/wal`, the
 `sink=count` replay variant, and moving obsoak onto a shared probe.
+
+## 15. What slice B found
+
+Written on 2026-10-06, after the calibration and power runs.
+
+### 15.1 Calibration: 60 A/A′ runs
+
+Dispatched together on `ubuntu-latest`, `mode: aa`, `enforce: true`. They landed on six
+CPU models: AMD EPYC 7763 (25 runs), 9V45 (15), 9V74 (12), Intel Xeon Platinum 8573C
+(5), 8370C (2) and Xeon 6973P-C (1). **All 60 passed.** No false failure in 60 bounds the
+per-run false-positive rate below 5% at 95% confidence.
+
+| Benchmark | Failed | Inconclusive | Median range | Max abs(median − 1) | 1 + 3× that | §14.2 decision |
+|---|---:|---:|---|---:|---:|---|
+| `Engine_CancelReplaceInto` | 0 | 0 | 0.980 – 1.017 | 0.0199 | 1.060 | **enforce** |
+| `OrderBook_LevelChurn` | 0 | 1 | 0.980 – 1.037 | 0.0365 | 1.110 | report only |
+| `Engine_MatchInto` | 0 | 0 | 0.958 – 1.047 | 0.0473 | 1.142 | report only |
+| `TapeReplay/sink=nil` | 0 | 0 | 0.975 – 1.068 | 0.0675 | 1.203 | report only |
+| `OrderBook_CancelReplace` | 0 | 0 | 0.906 – 1.058 | 0.0945 | 1.283 | report only |
+
+Allocation counts disagreed between the arms in **none** of the 60 runs, so allocation
+enforcement stays on for every gated benchmark.
+
+**One thing the rule was not written to use, recorded for a later slice.** The headroom
+criterion is about medians, but a timing failure needs the median above 1.10 **and** the
+k-th ratio above 1.05. Across all 300 benchmark-runs, the highest k-th ratio was 1.011,
+and between 0 and 8 pairs per benchmark were tainted (mean 2.4). The lower bound is the
+part doing the protecting. A criterion stated on it would clear more benchmarks. Per
+§14.2, that is a change to this document with its own calibration, not a reading of
+this data.
+
+### 15.2 Power
+
+A 70-iteration loop at the top of `Engine.Match`, on a throwaway branch, compared against
+`main` in 20 dispatched runs with `enforce: true`:
+
+| Benchmark | Failed | Median range | k-th range |
+|---|---:|---|---|
+| `Engine_CancelReplaceInto` (enforced) | **20 / 20** | 1.196 – 1.306 | 1.160 – 1.295 |
+| `Engine_MatchInto` | 20 / 20 | 1.236 – 1.447 | 1.209 – 1.413 |
+| `TapeReplay/sink=nil` | 19 / 19 | 1.166 – 1.281 | 1.120 – 1.223 |
+| `OrderBook_*` (not planted) | 0 | 0.976 – 1.052 | — |
+
+§9.4 asked for at least 19 of 20 on each enforced benchmark. The detection floor this
+measures, about 1.20× on `Engine_CancelReplaceInto`, is printed in every summary.
+
+### 15.3 What changed on the strength of it
+
+- Push runs pass `-enforce`. The judge, built from the base, fails a push on:
+  - any allocation increase not covered by a trailer;
+  - a timing failure on `Engine_CancelReplaceInto`;
+  - a second inconclusive on that benchmark;
+  - a malformed trailer;
+  - a gate change without `Bench-Gate-Change:`.
+- Timing failures on the other four still print, marked
+  `fail (report only: not calibrated to enforce)`.
+- **Not yet:** the `pull_request` trigger. §14.1 waits for a week of enforced pushes
+  without a false failure, and that week starts with the push that landed this.
 
 ## Appendix: Review points not taken
 

@@ -45,7 +45,7 @@ go test -race ./...
 make bench
 ```
 
-The benchmarks measure the core, not an end-to-end venue. Regressions are checked by a base-against-head comparison on five benchmarks (`make bench-check`, and [a CI gate](docs/BENCH-GATE.md) that is report-only until its calibration has run). See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the measurement boundary and [docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) before using the gateway with anything valuable.
+The benchmarks measure the core, not an end-to-end venue. Regressions are checked by a base-against-head comparison (`make bench-check`, and [a CI gate](docs/BENCH-GATE.md) that fails a push on an allocation increase in any core benchmark and on a timing regression in the one benchmark its calibration cleared). See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the measurement boundary and [docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) before using the gateway with anything valuable.
 
 ---
 
