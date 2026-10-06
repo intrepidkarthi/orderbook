@@ -9,6 +9,23 @@ versions may include breaking changes).
 
 ### Added
 
+- **Benchmarks that can fail, base against head.** `cmd/benchgate` builds two trees
+  and runs each gated benchmark for 10 interleaved rounds (A B B A / B A A B). Before
+  every run it takes two machine probes, an ALU loop and a 64 MiB memory walk. A
+  benchmark fails when the median paired ratio is above 1.10 and a distribution-free
+  lower bound on it is above 1.05. Allocations are compared on medians, with no slack
+  except a measured 8 on the tape replay. `make bench-check` runs it locally against
+  the merge base, with the judge built from the base tree so the change under test
+  cannot loosen it. No stored baseline is used: 30 past CI runs landed on 5 CPU models,
+  and the same code moved by up to 3.5× between them.
+
+  Two findings changed the design before it shipped. The tape replay's allocation
+  count is not exactly repeatable: identical code read 9,060 to 9,063, so an exact
+  rule failed it. And a cap of two tainted pairs made the gate blind on a busy
+  machine, missing a planted 7× slowdown. Tainted pairs are now left out, with at
+  least 12 clean ones required. Thresholds stay targets until the A/A calibration in
+  [BENCH-GATE.md](docs/BENCH-GATE.md) §9.4 has run.
+
 - **A committed bench tape, and a digest of what a matcher made of it.** The first
   half of the benchmark gate in [BENCH-GATE.md](docs/BENCH-GATE.md).
   `internal/benchgate/testdata/bench-v1.obt` is 50,000 commands from a new `tape.Bench`
