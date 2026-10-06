@@ -181,6 +181,16 @@ type Profile struct {
 	// Phases pins phase transitions to fixed command indices, so every consumer of
 	// a profile runs the same session however long its tape is.
 	Phases map[int]Phase
+	// Portable makes a tape another matcher can replay without this engine's
+	// self-trade prevention. Each account trades one side only, decided by its
+	// number (even buys, odd sells), so no account can ever meet its own order, and
+	// the per-order STP mode and the privileged flag are left unset.
+	//
+	// It follows ExoticDamp's rule: every draw is still TAKEN, at the same position
+	// in the stream, and only the values written into the command change. Skipping
+	// the draws instead would shift everything after the first one, so the same seed
+	// would produce a different tape. TestPortableKeepsDrawCount enforces that.
+	Portable bool
 }
 
 // Differential is the tier-1 alphabet: everything that changes what the matching
@@ -242,6 +252,28 @@ var Recovery = Profile{
 	},
 }
 
+// Bench is the workload frozen into the committed performance tape
+// (docs/BENCH-GATE.md §2.1). None of the correctness profiles is one: measured at
+// 100,000 commands, Differential's halt, resume and cancel-only weights leave the
+// engine halted for long stretches, so 65% of its submits are refused.
+//
+// So this profile draws no state changes at all, cancels heavily, and spreads a
+// wide pool of accounts over 41 price levels so the book builds depth. Exotic
+// orders are on, damped as Recovery's are, because with Exotic off the tape would
+// be plain GTC limits and nothing else. It is Portable, so another matcher can
+// replay it without implementing this engine's self-trade prevention.
+var Bench = Profile{
+	Name:       "bench",
+	Weights:    weights(map[Kind]int{Submit: 60, Cancel: 25, Reduce: 7, Replace: 8}),
+	Users:      64,
+	PriceLo:    1000,
+	PriceSpan:  41,
+	QtyMax:     9,
+	Exotic:     true,
+	ExoticDamp: 4,
+	Portable:   true,
+}
+
 func weights(w map[Kind]int) [KindCount]int {
 	var out [KindCount]int
 	for k, v := range w {
@@ -292,6 +324,11 @@ func Gen(p Profile, seed uint64, n int) []Cmd {
 			fillOrder(&r, p, &c)
 			c.Target = aimRecent(&r, i)
 			c.User = aimAtOwner(out, c.Target, &r, c.User)
+			if p.Portable {
+				// The replacement belongs to whoever ends up sending it, so it takes
+				// that account's side. The draw that set Sell has already been taken.
+				c.Sell = sellsOnly(c.User)
+			}
 		case Cancel:
 			c.Target = aimRecent(&r, i)
 			c.User = aimAtOwner(out, c.Target, &r, user(&r, p))
@@ -371,6 +408,17 @@ func pick(r *lcg, w [KindCount]int, total int) Kind {
 
 func user(r *lcg, p Profile) string { return fmt.Sprintf("u%d", r.intn(int64(p.Users))) }
 
+// sellsOnly is a Portable tape's side rule: odd-numbered accounts only sell and
+// even-numbered ones only buy. Reading it off the name keeps it a pure function of
+// the account, whichever draw produced that account.
+func sellsOnly(u string) bool {
+	n := 0
+	for _, ch := range strings.TrimPrefix(u, "u") {
+		n = n*10 + int(ch-'0')
+	}
+	return n%2 == 1
+}
+
 // aimAtOwner points a cancel, reduce or replace at the account that submitted the
 // order it names — three times in four.
 //
@@ -427,10 +475,18 @@ func aimBelow(out []Cmd, target int, r *lcg, p Profile) int64 {
 func fillOrder(r *lcg, p Profile, c *Cmd) {
 	c.User = user(r, p)
 	c.Sell = r.intn(2) == 1
+	if p.Portable {
+		c.Sell = sellsOnly(c.User)
+	}
 	c.Price = p.PriceLo + r.intn(p.PriceSpan)
 	c.Qty = 1 + r.intn(p.QtyMax)
 	if !p.Exotic {
 		return
+	}
+	if p.Portable {
+		// Every draw below is still taken; the two that only this engine can act on
+		// are cleared once it has been.
+		defer func() { c.STP, c.Privileged = 0, false }()
 	}
 	// Every draw below is taken at the same POSITION in the stream whatever the damp
 	// is, so a profile at damp 0/1 generates exactly the tape it generated before

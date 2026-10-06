@@ -28,7 +28,7 @@ func TestLCGVectorIsPinned(t *testing.T) {
 // TestGenIsDeterministic guards the whole harness: if the tape drifts between runs,
 // every assertion built on it becomes meaningless.
 func TestGenIsDeterministic(t *testing.T) {
-	for _, p := range []Profile{Differential, ProRata, Recovery} {
+	for _, p := range []Profile{Differential, ProRata, Recovery, Bench} {
 		a, b := Gen(p, 7, 300), Gen(p, 7, 300)
 		if len(a) != 300 || len(b) != 300 {
 			t.Fatalf("%s: Gen returned %d and %d commands, want 300", p.Name, len(a), len(b))
@@ -128,5 +128,69 @@ func TestEveryKindIsNamed(t *testing.T) {
 		if strings.HasPrefix(k.String(), "Kind(") {
 			t.Errorf("Kind %d has no name, so a shrunk tape naming it will not compile", k)
 		}
+	}
+}
+
+// TestPortableKeepsDrawCount is the guard ExoticDamp has, applied to Portable: the
+// knob may change what a command SAYS, never how many draws produced it. Turn it off
+// and every field the rule does not touch must come out identical, command for
+// command. A Portable that skipped a draw instead of discarding it would shift the
+// whole stream after the first exotic order, and this fails at that command.
+func TestPortableKeepsDrawCount(t *testing.T) {
+	plain := Bench
+	plain.Portable = false
+	for _, seed := range []uint64{1, 7, 0x5EED1234} {
+		a, b := Gen(Bench, seed, 5000), Gen(plain, seed, 5000)
+		for i := range a {
+			x, y := a[i], b[i]
+			x.Sell, y.Sell = false, false
+			x.STP, y.STP = 0, 0
+			x.Privileged, y.Privileged = false, false
+			if x != y {
+				t.Fatalf("seed %#x: Portable moved the stream at command %d:\n portable %+v\n    plain %+v", seed, i, a[i], b[i])
+			}
+		}
+	}
+}
+
+// TestPortableTapeHasNoSelfCrossUser checks the property Portable exists for: no
+// account ever appears on both sides, so no matcher needs self-trade prevention to
+// replay the tape. It also checks the tape is still worth replaying, because a rule
+// that made every order a buy would pass the first half trivially.
+func TestPortableTapeHasNoSelfCrossUser(t *testing.T) {
+	side := map[string]bool{}
+	var buys, sells, market, postOnly, ioc, fok int
+	for _, c := range Gen(Bench, 0x5EED1234, 50000) {
+		if c.Kind != Submit && c.Kind != Replace {
+			continue
+		}
+		if c.STP != 0 || c.Privileged {
+			t.Fatalf("command %d carries STP %d / privileged %v on a Portable tape", c.Pos, c.STP, c.Privileged)
+		}
+		if s, seen := side[c.User]; seen && s != c.Sell {
+			t.Fatalf("command %d: %s trades both sides", c.Pos, c.User)
+		}
+		side[c.User] = c.Sell
+		if c.Sell {
+			sells++
+		} else {
+			buys++
+		}
+		switch {
+		case c.MarketOrd:
+			market++
+		case c.PostOnly:
+			postOnly++
+		}
+		switch c.TIF {
+		case 1:
+			ioc++
+		case 2:
+			fok++
+		}
+	}
+	if buys == 0 || sells == 0 || market == 0 || postOnly == 0 || ioc == 0 || fok == 0 {
+		t.Fatalf("Portable tape lost part of its alphabet: buys %d sells %d market %d post-only %d IOC %d FOK %d",
+			buys, sells, market, postOnly, ioc, fok)
 	}
 }
