@@ -45,7 +45,7 @@ go test -race ./...
 make bench
 ```
 
-The benchmarks are regression checks for the core, not an end-to-end venue capacity test. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the measurement boundary and [docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) before using the gateway with anything valuable.
+The benchmarks measure the core, not an end-to-end venue. Regressions are checked by a base-against-head comparison on five benchmarks (`make bench-check`, and [a CI gate](docs/BENCH-GATE.md) that is report-only until its calibration has run). See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the measurement boundary and [docs/PRODUCTION-READINESS.md](docs/PRODUCTION-READINESS.md) before using the gateway with anything valuable.
 
 ---
 
@@ -407,6 +407,7 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [EXCHANGE-ARCHITECTURE.md](docs/EXCHANGE-ARCHITECTURE.md) | How real venues (MetaTrader, Binance, Coinbase, Nasdaq/LMAX/CME/IEX, dYdX/Hyperliquid) implement matching, and the incidents that shaped this design. |
 | [SPEC.md](docs/SPEC.md) | Architecture, the order model, core design decisions, and performance targets. |
 | [BENCHMARKS.md](docs/BENCHMARKS.md) | Performance results, methodology, and how to reproduce. |
+| [BENCH-GATE.md](docs/BENCH-GATE.md) | The benchmark gate: a committed tape another matcher can replay, a portable output digest, and a base-against-head comparison that can fail, with what it found. |
 | [LEARN.md](docs/LEARN.md) | Order books and market making from first principles. |
 | [research-roadmap.md](docs/research-roadmap.md) | The microstructure research agenda: OFI, Kyle's λ, Avellaneda–Stoikov, delta/CVD — and [what data it runs on](docs/research-roadmap.md#0-data-and-scope). |
 | [research/ofi.md](docs/research/ofi.md) | Does order-flow imbalance predict the next move? Contemporaneous R² ≈ 0.24, predictive R² ≈ 0.0004 — a ~577× gap, and the little that remains points the other way. |

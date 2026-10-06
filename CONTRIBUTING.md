@@ -32,6 +32,10 @@ Or directly: `go test -race ./...`, `go vet ./...`.
 1. Branch from `main`.
 2. Keep commits small and focused; write a clear message.
 3. Make sure `make check` passes and `gofmt` is clean.
+   If the change touches `pkg/matching` or `pkg/orderbook`, also run `make bench-check`.
+   It compares your working tree against the merge base on this machine, the way CI's
+   bench gate does after a push ([docs/BENCH-GATE.md](docs/BENCH-GATE.md)). Changes reach
+   `main` by direct push, so this is the only comparison that happens before one does.
 4. Open a PR describing the change and how you verified it.
 
 ## Before a large PR — scope & quality bar

@@ -729,6 +729,13 @@ behaviour and hit Rule 20 is to regenerate, and regeneration is precisely where 
 is demanded. There is no sequence of commands that produces a green tree with changed
 behaviour and an unchanged number.
 
+*Added 2026-10-06, with the benchmark gate:* a bump also regenerates
+`internal/benchgate/testdata/bench-v1.digest` with `BENCHGATE_UPDATE=1`. That file
+records the version it was written at and fails ordinary `go test` once the version
+moves, and it refuses to be rewritten at an unchanged one, the same tooth as this rule
+([`BENCH-GATE.md`](BENCH-GATE.md) §3.5). The bench tape is narrower than the corpus, so a
+bump may leave its digest identical; then only its `semantics` line changes.
+
 *Rule 22 — a version greater than the golden's with an IDENTICAL body also fails.*
 *Reason:* this looks backwards and it is the rule §1.1 exists to support. A bump that
 changes nothing observable is a false alarm, false alarms are what teach operators to

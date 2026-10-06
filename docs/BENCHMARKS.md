@@ -3,21 +3,24 @@
 Performance of the core library, measured with Go's benchmark tooling. Not marketing —
 the harness is in-repo so anyone can reproduce them.
 
-> **These are not tracked as regression targets, and this page used to say they were.**
-> `.github/workflows/bench.yml` runs `go test -bench` and pipes the output into the run
-> summary. There is no stored baseline, no `benchstat` comparison, and no condition that
-> can fail a build. The only performance facts in this repository that a test can fail
-> on are the three allocation ratios in `pkg/orderbook/alloc_test.go`
-> (`TestCancelIsAllocationFree`, `TestCancelReplaceIsAllocationFree`,
-> `TestAddAloneDoesAllocate`) — which is why those three are asserted as *ratios against
-> a measured baseline* rather than as absolute numbers. Building the missing half — a
-> committed tape, a recorded machine configuration and a comparison that can fail — is
-> [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) M10.
+> **The figures on this page are not regression targets.** A regression is caught by a
+> different mechanism: [`BENCH-GATE.md`](BENCH-GATE.md). It compares base against head
+> in one job on one runner, interleaved, with no stored baseline, and it is report-only
+> on push until its A/A calibration has run. It gates the timing of five benchmarks,
+> including a replay of a committed 50,000-command tape, and the allocations of every
+> core benchmark. The numbers below are a local measurement on one machine and are
+> not what the gate compares. The three allocation ratios in
+> `pkg/orderbook/alloc_test.go` (`TestCancelIsAllocationFree`,
+> `TestCancelReplaceIsAllocationFree`, `TestAddAloneDoesAllocate`) still fail ordinary
+> `go test` on their own. This page used to call its figures regression targets when
+> nothing could fail on them.
 
 ## Reproduce
 
 ```sh
 make bench
+# base against head, as the gate runs it (ENFORCE=1 to fail on a regression):
+make bench-check
 # or:
 go test -run '^$' -bench=. -benchmem ./pkg/orderbook/ ./pkg/matching/
 # the durable path (Runner + EventSink + WAL):
@@ -26,7 +29,10 @@ go test -run '^$' -bench=. -benchmem ./pkg/wal/
 
 CI also runs these on every push and publishes the numbers to the
 [**Benchmarks** workflow](https://github.com/intrepidkarthi/orderbook/actions/workflows/bench.yml)
-run summary (neutral GitHub-hosted hardware).
+run summary. Read those as one sample from whatever runner GitHub assigned: across 30
+past runs it assigned five CPU models, and the same code moved by up to 3.5× between
+them. The comparison that can fail is the
+[**Bench gate** workflow](https://github.com/intrepidkarthi/orderbook/actions/workflows/bench-gate.yml).
 
 ## How to read these numbers
 
@@ -620,9 +626,10 @@ it was not applied there. Do not compare throughput across runs without it.
   submit/cancel/match allocate nothing (docs/SPEC.md §6.1). `Process` is the
   ergonomic wrapper that builds a `*MatchResult` (4 allocs); use `Match` when
   latency matters. Decimals were removed from the hot path in v0.2.0.
-- **Numbers vary by hardware.** GitHub-hosted runners are typically slower than
-  an M-series laptop; use the CI run summary for a neutral baseline and your own
-  machine for local comparison.
+- **Numbers vary by hardware, and so do the runners.** GitHub-hosted runners are
+  typically slower than an M-series laptop, and they are not one machine: the CI run
+  summary is a sample, not a baseline. Compare two revisions with `make bench-check`,
+  which runs both on the same machine in one job.
 - **These are microbenchmarks.** They measure the core data structures and match
   loop in isolation, not end-to-end system throughput (which also involves
   persistence, networking, and risk checks that live in layers above the core).

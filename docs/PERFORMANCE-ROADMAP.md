@@ -92,7 +92,7 @@ one-line summary says *which part*.
 | M7 | Independent reconciliation | **not started** | The word "ledger" appears in no Go file. Every divergence property the repo claims is proven by an in-process test and by no running consumer. |
 | M8 | Market-data guarantees | **partial** | Commit point, dense sequence, retention, eviction, incarnation fence and full bust handling are built and proven over sockets. No subscriber-lag metric, no gap counter, no resnapshot limit, no drop copy. |
 | M9 | Model-based matching tests | **done for the continuous session** | `internal/refmatch` is an independent reference matcher and `pkg/matching/differential_test.go` compares a whole `Observation` after every command of a generated tape. Twenty-one deliberate engine mutations are all caught, each shrinking to 1-4 commands. Time-based TIF, the exotics and the auction are a written-down tier 2, and building this found three engine defects. |
-| M10 | Performance laboratory | **partial** | A substantial Go-only lab: seven latency scenarios to p99.99, durable-path and recovery benches, allocation pinned by direct measurement. No shared tape, no portable digest, no stage attribution, and the cross-language half does not exist in the repository. |
+| M10 | Performance laboratory | **partial** | A substantial Go-only lab, and since 2026-10-06 a committed 50,000-command tape, a portable output digest the engine and refmatch agree on, and a base-against-head gate that has failed planted regressions on CI ([`BENCH-GATE.md`](BENCH-GATE.md); report-only until its A/A calibration). No stage attribution, and the cross-language half does not exist in the repository. |
 | M11 | Optimize matching data structures | **partial** | Profile-first discipline is followed and one measured index replacement landed (cancel 47.7 ns → 23.3 ns). Experiments 2, 3 and 5 are untouched, 4 is half done, and no alternative is kept behind an interface for A/B — which is what the milestone asks for. |
 | M12 | Control runtime and hardware behavior | **not started** | Established by grep: `GOMAXPROCS`, `LockOSThread`, `GOGC`, `GOMEMLIMIT` and `PGO` each appear exactly once in the repository, in this file. |
 | M13 | Capacity and operational evidence | **partial** | A real harness, a nightly hosted soak, and a 4 h × 3-book × 14.4 M-message run with flat goroutines and descriptors. No 24 h run, no reconnect storm, no slow reader, no clock drill, and the load carries only limit GTC and IOC. |
@@ -904,6 +904,12 @@ Assert after every command:
 > **Status: partial — a substantial Go-only lab exists; the two pieces that make it a
 > *shared* laboratory do not.**
 >
+> **Update, 2026-10-06.** The tape and the digest now exist, and so does a comparison
+> that can fail: [`BENCH-GATE.md`](BENCH-GATE.md), slice A. The "no shared command
+> tape", "no portable output digest" and "no baseline" findings below are answered there
+> and kept as written, because they are what the slice was built against. Stage
+> attribution, the workload list and the cross-language half are still open.
+>
 > **Built.** Workload scenarios with stated preloads and quantiles out to p99.99
 > (`pkg/matching/latency_scenarios_test.go`): AddOnly, CancelOnly, AggressiveWalk,
 > Mixed_70_20_10, MassCancelBurst, STPSweep, ThinBook, plus CancelHeavy. Core benches
@@ -923,7 +929,7 @@ Assert after every command:
 > inline with modular arithmetic, so there is no seed to record and no tape file
 > another implementation could replay. *No portable output digest* —
 > `EngineSnapshot.Digest` disqualifies itself in its own comment
-> (`pkg/matching/snapshot.go:297-302`: "stable between processes running the same
+> (`pkg/matching/snapshot.go:313-315`: "stable between processes running the same
 > release and nothing stronger"), so it cannot certify that a C++ or Rust matcher
 > produced the same result. *No stage attribution*: the milestone asks for queue,
 > match, WAL and publication delay separately, and the only server-side histogram
@@ -1406,8 +1412,10 @@ The project should continue to scale **across symbols and layers**, not by addin
 
 - Matching correctness tests pass.
 - Replay is deterministic.
-- Benchmarks are reproducible.
-- Results include workload and machine conditions.
+- Benchmarks are reproducible. *(The tape replay is, from a committed file; the
+  microbenchmarks still synthesise their own flow.)*
+- Results include workload and machine conditions. *(The gate's `bench-result.json`
+  does; the published figures in BENCHMARKS.md name their machine by hand.)*
 
 ## Component pilot-ready
 
@@ -1448,7 +1456,7 @@ being read.
 2. **Export the sequence trio.** WAL written, last applied, last synced, plus commit mode and replica lag, as gauges from `cmd/obgw` and `examples/replication`. M2 and M4 both block on it, and [`REPLICATION.md`](REPLICATION.md) §4 already promises a graph that does not exist.
 3. ✅ **Build the reference matcher and the random-tape differential harness** (M9), including the four missing per-command invariants. `internal/refmatch` is an independent model, `internal/tape` is the one generator, and `TestDifferentialTape` compares a whole observation after every command of 2,240 generated commands. All four missing invariants are now asserted on the generated path — the fourth, snapshot-restore-equals-uninterrupted, needed two assertions rather than one, and adversarial review is what established that the version that shipped first was a digest round-trip blind to the state `LoadSnapshot` rebuilds. Twenty-one deliberate engine mutations are all caught, shrinking to 1-4 commands each; three engine defects were found doing it, and a fourth property (iceberg refill priority) turned out to be claimed rather than tested and now has a test. This unblocks M11 exactly as intended — the harness stays green across the pooling and price-container changes M11 will make, and red on every semantic one. Spec and outcome: [`REFERENCE-MATCHER.md`](REFERENCE-MATCHER.md) (§10 for what it found, including eleven places the spec was wrong about its own design, six of them found by review after the first implementation; §2.2 for the half of the independence rule that is *not* achieved). **Done for the continuous session; DAY/GTD, the exotics and the auction are tier 2, enumerated in the `commandTier` table.**
 4. **Add an independent reconciliation consumer** (M7), which needs a durable execution-report journal first — today the outbound stream is an in-memory ring.
-5. **Extract a seeded, serialisable command tape and a portable output digest** (M10), then the stage-attribution histograms. Only after that is the cross-language comparison reproducible.
+5. ✅ **Extract a seeded, serialisable command tape and a portable output digest** (M10): `internal/benchgate/testdata/bench-v1.obt` in `obtape 1`, and `OBDG v1`, with a base-against-head gate on top ([`BENCH-GATE.md`](BENCH-GATE.md)). The stage-attribution histograms are next. The cross-language comparison is now reproducible in principle, and stays untested until another matcher replays the tape.
 6. **Write the ADR set** (M0), seeded from [`SPEC.md`](SPEC.md) §6 plus the decisions already argued in [`BOUNDED-RECOVERY.md`](BOUNDED-RECOVERY.md), [`LOG-ROTATION.md`](LOG-ROTATION.md), [`REPLICATION.md`](REPLICATION.md) and [`TRADE-BUST.md`](TRADE-BUST.md). Parallel documentation work; it blocks nothing and is blocked by nothing.
 
 **Deliberately later.** M1's sequenced command record is a wire-format and

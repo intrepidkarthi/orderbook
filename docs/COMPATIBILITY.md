@@ -109,6 +109,12 @@ out together:
 | **Wire / format version** (`v4`, `OBWAL\x03`, `OBSNAP\x01`) | can this reader parse these bytes | the byte layout changes | payload headers, file headers |
 | **Semantics version** (`matching.SemanticsVersion`) | will these bytes replay into the book that was actually served | matching **behaviour** changes | log segment headers, snapshots |
 
+The benchmark gate adds two more format versions, `obtape 1` (the committed command
+tape) and `OBDG 1` (the portable output digest), specified in
+[BENCH-GATE.md](BENCH-GATE.md). Their promise is narrow: a reader refuses a version it
+does not know rather than guessing, and a frozen tape file is never edited. A new
+workload is a new file.
+
 A release version used as the stamp would refuse journals that replay identically, on
 every upgrade, forever — and the response to a check that cries wolf is a permanent
 override. A format version is blind in the other direction: a behaviour change is
