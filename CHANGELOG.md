@@ -9,6 +9,25 @@ versions may include breaking changes).
 
 ### Added
 
+- **A committed bench tape, and a digest of what a matcher made of it.** The first
+  half of the benchmark gate in [BENCH-GATE.md](docs/BENCH-GATE.md).
+  `internal/benchgate/testdata/bench-v1.obt` is 50,000 commands from a new `tape.Bench`
+  profile, written once in `obtape 1`, a line-based text format any language can read
+  without re-implementing the generator. None of the correctness profiles was a
+  workload: the differential one refuses 65% of its submits while halted. Bench draws
+  no state changes, cancels heavily, and is `Portable`, meaning no account trades both
+  sides, so a matcher without this engine's self-trade prevention can replay it.
+
+  `OBDG v1` is the output digest: two SHA-256 chains over 4,096-command blocks, naming
+  orders by tape position and never by engine id. `core` covers refusals, trades and
+  the final book, and `full` adds statuses, reasons and the whole event stream. The
+  engine and `internal/refmatch`, running as different shards so their ids differ,
+  produce the same digest. A six-command vector's bytes are written out by hand from
+  the spec and committed with hex files for other implementations.
+  `testdata/bench-v1.digest` pins the result at `SemanticsVersion` 4, and regenerating
+  it is now part of every bump. `BENCHGATE_UPDATE=1` refuses to write at an unchanged
+  version.
+
 - **How the engine is tested, as a page.** `docs/differential-testing.html` on the site
   tells the reference-matcher story without the 1,400-line design document: the
   four-command bug where a rejected order printed a trade between two other accounts,
