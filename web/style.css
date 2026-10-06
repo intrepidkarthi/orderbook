@@ -139,6 +139,15 @@ main, .hero { max-width: var(--maxw); margin: 0 auto; padding: 0 20px; }
 .docs-top { position: sticky; top: 0; z-index: 40; display: flex; align-items: center; justify-content: space-between;
   padding: 12px 28px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); }
 .docs-toplinks { display: flex; gap: 20px; font-size: 14px; }
+@media (max-width: 800px) {
+  .docs-top { padding: 12px 16px; gap: 16px; }
+  .docs-top .brand { flex-shrink: 0; }
+  .docs-toplinks { gap: 14px; min-width: 0; overflow-x: auto; scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to right, #000 82%, transparent); mask-image: linear-gradient(to right, #000 82%, transparent); }
+  .docs-toplinks a { white-space: nowrap; }
+  .docs-main .tbl { display: block; overflow-x: auto; }
+}
+.docs-main pre.code { overflow-x: auto; }
 .docs-toplinks a { color: var(--muted); } .docs-toplinks a:hover { color: var(--fg); text-decoration: none; }
 
 .docs { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 40px; max-width: 1020px; margin: 0 auto; padding: 0 28px; }
