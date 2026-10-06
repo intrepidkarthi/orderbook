@@ -56,7 +56,7 @@
         limit order book (CLOB) and matching engine — the core of an exchange, a trading
         simulator, or any system where buyers and sellers meet at a price. It is embeddable,
         uses <b>integer-exact</b> pricing (int64 ticks and lots, never floats), has a
-        zero-allocation hot path and a lock-free single-writer core, is deterministic and
+        zero-allocation match path and a single-writer core with no lock contention, is deterministic and
         replayable, and ships both the order types real venues use and an opt-in layer of
         <a href="#security">pre-trade risk &amp; anti-manipulation controls</a>.</p>
         <pre class="code"><code>go get github.com/intrepidkarthi/orderbook/pkg/matching</code></pre>
@@ -124,8 +124,10 @@ types      (Order, Trade, iceberg, errors)</code></pre>
         what makes record→replay, WAL recovery, and golden-file tests possible — a recorded
         session replays to an identical trade digest.</p>
 
-        <h3>Concurrency — single writer, lock-free hot path</h3>
-        <p>One matching goroutine owns the book with no lock on the hot path (the LMAX model).
+        <h3>Concurrency — single writer, uncontended hot path</h3>
+        <p>One matching goroutine owns the book (the LMAX model). The engine has no mutex of its
+        own; the book's RW-lock is still taken on every add, remove and quantity update, but with
+        one writer nothing contends it on the match path.
         A <code>Runner</code> fronts it with an MPSC command queue so many producers submit
         concurrently while the matcher stays sequential and deterministic. A single book is
         inherently sequential at the match point, so you scale out <em>across symbols</em>

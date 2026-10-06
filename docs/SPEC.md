@@ -255,9 +255,11 @@ Each records the choice, the rationale, and the alternative we deferred.
   A/B measurement. See [PERFORMANCE-ROADMAP.md](PERFORMANCE-ROADMAP.md) M11,
   experiments 2 and 3.
 
-### 6.3 Concurrency — **single writer per book** (lock-free hot path)
-- One matching goroutine owns each book with **no lock on the hot path** (the
-  LMAX single-writer principle). Concurrent producers submit through an MPSC
+### 6.3 Concurrency — **single writer per book** (uncontended hot path)
+- One matching goroutine owns each book (the LMAX single-writer principle). The
+  engine has no mutex of its own; the book's RW-lock is still taken on every
+  add, remove and quantity update, but with one writer **nothing contends it on
+  the hot path**. "Lock-free" was the word here until v0.27.0, and it was wrong. Concurrent producers submit through an MPSC
   command queue (`matching.Runner`); the writer applies commands in FIFO order,
   preserving determinism. Readers use the book's own RW-lock for snapshots.
 - The bare `Engine` is the single-writer core (drive it from one goroutine);
