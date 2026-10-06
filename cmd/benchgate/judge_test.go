@@ -10,7 +10,7 @@ import (
 // pair's probes moved; missing names rounds whose first pair crashed.
 type fixture struct {
 	base, head func(r int) float64
-	taint      map[int]bool
+	taint      map[int]int // round -> how many of its two pairs are tainted
 	missing    map[int]bool
 	allocsBase int64
 	allocsHead int64
@@ -30,7 +30,7 @@ func (f fixture) invocations() []Invocation {
 			} else {
 				v.NsPerOp, v.Allocs = f.head(r), f.allocsHead
 			}
-			if f.taint[r] && slot == 3 {
+			if (f.taint[r] >= 1 && slot == 3) || (f.taint[r] >= 2 && slot == 1) {
 				v.ProbeALU = 150
 			}
 			if f.missing[r] && slot == 0 {
@@ -105,12 +105,22 @@ func TestJudgeNeedsBothConditions(t *testing.T) {
 	}
 }
 
-// TestJudgeTaintIsInconclusiveNotFail: when the machine moved under the run, a
-// regression-looking result is inconclusive, and inconclusive outranks fail.
+// TestJudgeTaintIsInconclusiveNotFail: when the machine moved under so many runs
+// that fewer than 12 clean pairs remain, a regression-looking result is
+// inconclusive, and inconclusive outranks fail.
 func TestJudgeTaintIsInconclusiveNotFail(t *testing.T) {
-	v := judge(fixture{base: flat(100), head: flat(150), taint: map[int]bool{1: true, 2: true, 3: true}})
-	if v.Timing != "inconclusive" || v.Tainted != 3 {
-		t.Fatalf("3 tainted pairs judged %q (tainted %d)", v.Timing, v.Tainted)
+	v := judge(fixture{base: flat(100), head: flat(150), taint: map[int]int{1: 2, 2: 2, 3: 2, 4: 2, 5: 1}})
+	if v.Timing != "inconclusive" || v.Tainted != 9 {
+		t.Fatalf("9 tainted pairs judged %q (tainted %d)", v.Timing, v.Tainted)
+	}
+}
+
+// TestJudgeSeesThroughRoutineTaint is the case measured on a loaded M4: 7 of 20
+// pairs tainted and a 7x slowdown. The 13 clean pairs decide it.
+func TestJudgeSeesThroughRoutineTaint(t *testing.T) {
+	v := judge(fixture{base: flat(100), head: flat(700), taint: map[int]int{1: 2, 2: 2, 3: 2, 4: 1}})
+	if v.Timing != "fail" || v.Tainted != 7 {
+		t.Fatalf("a 7x slowdown with 7 tainted pairs judged %q (tainted %d, k %d)", v.Timing, v.Tainted, v.K)
 	}
 }
 

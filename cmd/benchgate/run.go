@@ -554,9 +554,15 @@ func renderSummary(r *Report) string {
 	return b.String()
 }
 
+// short abbreviates a revision for the summary, keeping a -dirty suffix: a
+// comparison against an uncommitted tree must say so.
 func short(s string) string {
-	if len(s) > 12 {
-		return s[:12]
+	clean, dirty := strings.CutSuffix(s, "-dirty")
+	if len(clean) > 12 {
+		clean = clean[:12]
 	}
-	return s
+	if dirty {
+		return clean + "-dirty"
+	}
+	return clean
 }

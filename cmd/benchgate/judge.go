@@ -18,8 +18,13 @@ const (
 	failBound     = 1.05  // ...and so must a distribution-free lower bound on it
 	alpha         = 0.025 // one-sided level of that bound
 	taintLimit    = 0.10  // a probe moving more than this between a pair's two runs taints it
-	maxTainted    = 2     // more tainted pairs than this and the verdict is inconclusive
-	maxMissing    = 2     // likewise for pairs that crashed or produced no result
+	// minClean is the fewest untainted pairs a verdict may rest on. It replaced a
+	// cap of 2 tainted pairs: on a loaded machine taint is routine, and the cap made
+	// the gate blind to everything, including a measured 7x slowdown, because 7 of
+	// 20 pairs were tainted. k is computed for however many clean pairs remain, so
+	// the order statistic's guarantee holds on the pairs actually used.
+	minClean   = 12
+	maxMissing = 2 // pairs that crashed or produced no result
 )
 
 // Invocation is one run of one benchmark binary.
@@ -136,6 +141,7 @@ func median(xs []float64) float64 {
 }
 
 // judgeTiming applies the precedence inconclusive > fail > faster > pass.
+// Tainted pairs are left out; too few left over is inconclusive.
 func judgeTiming(v *Verdict, pairs []Pair) {
 	v.Pairs = pairs
 	var clean []float64
@@ -149,7 +155,7 @@ func judgeTiming(v *Verdict, pairs []Pair) {
 			clean = append(clean, p.Ratio)
 		}
 	}
-	if v.Tainted > maxTainted || v.Missing > maxMissing || len(clean) == 0 {
+	if v.Missing > maxMissing || len(clean) < minClean {
 		v.Timing = "inconclusive"
 		return
 	}
