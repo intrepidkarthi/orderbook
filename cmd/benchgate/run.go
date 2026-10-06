@@ -85,7 +85,12 @@ type Report struct {
 	Verdicts     []Verdict         `json:"verdicts"`
 	Invocations  []Invocation      `json:"invocations"`
 	Notes        []string          `json:"notes"`
-	Failed       bool              `json:"failed"`
+	// The §5.3 trailers in the compared range, what they could not cover, and how
+	// many acceptances the last 90 days of history carry.
+	Acceptances     []*Acceptance `json:"acceptances"`
+	TrailerProblems []string      `json:"trailer_problems"`
+	Trailers90d     int           `json:"trailers_90d"`
+	Failed          bool          `json:"failed"`
 }
 
 func compare(args []string) int {
@@ -155,6 +160,10 @@ func compare(args []string) int {
 		rep.Round1Order = "BAAB (head first)"
 	}
 
+	accs, trailerProblems := readTrailers(head.dir, strings.TrimSuffix(base.sha, "-dirty"))
+	rep.Acceptances, rep.TrailerProblems = accs, trailerProblems
+	rep.Trailers90d = trailerCount90d(head.dir)
+
 	names := benchmarks(base, head)
 	re, _ := regexp.Compile(*only)
 	for _, name := range names {
@@ -162,6 +171,7 @@ func compare(args []string) int {
 			continue
 		}
 		v := Verdict{Bench: name.full}
+		secondInconclusive := false
 		rep.Benchtime[name.full] = name.n
 		if why := classify(name, base, head, sameToolchain); why != "" {
 			v.Timing, v.Allocations = why, why
@@ -181,6 +191,7 @@ func compare(args []string) int {
 					invs = runRounds(base, head, name, !headFirst, deadline)
 					v = Verdict{Bench: name.full}
 					judgeTiming(&v, pairUp(invs))
+					secondInconclusive = v.Timing == "inconclusive"
 				}
 			} else {
 				switch {
@@ -208,10 +219,19 @@ func compare(args []string) int {
 			}
 			rep.Invocations = append(rep.Invocations, invs...)
 		}
-		if v.Timing == "fail" || v.Allocations == "fail" || v.Timing == "missing" {
+		rep.TrailerProblems = append(rep.TrailerProblems, applyAcceptances(&v, accs)...)
+		if settle(&v, secondInconclusive) {
 			rep.Failed = true
 		}
 		rep.Verdicts = append(rep.Verdicts, v)
+	}
+	if len(rep.TrailerProblems) > 0 {
+		rep.Failed = true
+	}
+	for _, a := range accs {
+		if !a.Used && a.Key != trailerGateChange {
+			rep.Notes = append(rep.Notes, fmt.Sprintf("%s %s accepted nothing in this range (%s)", a.Key, a.Glob, short(a.Commit)))
+		}
 	}
 	rep.Machine.LoadAfter = loadavg()
 
@@ -543,6 +563,10 @@ func renderSummary(r *Report) string {
 	for _, n := range r.Notes {
 		fmt.Fprintf(&b, "\n- %s", n)
 	}
+	for _, p := range r.TrailerProblems {
+		fmt.Fprintf(&b, "\n- **trailer:** %s", p)
+	}
+	fmt.Fprintf(&b, "\n- acceptances (Bench-Accept, Bench-Accept-Allocs) in the last 90 days of history: %d", r.Trailers90d)
 	if len(r.Retried) > 0 {
 		fmt.Fprintf(&b, "\n- retried once after an inconclusive run: %s", strings.Join(r.Retried, ", "))
 	}
