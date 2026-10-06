@@ -32,9 +32,15 @@ versions may include breaking changes).
 
 ### Changed
 
+- **The docs page and SPEC.md no longer call the core lock-free.** The README dropped
+  the word in September, because every add, remove and quantity update takes the
+  book's RW-lock. With one writer nothing contends it, and that is what all four places
+  now say.
+
 - **The docs page fits a phone.** At 390 px it laid out 736 px wide, because the
   mobile grid track and a global `main { margin: 0 auto }` let the widest code block set
-  the width of every paragraph. Code now scrolls inside its own box.
+  the width of every paragraph. Code and wide tables now scroll inside their own boxes,
+  and the header links scroll sideways instead of running off the screen.
 
 - **The README's hero can be read at the width it is shown.** The old GIF was the full
   1280 px page shrunk to 820 px, so the monospace text reached the reader at about
