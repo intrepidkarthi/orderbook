@@ -133,10 +133,20 @@ func applyAcceptances(v *Verdict, accs []*Acceptance) []string {
 }
 
 // enforcedTiming names the benchmarks whose TIMING may fail a build, chosen by the
-// calibration in docs/BENCH-GATE.md §15 under the rule in §14.2. Every other
+// calibration in docs/BENCH-GATE.md §15 under the rule in §14.2, fixed before the
+// data: over 60 A/A runs on ubuntu-latest, only Engine_CancelReplaceInto had a worst
+// |median - 1| (0.0199) small enough that 1 + 3x it stays under 1.10. Every other
 // timing-gated benchmark is still measured and reported, and its failure says it is
-// report-only. Allocations are enforced for every gated benchmark regardless.
-var enforcedTiming = map[string]bool{}
+// report-only. Allocations are enforced for every gated benchmark regardless: they
+// disagreed between arms in none of the 60 runs.
+var enforcedTiming = map[string]bool{
+	"BenchmarkEngine_CancelReplaceInto": true,
+}
+
+// detectionFloor is what the power study measured (docs/BENCH-GATE.md §15), printed
+// in every summary so a pass is read as what it is.
+const detectionFloor = "a ~1.20x slowdown on Engine_CancelReplaceInto (measured medians 1.196-1.306) failed 20 of 20 power runs; " +
+	"smaller slowdowns, and the report-only benchmarks, are not guarded by timing"
 
 // settle decides whether a verdict fails the run, and labels a timing failure that
 // calibration has not cleared to enforce.

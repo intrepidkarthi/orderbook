@@ -574,7 +574,7 @@ func renderSummary(r *Report) string {
 	if r.Failed {
 		verdict = "FAIL"
 	}
-	fmt.Fprintf(&b, "\n\n**%s**. Thresholds are targets until the A/A calibration in docs/BENCH-GATE.md §9.4 has run.\n", verdict)
+	fmt.Fprintf(&b, "\n\n**%s**. Detection floor: %s (docs/BENCH-GATE.md §15).\n", verdict, detectionFloor)
 	return b.String()
 }
 

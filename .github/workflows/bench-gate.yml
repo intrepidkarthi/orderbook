@@ -3,9 +3,10 @@ name: Bench gate
 # Base against head, in one job on one runner (docs/BENCH-GATE.md §5). There is no
 # stored baseline: across 30 past bench.yml runs GitHub assigned 5 CPU models, and
 # the same code moved by up to 3.5x between them, so a number from another run is
-# not a reference. Report-only on push; `enforce` exists so a dispatch can show the
-# gate fails when it should, and turning it on for pushes waits for slice B's A/A
-# calibration (§9.4).
+# not a reference. Pushes run with -enforce since the slice B calibration (§15): what
+# that fails on is decided by the judge, which is built from the base, so allocations
+# for every gated benchmark and the timing of the benchmarks calibration cleared.
+# Scheduled anchor runs and dispatches without the input stay report-only.
 #
 # Its own file rather than a job in bench.yml, because triggers apply to every job
 # in a workflow, and these would also run the publishing job.
@@ -149,7 +150,7 @@ jobs:
           "$RUNNER_TEMP/benchgate" compare \
             -base-dir "$RUNNER_TEMP/base" -head-dir . \
             -mode "${{ steps.base.outputs.mode }}" \
-            ${{ inputs.enforce && '-enforce' || '' }} \
+            ${{ (github.event_name == 'push' || inputs.enforce) && '-enforce' || '' }} \
             -out bench-result.json
 
       - name: Not compared
