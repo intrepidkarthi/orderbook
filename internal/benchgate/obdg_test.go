@@ -138,7 +138,11 @@ func TestDigestVector(t *testing.T) {
 			t.Errorf("%s: F does not chain the way §3.3 says", name)
 		}
 	}
-	t.Logf("vector F: core %x full %x", chainOf(core), chainOf(full))
+	wantF := fmt.Sprintf("core %x\nfull %x\n", chainOf(core), chainOf(full))
+	gotF, err := os.ReadFile("testdata/vector-v1-f.txt")
+	if err != nil || string(gotF) != wantF {
+		t.Errorf("testdata/vector-v1-f.txt does not hold the vector's F values:\n got %q\nwant %q", gotF, wantF)
+	}
 }
 
 func writeVector(t *testing.T, src []byte) {
@@ -155,6 +159,10 @@ func writeVector(t *testing.T, src []byte) {
 		if err := os.WriteFile("testdata/vector-v1-"+name+".hex", hexFile(p), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	f := fmt.Sprintf("core %x\nfull %x\n", chainOf(core), chainOf(full))
+	if err := os.WriteFile("testdata/vector-v1-f.txt", []byte(f), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

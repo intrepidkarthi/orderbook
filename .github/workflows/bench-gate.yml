@@ -1,0 +1,166 @@
+name: Bench gate
+
+# Base against head, in one job on one runner (docs/BENCH-GATE.md §5). There is no
+# stored baseline: across 30 past bench.yml runs GitHub assigned 5 CPU models, and
+# the same code moved by up to 3.5x between them, so a number from another run is
+# not a reference. Report-only on push; `enforce` exists so a dispatch can show the
+# gate fails when it should, and turning it on for pushes waits for slice B's A/A
+# calibration (§9.4).
+#
+# Its own file rather than a job in bench.yml, because triggers apply to every job
+# in a workflow, and these would also run the publishing job.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pkg/**"
+      - "internal/tape/**"
+      - "internal/refmatch/**"
+      - "internal/benchgate/**"
+      - "cmd/benchgate/**"
+      - "go.mod"
+      - ".github/workflows/bench-gate.yml"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "compare (base vs head), aa (head vs head with code layout moved), anchor (latest v* tag vs head)"
+        type: choice
+        options: [compare, aa, anchor]
+        default: compare
+      base:
+        description: "base revision for compare (default: the commit before head)"
+        type: string
+        default: ""
+      enforce:
+        description: "fail the job on a timing or allocation failure"
+        type: boolean
+        default: false
+  schedule:
+    # Weekly drift report against the last release: ten commits at +8% each all
+    # pass against their own base, and only this sees them add up. Report-only.
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      # The test vector's chained hashes, recomputed with perl and sha256sum from the
+      # committed record bytes. The Go encoder is checked against the same bytes in
+      # TestDigestVector; this checks the layout with something that is not the Go
+      # encoder.
+      - name: Digest vector, outside Go
+        working-directory: internal/benchgate/testdata
+        run: |
+          for chain in core full; do
+            hdr=$(awk '/^header/{print $2}' vector-v1-$chain.hex)
+            rec=$(awk '/^records/{print $2}' vector-v1-$chain.hex)
+            term=$(awk '/^terminal/{print $2}' vector-v1-$chain.hex)
+            h0=$(perl -e 'print pack("H*", shift)' "$hdr" | sha256sum | cut -d' ' -f1)
+            h1=$(perl -e 'print pack("H*", shift)' "$h0$rec" | sha256sum | cut -d' ' -f1)
+            f=$(perl -e 'print pack("H*", shift)' "$h1$term" | sha256sum | cut -d' ' -f1)
+            want=$(awk -v c=$chain '$1==c{print $2}' vector-v1-f.txt)
+            if [ "$f" != "$want" ]; then
+              echo "::error::OBDG vector $chain chain: $f, want $want"; exit 1
+            fi
+            echo "$chain F $f matches"
+          done
+
+      - name: Choose the base
+        id: base
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          MODE: ${{ inputs.mode || (github.event_name == 'schedule' && 'anchor') || 'compare' }}
+          INPUT_BASE: ${{ inputs.base }}
+        run: |
+          base=""
+          case "$MODE" in
+            aa)     base=$(git rev-parse HEAD) ;;
+            anchor) base=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true) ;;
+            *)
+              if [ "$EVENT" = "push" ]; then base="$BEFORE"; else base="${INPUT_BASE:-HEAD~1}"; fi ;;
+          esac
+          # A zero before (a new branch), or one that is not an ancestor (a force
+          # push), is no base at all, and is said so rather than guessed.
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$base^{commit}" 2>/dev/null \
+             || ! git merge-base --is-ancestor "$base" HEAD; then
+            echo "reason=no base ($base)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "sha=$(git rev-parse "$base^{commit}")" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+
+      - name: Base tree and its judge
+        id: judge
+        if: steps.base.outputs.sha != ''
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/base" "${{ steps.base.outputs.sha }}"
+          # The judge is built from BASE, so a head commit cannot loosen the gate
+          # that judges it. A base from before the gate existed has none.
+          if [ ! -d "$RUNNER_TEMP/base/cmd/benchgate" ]; then
+            echo "reason=no base gate at ${{ steps.base.outputs.sha }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          (cd "$RUNNER_TEMP/base" && go build -o "$RUNNER_TEMP/benchgate" ./cmd/benchgate)
+          echo "ready=1" >> "$GITHUB_OUTPUT"
+
+      # A/A: head against itself with the code layout moved, by an unused function
+      # of 64-512 bytes in pkg/matching. A real change moves function addresses, and
+      # this measures what that alone does to the ratios.
+      - name: Move the code layout (aa only)
+        if: steps.judge.outputs.ready == '1' && steps.base.outputs.mode == 'aa'
+        run: |
+          n=$(( 64 + (GITHUB_RUN_NUMBER * 97) % 449 ))
+          {
+            echo "package matching"
+            echo ""
+            echo "// benchgateLayoutPad is never called. It exists to move code by $n bytes."
+            printf 'var benchgateLayoutPad = [...]byte{'
+            for i in $(seq 1 "$n"); do printf '%d,' $(( i % 251 )); done
+            echo '}'
+          } > pkg/matching/zz_benchgate_layout_pad.go
+          echo "layout pad: $n bytes"
+
+      - name: Compare
+        if: steps.judge.outputs.ready == '1'
+        run: |
+          "$RUNNER_TEMP/benchgate" compare \
+            -base-dir "$RUNNER_TEMP/base" -head-dir . \
+            -mode "${{ steps.base.outputs.mode }}" \
+            ${{ inputs.enforce && '-enforce' || '' }} \
+            -out bench-result.json
+
+      - name: Not compared
+        if: steps.judge.outputs.ready != '1'
+        run: |
+          reason="${{ steps.base.outputs.reason }}${{ steps.judge.outputs.reason }}"
+          echo "## Benchmark gate: not compared" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "$reason. That is not a pass." >> "$GITHUB_STEP_SUMMARY"
+          echo "not compared: $reason"
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.judge.outputs.ready == '1'
+        with:
+          name: bench-result
+          path: bench-result.json
+          retention-days: 90
