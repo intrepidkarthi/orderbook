@@ -135,15 +135,47 @@ func TestJudgePairsWithinARound(t *testing.T) {
 	}
 }
 
-func TestJudgeAllocsAreExact(t *testing.T) {
-	if v := judge(fixture{base: flat(100), head: flat(100), allocsBase: 9061, allocsHead: 9062}); v.Allocations != "fail" {
-		t.Fatalf("one extra allocation judged %q", v.Allocations)
+func TestJudgeAllocsAreExactByDefault(t *testing.T) {
+	if v := judge(fixture{base: flat(100), head: flat(100), allocsBase: 3, allocsHead: 4}); v.Allocations != "fail" {
+		t.Fatalf("one extra allocation per op judged %q", v.Allocations)
 	}
-	if v := judge(fixture{base: flat(100), head: flat(100), allocsBase: 9061, allocsHead: 9061}); v.Allocations != "pass" {
+	if v := judge(fixture{base: flat(100), head: flat(100), allocsBase: 3, allocsHead: 3}); v.Allocations != "pass" {
 		t.Fatalf("equal allocations judged %q", v.Allocations)
 	}
-	if v := judge(fixture{base: flat(100), head: flat(100), allocsBase: 9061, allocsHead: 9000}); v.Allocations != "pass" {
+	if v := judge(fixture{base: flat(100), head: flat(100), allocsBase: 3, allocsHead: 2}); v.Allocations != "pass" {
 		t.Fatalf("fewer allocations judged %q", v.Allocations)
+	}
+}
+
+// TestJudgeTapeAllocsTolerateMeasuredNoise replays the A/A distribution actually
+// measured on identical code, and the one-allocation-per-Match regression actually
+// planted: the first must pass and the second must fail.
+func TestJudgeTapeAllocsTolerateMeasuredNoise(t *testing.T) {
+	measured := map[string][]int64{
+		"base": {9060, 9061, 9061, 9061, 9061, 9061, 9061, 9062, 9062, 9062, 9062, 9062, 9062, 9062, 9062, 9062, 9062, 9062, 9062, 9062},
+		"head": {9061, 9061, 9061, 9061, 9061, 9061, 9061, 9061, 9061, 9061, 9061, 9061, 9062, 9062, 9062, 9062, 9062, 9062, 9063, 9063},
+	}
+	build := func(headShift int64) []Invocation {
+		var out []Invocation
+		for arm, xs := range measured {
+			for _, x := range xs {
+				if arm == "head" {
+					x += headShift
+				}
+				out = append(out, Invocation{Arm: arm, Allocs: x})
+			}
+		}
+		return out
+	}
+	v := Verdict{Bench: "BenchmarkTapeReplay/sink=nil"}
+	judgeAllocs(&v, build(0))
+	if v.Allocations != "pass" {
+		t.Fatalf("the measured A/A distribution judged %q (%d -> %d)", v.Allocations, v.AllocsBase, v.AllocsHead)
+	}
+	v = Verdict{Bench: "BenchmarkTapeReplay/sink=nil"}
+	judgeAllocs(&v, build(30840))
+	if v.Allocations != "fail" {
+		t.Fatalf("one extra allocation per Match judged %q", v.Allocations)
 	}
 }
 

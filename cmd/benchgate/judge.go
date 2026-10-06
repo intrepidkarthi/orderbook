@@ -172,35 +172,41 @@ func judgeTiming(v *Verdict, pairs []Pair) {
 	}
 }
 
-// judgeAllocs requires head to allocate no more than base, exactly. Counts are
-// compared within the job and never against a stored number, because they differ
-// by platform.
+// allocSlack is how far head's median allocation count may exceed base's before it
+// fails. Zero everywhere except the tape replay: its op is 50,000 commands, and its
+// count is NOT exactly repeatable. Measured on identical code (a local A/A run, 20
+// invocations per arm): 9,060 to 9,063 allocations per replay within ONE arm. So an
+// exact rule failed identical code, and the slack is twice the measured spread. A
+// real regression on that path is not close: one extra allocation per Match call is
+// +30,840.
+var allocSlack = map[string]int64{"BenchmarkTapeReplay/sink=nil": 8}
+
+// judgeAllocs compares the median allocation count of each arm. Counts are compared
+// within the job and never against a stored number, because they differ by platform.
 func judgeAllocs(v *Verdict, invs []Invocation) {
-	base, head := int64(-1), int64(-1)
+	var base, head []float64
 	for _, x := range invs {
 		if x.Failed {
 			continue
 		}
 		switch x.Arm {
 		case "base":
-			if base < 0 || x.Allocs < base {
-				base = x.Allocs
-			}
+			base = append(base, float64(x.Allocs))
 		case "head":
-			if x.Allocs > head {
-				head = x.Allocs
-			}
+			head = append(head, float64(x.Allocs))
 		}
 	}
-	v.AllocsBase, v.AllocsHead = base, head
-	switch {
-	case base < 0 || head < 0:
+	if len(base) == 0 || len(head) == 0 {
+		v.AllocsBase, v.AllocsHead = -1, -1
 		v.Allocations = "not compared: no result on one side"
-	case head > base:
-		v.Allocations = "fail"
-	default:
-		v.Allocations = "pass"
+		return
 	}
+	v.AllocsBase, v.AllocsHead = int64(median(base)), int64(median(head))
+	if v.AllocsHead > v.AllocsBase+allocSlack[v.Bench] {
+		v.Allocations = "fail"
+		return
+	}
+	v.Allocations = "pass"
 }
 
 // Result is one parsed benchmark line.

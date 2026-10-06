@@ -66,6 +66,28 @@ cover-check: ## Gate: coverage over pkg/ and internal/ must be >= COVER_MIN
 bench: ## Run benchmarks
 	$(GO) test -run '^$$' -bench=. -benchmem $(PKGS)
 
+# The benchmark gate, run locally before a push (docs/BENCH-GATE.md §5.4). Changes
+# land on main by direct push, so this is the only comparison that happens before
+# one does. The judge is built from the BASE tree, as in CI, so the change under
+# test cannot loosen the rules that judge it. BENCH_BASE picks the comparison point
+# (default: the merge base with origin/main); ENFORCE=1 makes a regression fail;
+# BENCH_ONLY=<regexp> narrows the run while iterating.
+BENCH_BASE ?= origin/main
+
+.PHONY: bench-check
+bench-check: ## Gate: benchmarks of the working tree against the merge base (ENFORCE=1 to fail)
+	@base=$$(git merge-base HEAD $(BENCH_BASE)) || exit 2; \
+		tmp=$$(mktemp -d); \
+		git worktree add --detach -q "$$tmp/base" "$$base" || exit 2; \
+		if [ -d "$$tmp/base/cmd/benchgate" ]; then \
+			(cd "$$tmp/base" && $(GO) build -o "$$tmp/benchgate" ./cmd/benchgate) && \
+			"$$tmp/benchgate" compare -base-dir "$$tmp/base" -head-dir . $(if $(ENFORCE),-enforce) $(if $(BENCH_ONLY),-only '$(BENCH_ONLY)') -out bench-result.json; \
+			status=$$?; \
+		else \
+			echo "benchgate: not compared: no base gate at $$base"; status=0; \
+		fi; \
+		git worktree remove --force "$$tmp/base"; rm -rf "$$tmp"; exit $$status
+
 .PHONY: demo
 demo: ## Run the CLI demo (cmd/obdemo)
 	$(GO) run ./cmd/obdemo
@@ -75,4 +97,4 @@ check: tidy vet test race cover-check ## Full local gate: tidy + vet + test + ra
 
 .PHONY: clean
 clean: ## Remove build/coverage artifacts
-	rm -rf $(BIN_DIR) coverage.out coverage.lib.out coverage.html *.prof
+	rm -rf $(BIN_DIR) coverage.out coverage.lib.out coverage.html *.prof bench-result.json

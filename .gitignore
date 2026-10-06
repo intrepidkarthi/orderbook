@@ -23,6 +23,7 @@
 /l2capture
 
 # Coverage / profiling
+bench-result.json
 coverage.out
 coverage.html
 *.prof

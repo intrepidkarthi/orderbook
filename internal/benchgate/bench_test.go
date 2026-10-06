@@ -123,3 +123,26 @@ func BenchmarkTapeReplay(b *testing.B) {
 		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(p.cmds)), "ns/cmd")
 	})
 }
+
+// TestPrintDigest prints the full-chain digest this tree's engine produces on the
+// tape BENCHGATE_TAPE names. cmd/benchgate asks both arms of a comparison for it on
+// base's tape: if they differ, matching behaviour changed and timing the replay
+// would compare two different computations.
+func TestPrintDigest(t *testing.T) {
+	if os.Getenv("BENCHGATE_PRINT_DIGEST") != "1" {
+		t.Skip("set BENCHGATE_PRINT_DIGEST=1")
+	}
+	src, err := os.ReadFile(benchTapePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp, err := Parse(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := DigestEngine(tp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("OBDG full %x", d.Full)
+}
