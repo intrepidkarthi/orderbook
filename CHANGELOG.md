@@ -9,6 +9,18 @@ versions may include breaking changes).
 
 ### Added
 
+- **The benchmark gate now fails pushes, for what its calibration cleared.** Sixty A/A
+  runs on `ubuntu-latest`, across six CPU models, produced no false failure. Under a
+  rule written down before the data ([BENCH-GATE.md](docs/BENCH-GATE.md) §14.2), that
+  clears one benchmark's timing for enforcement: `Engine_CancelReplaceInto`. A ~1.20×
+  plant then failed it in 20 of 20 runs. Pushes now fail on any allocation increase in
+  a core benchmark and on a timing regression there. The other four timed benchmarks
+  still report, marked report-only. A regression can only be accepted by a commit
+  trailer: `Bench-Accept` with a bound no looser than the measured ratio × 1.10, or
+  `Bench-Accept-Allocs` with the exact increase. A change to the gate itself needs
+  `Bench-Gate-Change`. `benchgate calibrate` reproduces the decision from the run
+  artifacts.
+
 - **The benchmark gate runs on CI, and has failed what it should.** `bench-gate.yml`
   compares base against head on every push that touches the matcher. It runs
   report-only, with dispatch modes `compare`, `aa` (head against itself, code layout
