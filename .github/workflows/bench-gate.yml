@@ -44,8 +44,11 @@ on:
 permissions:
   contents: read
 
+# Pushes to a branch queue behind each other. Dispatches do not share a group: an
+# A/A calibration fires several at once, and GitHub keeps only one pending run per
+# group, so a shared group would silently cancel all but one of them.
 concurrency:
-  group: bench-gate-${{ github.ref }}
+  group: bench-gate-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'push' }}
   cancel-in-progress: false
 
 jobs:
