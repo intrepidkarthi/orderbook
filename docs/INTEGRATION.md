@@ -280,8 +280,12 @@ What you still have to build:
   p50/p99/p999 on a separate goroutine — averaging pre-computed percentiles across
   shards hides the tail, and not correcting for coordinated omission makes your tail
   numbers lie.
-- **WAL fsync latency and snapshot duration.** Both stop the matching goroutine when
-  they go slow, and neither is instrumented.
+- **WAL fsync latency and snapshot duration, if you are not running `cmd/obgw`.**
+  Both stop the matching goroutine when they go slow. `obgw` exports them
+  (`obgw_wal_sync_latency_ns`, `obgw_wal_append_latency_ns`,
+  `obgw_snapshot_duration_ns`, `obgw_snapshot_failures_total`), and
+  `cmd/obgw/lagmetrics.go`, `synclog.go` and `timedlog.go` are the wiring to copy;
+  an embedded engine gets none of them for free.
 - **Tracing, structured logging, dashboards and alert thresholds.** Thresholds worth
   starting from are tabulated in [RUNBOOKS.md](RUNBOOKS.md).
 
