@@ -1,6 +1,6 @@
 # Benchmark Gate — A Slowdown That Can Fail a Build, and a Tape Another Matcher Can Replay
 
-Status: **specified, not built** — part of milestone M10 in
+Status: **built (slice A)** — part of milestone M10 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md), written before the code, as this
 repository does it · Author: Karthikeyan NG · Last updated: 2026-10-06
 
@@ -313,10 +313,19 @@ The vector is a hand-written 6-command tape. It covers:
 - an IOC remainder.
 
 `testdata/vector-v1.obt` holds the tape. `vector-v1-core.hex` and `vector-v1-full.hex`
-hold the full record bytes, and §3.3 records both `F` values when the code is built.
-`TestDigestVector` checks the vector against both drivers. A CI shell step also checks
-the hex outside Go: `perl -ne 'print pack "H*", $_' vector-v1-full.hex | sha256sum`.
-That means the byte layout is checked by something other than the Go encoder.
+hold its record bytes as three lines (`header`, `records`, `terminal`), and
+`vector-v1-f.txt` holds both `F` values:
+
+```
+core 839300013cc1707d42bad84cf1438ff5b9e86336429e33dbc57abde3ebc4b8bf
+full a08b096375f8c15138036b194e4e5a6f13b433afa4f000211947c8d8cd64b66d
+```
+
+`TestDigestVector` builds the expected bytes by hand from the layout table above, with
+its own helpers, and requires both drivers' encoder output to equal them. A step in
+`bench-gate.yml` re-derives each `F` from the hex files with `perl` and `sha256sum`,
+chaining H0, H1 and F exactly as above, so the byte layout is checked by something
+that is not the Go encoder.
 
 **`internal/benchgate/testdata/bench-v1.digest`:**
 
@@ -379,9 +388,14 @@ It imports `pkg/matching`, `pkg/types`, `internal/tape` and `internal/refmatch`.
 internal/refmatch/imports_test.go:31).
 
 **One op is one full replay.** The benchmark reports ns/op, `ns/cmd` through
-`b.ReportMetric`, and allocs/op. Because the op is the whole replay, allocs/op is an
-exact integer total with no rounding: one extra allocation anywhere in 50 k commands
-shows.
+`b.ReportMetric`, and allocs/op. Because the op is the whole replay, allocs/op is a total
+over 50,000 commands, not a per-command figure rounded by integer division.
+
+> **Correction.** This said the total was exact, so that one extra allocation anywhere
+> in 50 k commands would show. It is not exact on darwin: identical code read 9,060 to
+> 9,063 per replay within one arm of a local A/A run. On linux/amd64 it read 9,067 in
+> every one of 13 CI runs. The rule in §5.2 therefore carries a slack of 8 on this
+> benchmark, and an extra allocation per replay below that is not seen.
 
 | Inside the timed region | Under `b.StopTimer` or done once |
 |---|---|
@@ -467,7 +481,7 @@ has no `cmd/benchgate`, the verdict is `not compared: no base gate`.
 
 | Verdict | Condition (precedence top-down) |
 |---|---|
-| `inconclusive` | More than 2 of 20 pairs are tainted, more than 2 pairs are missing or crashed, or the comparator's 20-minute budget runs out. The run is retried once automatically. Inconclusive is never shown as pass. |
+| `inconclusive` | Fewer than 12 untainted pairs remain, more than 2 pairs are missing or crashed, or the comparator's 20-minute budget runs out. The run is retried once automatically. Inconclusive is never shown as pass. |
 | `fail` | Over the untainted pairs, **median > 1.10** and the **k-th smallest ratio > 1.05**. k is the largest value with P(Binom(n, ½) ≤ k−1) ≤ 0.025, which is k = 6 for n = 20. In other words, a distribution-free lower bound on the median has to clear 1.05. |
 | `faster` / `pass` | Otherwise. Faster never fails. |
 
@@ -476,6 +490,14 @@ per-round noise, that rule catches a true 15% slowdown with a probability of onl
 0.06. 1.10 and 1.05 are targets. Slice B's calibration (§9.4) can move them, in this
 document, with the data. Pairs inside one round are not independent, so the 2.5% is
 nominal (§11.2).
+
+> **Correction.** The `inconclusive` rule was "more than 2 of 20 pairs tainted". On a
+> loaded M4 that made the gate blind: a planted 7× slowdown came back inconclusive
+> because 7 of 20 pairs were tainted, and a pair whose probes moved 10-30% cannot
+> explain a 7× ratio. Tainted pairs are now left out, at least 12 clean pairs are
+> required, and k is computed for the number actually used (3 for 12, 6 for 20), so the
+> order statistic's bound holds on what the verdict rests on. On CI, 0 to 12 of 20
+> pairs were tainted per benchmark (§12).
 
 **Timing is gated on** `TapeReplay/sink=nil`, `Engine_MatchInto`,
 `Engine_CancelReplaceInto`, `OrderBook_CancelReplace` and `OrderBook_LevelChurn`.
@@ -487,9 +509,18 @@ nominal (§11.2).
 - `Shards_Scaling`;
 - any fsync-bound benchmark, or anything in `pkg/wal`.
 
-**Allocation verdict.** One invocation per arm at the fixed N. Head must be ≤ base,
-**exactly**. Counts are compared within the job, never against a stored number, because
-they differ by platform: `RunnerBare` reports 5 on darwin and 3 on linux.
+**Allocation verdict.** Each arm's **median** count is compared: over the 20
+invocations of a timing-gated benchmark, and over 3 interleaved invocations per arm for
+the rest. Head must be ≤ base, with no slack, except `TapeReplay`, which may exceed base
+by 8. Counts are compared within the job, never against a stored number, because they
+differ by platform: `RunnerBare` reports 5 on darwin and 3 on linux, and `TapeReplay`
+reads about 9,061 on darwin and 9,067 on linux.
+
+> **Correction.** This was "one invocation per arm, exactly". The exact rule failed
+> identical code on the tape replay (9,060 against 9,063 within one arm), and a single
+> invocation lets one noisy run tip an integer-divided allocs/op across a boundary. The
+> slack is twice the spread measured on darwin. One extra allocation per `Match` is
+> +30,840 on this tape.
 
 The allocation rule covers:
 
@@ -500,9 +531,9 @@ The allocation rule covers:
 It excludes `Shards_Scaling` and all of `pkg/wal`.
 
 **Known blind spot.** A microbenchmark that prints `0 allocs/op` hides one allocation
-per 1,000 ops, because of integer division. `TapeReplay`'s exact total and the
-`alloc_test.go` ratios cover the Match, Cancel, Reduce and Replace paths at that
-resolution.
+per 1,000 ops, because of integer division. `TapeReplay`'s total and the
+`alloc_test.go` ratios cover the Match, Cancel, Reduce and Replace paths at better
+resolution, `TapeReplay` down to its slack of 8 allocations per replay.
 
 **Modes.** `report` writes the verdicts and exits 0. `enforce` exits non-zero on any
 `fail`, `missing` or allocation increase. In slice A, enforce is used only through
@@ -673,7 +704,7 @@ delete it.
 | S16 | An event names an unseen ID; an error has no mapping | **Fail**: hard encoder error |
 | S17 | `BENCHGATE_UPDATE=1` at the same `SemanticsVersion` | **Fail**: refuses to write |
 | S18 | Comparator with base and head swapped, on S1 output | Reports `faster`, which proves the direction is wired |
-| S19 | Comparator uses the ratio of medians instead of paired ratios, on a fixture with a paired signal and a batch burst | **Fail** the fixture test |
+| S19 | Comparator pairs runs across rounds instead of within one (replaces "ratio of medians", see §12) | **Fail** `TestJudgePairsWithinARound` |
 | S20 | Benchmark output with two result lines (an unanchored regex) | Rejected |
 | P1 (CI) | A/A′, 10 dispatch runs, enforce | **Pass** in every run |
 | P2 (CI) | Comment-only change in `engine.go` | **Pass**; `Engine_*` reported `not compared: benchmark changed` only if a bench file moved |
@@ -705,7 +736,104 @@ and §12 records why.
 
 ## 12. What building it found — written after the code
 
-(Empty until built.)
+Written after the code, on 2026-10-06. Local figures are from an Apple M4 that was busy
+throughout (load 7 to 22). CI figures are from `ubuntu-latest`: 13 dispatched runs
+landed on three CPU models, the AMD EPYC 7763, 9V45 and 9V74.
+
+### 12.1 The tape and the digest, measured
+
+| Quantity | Value |
+|---|---|
+| `bench-v1.obt` | 50,000 commands, 3,611,312 bytes, sha256 `d6e01e40…0d2ef7` |
+| Submits rejected | 1,117 of 30,231 (3.7%; floor 5%) |
+| Targeted commands reaching a live order | 2,905 of 19,769 (14.7%; floor 10%) |
+| Trades | 20,672, one per 2.4 commands |
+| Resting at the end / peak | 3,380 / 3,388 |
+| STP decisions, full-book refusals | 0, 0 |
+| `go test -race ./internal/benchgate` | about 23 s on the M4 |
+| `TapeReplay` allocations per replay | 9,060 to 9,063 on darwin; 9,067 in all 13 CI runs |
+| Gate job wall time on CI | 2 min 38 s to 3 min 40 s |
+
+Every existing tape profile generates exactly what it did before `Bench` and `Portable`
+were added: 27 hashes of `Gen` output (Differential, Recovery and ProRata, seeds 1,
+0x5EED1234 and 7, n 140, 200 and 5,000) were identical before and after, and are listed
+in the commit that added them.
+
+Both drivers produced the hand-written vector bytes on the first run, including the
+engine answering "not found" (code 7) for a cancel of an order that had already filled.
+
+### 12.2 Sabotage, as run
+
+| # | Where | Planted | Result |
+|---|---|---|---|
+| S1 | local | 600-iteration loop in `Match` (`MatchInto` 423 → 2,890 ns) | `MatchInto` fail 6.71 (k-th 5.99), `TapeReplay` fail 4.01 (3.86); `make` exits 2 |
+| S1 | CI | 200-iteration loop | `MatchInto` fail 2.09 (2.03), `CancelReplaceInto` fail 1.86 (1.85), `TapeReplay` fail 1.73 (1.69); job fails |
+| S2 | CI | 30-iteration loop | `MatchInto` **fail 1.136 (1.074)**; `CancelReplaceInto` pass 1.086; `TapeReplay` pass 1.090 |
+| S4 | local and CI | one allocation per `Match` | allocations fail on `Engine_Match` 4 → 6, `MatchInto` 0 → 2, `CancelReplaceInto` 0 → 1 (CI), `TapeReplay` 9,061 → 39,901 local and 9,067 → 39,906 on CI; job fails |
+| S5 | local | trades print at price + 1 | `TestBenchTapeDigest` and refmatch agreement fail at block 1, core and full |
+| S6 | local | encoder names makers by engine id | refmatch agreement fails |
+| S7 | local | terminal book in reverse | digest fails: "the blocks agree, so the terminal record differs" |
+| S8a | local | encoder drops A and D records | digest fails in `full` only; `core` unchanged |
+| S8b | local | failed-cancel Replace reported as cancelled | fails in `core` and `full` |
+| S9, S10, S12 | local | body byte flipped; one `Bench` weight changed; capacity 1,694 | frozen-file, generator ("cut bench-v2") and shape (3,931 full-book refusals) tests fail |
+| S11 | local | timed loop skips every 100th command | guard: 3,343 resting / 20,502 trades against 3,380 / 20,672 |
+| S14-S17 | local | `Portable` skips a draw; reader tolerances; unseen id; update at the same version | each fails its test (S17 only after the fix in 12.4) |
+| S18, S19, S20 | local | ratio upside down; cross-round pairing; two result lines | each fails its judge test |
+| P2 | local | comment-only change in `Match` | pass, medians 1.008 and 1.015 |
+
+S2 is the first evidence of power: a slowdown of about 14% on `MatchInto` failed with its
+lower bound at 1.074. The same plant diluted to 9% on the tape replay and passed. That is
+the replay doing what §11.5 predicted, and it is why the microbenchmarks stay gated
+beside it.
+
+### 12.3 A/A′ on CI (P1)
+
+Ten dispatched runs with `mode: aa`, the code layout moved by 100 to 488 bytes, and
+`enforce: true`. **All ten passed.**
+
+| Benchmark | Medians, 10 runs | Highest k-th ratio | Tainted pairs per run |
+|---|---|---|---|
+| `TapeReplay/sink=nil` | 0.981 – 1.032 | 0.989 | 0 – 6 |
+| `Engine_MatchInto` | 0.962 – 1.018 | 0.991 | 0 – 8 |
+| `Engine_CancelReplaceInto` | 0.990 – 1.010 | 1.002 | 0 – 6 |
+| `OrderBook_CancelReplace` | 0.937 – 1.087 | 0.990 | 0 – 7 |
+| `OrderBook_LevelChurn` | 0.992 – 1.044 | 1.027 | 0 – 4 |
+
+The highest median, 1.087, came with a k-th ratio of 0.989: the lower bound is what kept
+it a pass. Ten runs bound nothing at the precision slice B needs; the 60-run
+calibration in §9.4 still decides enforcement. Every allocation count matched between
+the arms in all ten runs.
+
+### 12.4 Where this document was wrong about its own design
+
+- **Allocation counts are not exact** (§4, §5.2, corrected in place). The rule is now
+  medians with a measured slack on the tape replay.
+- **"More than 2 of 20 tainted" made the gate blind on a busy machine** (§5.2,
+  corrected in place). It is now "fewer than 12 clean".
+- **S19 could not be built as written.** A ratio of arm medians and the median of paired
+  ratios agree on every fixture, because medians commute with the per-pair scaling.
+  What pairing buys is cancelling drift between rounds, so S19 became "pair across
+  rounds of the same ABBA parity". Under drift of up to 4× with a steady 15% slowdown,
+  that judge reports pass (median 1.16, k-th 0.77). An earlier version paired adjacent
+  rounds, mismatched the arms, and failed tests for an unrelated reason. It proved
+  nothing and was replaced.
+- **`Latency_MassCancelBurst` at the package's 300,000x hung** until the 10-minute test
+  timeout. The 200x override §5.2 already named is required, not a nicety.
+- **Three tests were green against broken code until changed.** The digest-rules test
+  had no row with an identical digest, so a sabotaged refusal stayed green. The tape
+  reader ended with a whole-file comparison that caught every other rule's sabotage by
+  itself. The first S19 sabotage did not compile.
+- **Plumbing faults found by using it:** `make` expanded `$|` inside `BENCH_ONLY`, so a
+  three-benchmark run silently ran one. The summary cut `-dirty` off a head revision.
+  A shared concurrency group would have cancelled nine of ten A/A dispatches.
+- **As predicted:** the first push reported "not compared: no base gate" (§11.9), and the
+  vector check ran on `ubuntu-latest` with `perl` and `sha256sum`, which §13 had listed
+  as unverified.
+
+### 12.5 Not run in slice A
+
+S3, S13, P3, P4 and P8, and the power study (S2 at 1.20× in 19 of 20 runs). They belong
+with slice B's calibration and are not claimed here.
 
 ---
 
