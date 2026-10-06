@@ -1,6 +1,6 @@
 # Benchmark Gate — A Slowdown That Can Fail a Build, and a Tape Another Matcher Can Replay
 
-Status: **built (slice A)** — part of milestone M10 in
+Status: **built (slice A); slice B in progress (§14)** — part of milestone M10 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md), written before the code, as this
 repository does it · Author: Karthikeyan NG · Last updated: 2026-10-06
 
@@ -862,6 +862,57 @@ found along the way get their own `fix(...)` commit and a changelog commit.
 - If it applies: `docs/SPEC.md:131` tree listing.
 
 ---
+
+## 14. Slice B — the order it is built in, decided before the data
+
+Written on 2026-10-06, after slice A and before any calibration run, so that what the
+data is allowed to decide is fixed before it exists.
+
+### 14.1 The order
+
+1. **`benchgate calibrate`.** A subcommand that reads a directory of
+   `bench-result.json` files and prints, per gated benchmark, the three §9.4 numbers:
+   runs failed, runs inconclusive, and the p99 of |median − 1|. It works on data alone,
+   so its tests are fixtures.
+2. **60 A/A′ runs** on `ubuntu-latest` (`mode: aa`, `enforce: true`), dispatched
+   together, with their artifacts downloaded and fed to `calibrate`.
+3. **The decision**, by the rule in 14.2, recorded in §15 with the numbers.
+4. **Power.** One branch plants a slowdown sized to about 1.20× on each gated benchmark
+   that 14.2 enforces: a loop in `Engine.Match` reaches the matching benchmarks and the
+   tape replay; the order-book benchmarks need their own plant, in `pkg/orderbook`.
+   Twenty dispatched runs. Each enforced benchmark must fail in at least 19. The
+   measured detection floor goes into the summary text.
+5. **Enforcement.** Push runs get `-enforce` for the benchmarks 14.2 lets through. A
+   second inconclusive run, after the automatic retry, becomes a failure under
+   `-enforce`. The §5.3 trailers are read from every commit in the range, a malformed
+   one fails the job, and the summary prints the 90-day count.
+6. **`pull_request`**, with fork handling, once 5 has run on `main` for a week without a
+   false failure.
+
+### 14.2 The decision rule, per gated benchmark
+
+Timing enforcement turns on for a benchmark only if all three hold over the 60 runs:
+
+- it failed in **none** of them;
+- it was inconclusive, after the retry, in **at most 6** of them;
+- **1.10 ≥ 1 + 3 × p99(|median − 1|)**, where p99 is the nearest-rank 99th percentile of
+  60 values, which is their maximum.
+
+A benchmark that misses any of them keeps its timing **report-only**. It stays in the
+summary, marked `report only (calibration)` with the criterion it missed, and nothing
+about it is dropped silently. Allocation enforcement does not depend on this rule: the
+allocation counts disagreed between arms in none of slice A's ten A/A runs, and §15
+records whether that held for sixty.
+
+**No threshold moves in slice B.** The rule decides which benchmarks the existing
+thresholds may enforce, not what the thresholds are. If too few pass, raising 1.10 is a
+change to this document, with its own calibration, in a later slice. Picking a
+threshold after seeing which one the data allows is not calibration.
+
+### 14.3 Deferred to slice C
+
+Each is independent and none blocks enforcement: allocation classes for `pkg/wal`, the
+`sink=count` replay variant, and moving obsoak onto a shared probe.
 
 ## Appendix: Review points not taken
 
