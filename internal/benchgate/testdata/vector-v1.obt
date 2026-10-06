@@ -1,0 +1,14 @@
+obtape 1
+generator hand-written
+provenance docs/BENCH-GATE.md §3.3 vector
+config maxorders=1000
+kinds Submit Cancel Reduce Replace
+features limit gtc ioc
+body-sha256 7c9e19f338d87e2099c2753567e1085b724c14d31e165e63a4e1d6ee2cae26d4
+---
+pos=0 kind=Submit user=3 side=S type=LIMIT price=101 qty=5 tif=GTC postonly=0
+pos=1 kind=Submit user=2 side=B type=LIMIT price=101 qty=2 tif=GTC postonly=0
+pos=2 kind=Reduce target=0 user=3 newqty=4
+pos=3 kind=Cancel target=1 user=2
+pos=4 kind=Replace target=0 user=3 side=S type=LIMIT price=103 qty=3 tif=GTC postonly=0
+pos=5 kind=Submit user=2 side=B type=LIMIT price=102 qty=2 tif=IOC postonly=0
