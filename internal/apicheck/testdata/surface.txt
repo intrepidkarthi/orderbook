@@ -375,6 +375,7 @@ matching.Config.MinMarkDepth int64
 matching.Config.MinOrderNotional int64
 matching.Config.MinOrderQty int64
 matching.Config.MinRestingTime time.Duration
+matching.Config.PreallocOrders int
 matching.Config.PriceBand decimal.Decimal
 matching.Config.ProRata bool
 matching.Config.SelfTradePrevention SelfTradePrevention
@@ -589,6 +590,7 @@ orderbook.Config struct
 orderbook.Config.Clock func() time.Time
 orderbook.Config.IndexHint int
 orderbook.Config.MaxOrders int
+orderbook.Config.Prealloc int
 orderbook.Config.Symbol string
 orderbook.L3Order struct
 orderbook.L3Order.OrderID int64

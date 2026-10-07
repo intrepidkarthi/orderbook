@@ -164,6 +164,11 @@ type Config struct {
 	// 0 => MaxOrders, which is right for one book sized to its cap and wrong for
 	// thousands of books that each need a high cap and mostly hold few orders.
 	IndexHint int
+	// Prealloc fills the book's pools for this many resting orders at
+	// construction: nodes and index entries in two contiguous slabs, and the index
+	// sized so it does not grow before then. A pool, not a cap: past it the book
+	// allocates as usual, and MaxOrders still caps it. 0 allocates nothing ahead.
+	Prealloc int
 	// Clock supplies the timestamps stamped on snapshots and the last-trade time.
 	// nil => time.Now. Inject a deterministic clock to make snapshots byte-identical
 	// under replay.
@@ -181,7 +186,10 @@ func New(config Config) *OrderBook {
 	if config.IndexHint <= 0 {
 		config.IndexHint = config.MaxOrders
 	}
-	return &OrderBook{
+	if need := config.Prealloc*100/maxLoad + 1; config.Prealloc > 0 && config.IndexHint < need {
+		config.IndexHint = need
+	}
+	ob := &OrderBook{
 		symbol:    config.Symbol,
 		bids:      make(map[int64]*PriceLevel),
 		asks:      make(map[int64]*PriceLevel),
@@ -192,6 +200,34 @@ func New(config Config) *OrderBook {
 		maxOrders: config.MaxOrders,
 		clock:     config.Clock,
 	}
+	ob.prefill(config.Prealloc)
+	return ob
+}
+
+// prefill puts n nodes, n index entries and up to 1,024 price levels on the free
+// lists, each kind from one allocation, and sizes the level maps and price slices
+// for those levels.
+func (ob *OrderBook) prefill(n int) {
+	if n <= 0 {
+		return
+	}
+	nodes := make([]node, n)
+	ob.nodePool = make([]*node, n, n+n/4)
+	for i := range nodes {
+		ob.nodePool[i] = &nodes[i]
+	}
+	ob.nodes.prefill(n)
+	levels := make([]PriceLevel, min(n, 1024))
+	ob.levelPool = make([]*PriceLevel, len(levels))
+	for i := range levels {
+		ob.levelPool[i] = &levels[i]
+	}
+	// The level maps and sorted price slices, sized for the same levels, so the
+	// first thousand prices do not grow them either.
+	ob.bids = make(map[int64]*PriceLevel, len(levels))
+	ob.asks = make(map[int64]*PriceLevel, len(levels))
+	ob.bidPrices = make([]int64, 0, len(levels))
+	ob.askPrices = make([]int64, 0, len(levels))
 }
 
 // Symbol returns the book's instrument symbol.

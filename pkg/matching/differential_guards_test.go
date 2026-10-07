@@ -62,6 +62,7 @@ var configClassification = map[string]configRole{
 	"MarkDepthBand":       mustBeZero("bounds a mark-price update, which only the band consumes"),
 	"MaxForceTradeQty":    mustBeZero("caps ForceTrade, which is the risk layer's entry point and not on the tape"),
 	"IcebergPeakJitter":   mustBeZero("varies an iceberg reload size, and icebergs are tier 2"),
+	"PreallocOrders":      mustBeZero("a memory setting with no semantics; TestPreallocChangesNoDigest (internal/benchgate) shows both committed tapes digest the same with it"),
 }
 
 // TestEveryConfigFieldIsClassified makes adding a Config field without deciding

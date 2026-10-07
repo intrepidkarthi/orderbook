@@ -3,6 +3,7 @@ package orderbook
 import (
 	"errors"
 	"math"
+	"runtime"
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -274,5 +275,51 @@ func TestIndexHintSizesTheIndexNotTheCap(t *testing.T) {
 	}
 	if def := New(Config{Symbol: "BTC-USD", MaxOrders: 1 << 12}); len(def.nodes.buckets) < 1<<12 {
 		t.Fatalf("IndexHint 0 sized the index at %d buckets, under MaxOrders", len(def.nodes.buckets))
+	}
+}
+
+// TestPreallocRestsWithoutAllocating: with Prealloc n, adding n orders and removing
+// them again allocates nothing per order in the book; the default allocates at least
+// one per order, so the option is what made the difference. Orders are built
+// outside the measurement.
+func TestPreallocRestsWithoutAllocating(t *testing.T) {
+	const n = 2000
+	measure := func(prealloc int) float64 {
+		orders := make([]*types.Order, n)
+		for i := range orders {
+			side := types.SideBuy
+			price := int64(1000 - i%50)
+			if i%2 == 1 {
+				side, price = types.SideSell, int64(1100+i%50)
+			}
+			orders[i] = limit(t, "u", side, price, 1)
+			orders[i].ID = int64(i + 1)
+		}
+		ob := New(Config{Symbol: "BTC-USD", MaxOrders: 1 << 20, IndexHint: 8, Prealloc: prealloc})
+		// One cold pass, counted directly: testing.AllocsPerRun warms up first,
+		// and the warm-up fills the pools this test is about.
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		for _, o := range orders {
+			if err := ob.Add(o); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, o := range orders {
+			if _, err := ob.Remove(o.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		runtime.ReadMemStats(&after)
+		return float64(after.Mallocs - before.Mallocs)
+	}
+	// A small constant is allowed, never one per order: the first account is
+	// interned once, and MemStats counts the runtime's own allocations too.
+	if got := measure(n); got > 8 {
+		t.Fatalf("Prealloc %d: %v allocations resting and removing %d orders", n, got, n)
+	}
+	if got := measure(0); got < n {
+		t.Fatalf("without Prealloc: %v allocations for %d orders; the test no longer shows what the option removes", got, n)
 	}
 }

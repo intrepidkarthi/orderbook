@@ -78,6 +78,15 @@ func (oi *orderIndex) get(key int64) (*node, bool) {
 	return nil, false
 }
 
+// prefill puts n entries, allocated together, on the free list.
+func (oi *orderIndex) prefill(n int) {
+	entries := make([]indexEntry, n)
+	for i := range entries {
+		entries[i].next = oi.free
+		oi.free = &entries[i]
+	}
+}
+
 // put inserts or replaces the entry for key.
 func (oi *orderIndex) put(key int64, val *node) {
 	i := oi.index(key)

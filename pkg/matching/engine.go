@@ -184,6 +184,10 @@ type Config struct {
 	Symbol              string
 	SelfTradePrevention SelfTradePrevention
 	MaxOrders           int
+	// PreallocOrders fills the book's pools for this many resting orders when the
+	// engine is built, so resting them later does not allocate
+	// (orderbook.Config.Prealloc). 0, the default, allocates nothing ahead.
+	PreallocOrders int
 	// PriceBand is a circuit-breaker collar: a limit order priced more than this
 	// fraction away from the last trade price is rejected (e.g. 0.10 = ±10%).
 	// Zero disables the band. It has no effect until the first trade sets a
@@ -456,6 +460,7 @@ func NewEngine(config Config) *Engine {
 			Symbol:    config.Symbol,
 			MaxOrders: config.MaxOrders,
 			Clock:     config.Clock,
+			Prealloc:  config.PreallocOrders,
 		}),
 		stopBook:      orderbook.NewStopBook(config.Symbol),
 		icebergOrders: make(map[int64]*types.IcebergOrder),
