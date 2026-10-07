@@ -2,6 +2,7 @@ package orderbook
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -235,6 +236,25 @@ func TestLadderInvariant(t *testing.T) {
 	for i := 1; i < len(asks); i++ {
 		if asks[i-1].Price >= asks[i].Price {
 			t.Fatalf("asks not strictly ascending at %d: %d !< %d", i, asks[i-1].Price, asks[i].Price)
+		}
+	}
+}
+
+// TestLevelsAskedForMoreThanExist: "all levels" is a natural thing to ask for with a
+// huge depth, and the reservation must follow the levels present, not the argument.
+// Sized by the argument, math.MaxInt panicked and math.MaxInt32 reserved 16 GB.
+func TestLevelsAskedForMoreThanExist(t *testing.T) {
+	ob := New(Config{Symbol: "BTC-USD"})
+	mustAdd(t, ob, limit(t, "a", types.SideBuy, 100, 1))
+	mustAdd(t, ob, limit(t, "a", types.SideSell, 101, 1))
+	for _, depth := range []int{math.MaxInt, math.MaxInt32, -1} {
+		bids, asks := ob.GetBidLevels(depth), ob.GetAskLevels(depth)
+		want := 1
+		if depth < 0 {
+			want = 0
+		}
+		if len(bids) != want || len(asks) != want || cap(bids) > 1 || cap(asks) > 1 {
+			t.Fatalf("depth %d: %d bids (cap %d), %d asks (cap %d)", depth, len(bids), cap(bids), len(asks), cap(asks))
 		}
 	}
 }

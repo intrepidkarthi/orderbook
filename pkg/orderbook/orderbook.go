@@ -402,7 +402,7 @@ func (ob *OrderBook) SetLastTradePrice(price int64) {
 func (ob *OrderBook) GetBidLevels(depth int) []*PriceLevel {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
-	levels := make([]*PriceLevel, 0, depth)
+	levels := make([]*PriceLevel, 0, max(0, min(depth, len(ob.bidPrices))))
 	for i := 0; i < len(ob.bidPrices) && i < depth; i++ {
 		l := ob.bids[ob.bidPrices[i]]
 		// count travels with the copy: it is maintained state a caller can compare
@@ -417,7 +417,7 @@ func (ob *OrderBook) GetBidLevels(depth int) []*PriceLevel {
 func (ob *OrderBook) GetAskLevels(depth int) []*PriceLevel {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
-	levels := make([]*PriceLevel, 0, depth)
+	levels := make([]*PriceLevel, 0, max(0, min(depth, len(ob.askPrices))))
 	for i := 0; i < len(ob.askPrices) && i < depth; i++ {
 		l := ob.asks[ob.askPrices[i]]
 		levels = append(levels, &PriceLevel{Price: l.Price, TotalQty: l.TotalQty, count: l.count})
