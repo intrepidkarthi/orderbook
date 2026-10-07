@@ -67,6 +67,45 @@ gateway.Gateway.OnBump func(o *types.Order, releaseAt time.Time)
 gateway.New(runner *matching.Runner, cfg Config) *Gateway
 gateway.NewRateGate(ratePerSec, burst float64) *RateGate
 gateway.RateGate struct
+itch.(*Books).Apply(m *Message)
+itch.(*Books).Book(symbol string) *orderbook.OrderBook
+itch.(*Books).Symbols() []string
+itch.(*Reader).Next(m *Message) error
+itch.(*Reader).Offset() int64
+itch.Append(b []byte, m *Message) ([]byte, error)
+itch.Books struct
+itch.Books.Stats Stats
+itch.Config struct
+itch.Config.IndexHint int
+itch.Config.MaxOrders int
+itch.Config.Symbols []string
+itch.Decode(b []byte, m *Message) error
+itch.Decoded(t byte) bool
+itch.ErrTruncated var
+itch.Message struct
+itch.Message.Locate uint16
+itch.Message.MPID [4]byte
+itch.Message.Match uint64
+itch.Message.NewRef uint64
+itch.Message.Price uint32
+itch.Message.Printable byte
+itch.Message.Ref uint64
+itch.Message.Shares uint32
+itch.Message.Side byte
+itch.Message.Stock [8]byte
+itch.Message.Timestamp uint64
+itch.Message.Tracking uint16
+itch.Message.Type byte
+itch.NewBooks(cfg Config) *Books
+itch.NewReader(r io.Reader) *Reader
+itch.Reader struct
+itch.Stats struct
+itch.Stats.BookFull uint64
+itch.Stats.ByType [256]uint64
+itch.Stats.Messages uint64
+itch.Stats.NotHeld uint64
+itch.Stats.OverExecuted uint64
+itch.Stats.Skipped uint64
 marketdata.(*Feed).Adopt(orders []*types.Order, lastTradePrice int64)
 marketdata.(*Feed).Incarnation() string
 marketdata.(*Feed).OnEvents(evs []matching.Event)
@@ -505,6 +544,7 @@ orderbook.(*StopBook).Get(id int64) (*types.StopOrder, bool)
 orderbook.(*StopBook).Remove(id int64) bool
 orderbook.Config struct
 orderbook.Config.Clock func() time.Time
+orderbook.Config.IndexHint int
 orderbook.Config.MaxOrders int
 orderbook.Config.Symbol string
 orderbook.L3Order struct
