@@ -191,6 +191,12 @@ type Profile struct {
 	// the draws instead would shift everything after the first one, so the same seed
 	// would produce a different tape. TestPortableKeepsDrawCount enforces that.
 	Portable bool
+	// OwnerOnly sends every cancel that names an order from that order's account, so
+	// a matcher with no notion of ownership replays the tape the same way. Without it
+	// one cancel in four goes out from the wrong account on purpose (aimAtOwner). It
+	// follows Portable's rule: the draws are all taken, and only the account written
+	// into the command changes. TestOwnerOnlyKeepsDrawCount enforces that.
+	OwnerOnly bool
 }
 
 // Differential is the tier-1 alphabet: everything that changes what the matching
@@ -274,6 +280,22 @@ var Bench = Profile{
 	Portable:   true,
 }
 
+// Basic is the workload of the cross-engine tape (docs/BENCH-GATE.md §17): limit GTC
+// submits and cancels, the subset every engine in docs/LANDSCAPE.md can express.
+// Bench's book shape, with no exotic draws, no reduce and no replace. Portable and
+// OwnerOnly, so neither self-trade prevention nor ownership checks can make two
+// engines part.
+var Basic = Profile{
+	Name:      "basic",
+	Weights:   weights(map[Kind]int{Submit: 65, Cancel: 35}),
+	Users:     64,
+	PriceLo:   1000,
+	PriceSpan: 41,
+	QtyMax:    9,
+	Portable:  true,
+	OwnerOnly: true,
+}
+
 func weights(w map[Kind]int) [KindCount]int {
 	var out [KindCount]int
 	for k, v := range w {
@@ -332,6 +354,9 @@ func Gen(p Profile, seed uint64, n int) []Cmd {
 		case Cancel:
 			c.Target = aimRecent(&r, i)
 			c.User = aimAtOwner(out, c.Target, &r, user(&r, p))
+			if u := ownerOf(out, c.Target); p.OwnerOnly && u != "" {
+				c.User = u
+			}
 		case Reduce:
 			c.Target = aimRecent(&r, i)
 			c.User = aimAtOwner(out, c.Target, &r, user(&r, p))
@@ -433,6 +458,15 @@ func sellsOnly(u string) bool {
 // The remaining one in four keeps the mismatched-owner path swept, and it stays a
 // pure function of the seed because the generator knows what account it drew for
 // every earlier position.
+// ownerOf is the account that made the order at position target, or "" if that
+// position made no order.
+func ownerOf(out []Cmd, target int) string {
+	if target < 0 || target >= len(out) || (out[target].Kind != Submit && out[target].Kind != Replace) {
+		return ""
+	}
+	return out[target].User
+}
+
 func aimAtOwner(out []Cmd, target int, r *lcg, fallback string) string {
 	if r.intn(4) == 0 || target < 0 || target >= len(out) {
 		return fallback

@@ -28,7 +28,7 @@ func TestLCGVectorIsPinned(t *testing.T) {
 // TestGenIsDeterministic guards the whole harness: if the tape drifts between runs,
 // every assertion built on it becomes meaningless.
 func TestGenIsDeterministic(t *testing.T) {
-	for _, p := range []Profile{Differential, ProRata, Recovery, Bench} {
+	for _, p := range []Profile{Differential, ProRata, Recovery, Bench, Basic} {
 		a, b := Gen(p, 7, 300), Gen(p, 7, 300)
 		if len(a) != 300 || len(b) != 300 {
 			t.Fatalf("%s: Gen returned %d and %d commands, want 300", p.Name, len(a), len(b))
@@ -193,4 +193,68 @@ func TestPortableTapeHasNoSelfCrossUser(t *testing.T) {
 		t.Fatalf("Portable tape lost part of its alphabet: buys %d sells %d market %d post-only %d IOC %d FOK %d",
 			buys, sells, market, postOnly, ioc, fok)
 	}
+}
+
+// TestOwnerOnlyKeepsDrawCount is Portable's guard applied to OwnerOnly: off, every
+// command must come out the same except the account on a cancel.
+func TestOwnerOnlyKeepsDrawCount(t *testing.T) {
+	plain := Basic
+	plain.OwnerOnly = false
+	changed := 0
+	for _, seed := range []uint64{1, 7, 0x5EED1234} {
+		a, b := Gen(Basic, seed, 5000), Gen(plain, seed, 5000)
+		for i := range a {
+			x, y := a[i], b[i]
+			if x.Kind == Cancel && x.User != y.User {
+				changed++
+				x.User = y.User
+			}
+			if x != y {
+				t.Fatalf("seed %#x: OwnerOnly moved the stream at command %d:\n owner-only %+v\n      plain %+v", seed, i, a[i], b[i])
+			}
+		}
+	}
+	if changed == 0 {
+		t.Fatal("OwnerOnly changed no cancel's account; the plain profile already sends none from the wrong one")
+	}
+}
+
+// TestBasicTapeIsTheCommonSubset checks what Basic exists for: plain limit GTC submits
+// and cancels, every cancel that names an order sent from its owner, no account on
+// both sides. And that the tape still has both sides and cancels of dead orders,
+// because a profile that dropped them would pass the rest trivially.
+func TestBasicTapeIsTheCommonSubset(t *testing.T) {
+	cmds := Gen(Basic, 0x5EED1234, 50000)
+	side := map[string]bool{}
+	var buys, sells, cancels, unowned int
+	for _, c := range cmds {
+		switch c.Kind {
+		case Submit:
+			if c.MarketOrd || c.PostOnly || c.TIF != 0 || c.STP != 0 || c.Privileged || c.TradeGroup != 0 {
+				t.Fatalf("command %d is not a plain limit GTC: %+v", c.Pos, c)
+			}
+			if s, seen := side[c.User]; seen && s != c.Sell {
+				t.Fatalf("command %d: %s trades both sides", c.Pos, c.User)
+			}
+			side[c.User] = c.Sell
+			if c.Sell {
+				sells++
+			} else {
+				buys++
+			}
+		case Cancel:
+			cancels++
+			if cmds[c.Target].Kind != Submit {
+				unowned++
+			} else if cmds[c.Target].User != c.User {
+				t.Fatalf("command %d cancels %d from %s, which %s made", c.Pos, c.Target, c.User, cmds[c.Target].User)
+			}
+		default:
+			t.Fatalf("command %d is a %v, outside the subset", c.Pos, c.Kind)
+		}
+	}
+	if buys == 0 || sells == 0 || cancels == 0 {
+		t.Fatalf("buys %d sells %d cancels %d", buys, sells, cancels)
+	}
+	t.Logf("%d buys, %d sells, %d cancels (%d naming a position with no order)", buys, sells, cancels, unowned)
 }
