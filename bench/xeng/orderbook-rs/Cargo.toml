@@ -1,0 +1,24 @@
+[package]
+name = "xeng-orderbook-rs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "xeng-orderbook-rs"
+path = "src/main.rs"
+
+[dependencies]
+# OrderBook-rs main @ 2026-10-05 (crate version 0.15.0).
+orderbook-rs = { git = "https://github.com/joaquinbejar/OrderBook-rs", rev = "54df8ebcd99b4b3fb7373cf848b76e89da1b1361", default-features = false }
+# The engine asks for ^0.10.2 and ships no Cargo.lock; pin the exact version
+# it was read against. Needed directly for Hash32 and PriceLevelSnapshot.
+pricelevel = "=0.10.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# Standalone crate, not part of any parent workspace.
+[workspace]

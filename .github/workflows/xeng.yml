@@ -1,0 +1,128 @@
+name: Cross-engine
+
+# Same work, checked, then timed (docs/CROSS-ENGINE.md). Each engine is built at its
+# pinned commit, replays bench-basic-v1.obt through its adapter, and is folded into
+# the OBDG core digest by one encoder. Only engines whose digest agrees are timed.
+# Everything runs in one job, interleaved, so every engine sees the same runner.
+# Nothing here fails on time; the table goes to the job summary.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: "replays per engine, interleaved"
+        type: number
+        default: 11
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      BIN: ${{ github.workspace }}/xeng-bin
+      TAPE: internal/benchgate/testdata/bench-basic-v1.obt
+      DIGEST: internal/benchgate/testdata/bench-basic-v1.digest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: This engine
+        run: |
+          mkdir -p "$BIN"
+          go build -o "$BIN/xeng" ./cmd/xeng
+          ln -s "$BIN/xeng" "$BIN/xeng-self"
+          "$BIN/xeng" export "$TAPE" > tape.txt
+          head -2 tape.txt
+
+      # Each third-party build may fail on its own; a missing engine is reported in
+      # the table as missing, not as the job failing.
+      - name: geseq/orderbook
+        continue-on-error: true
+        working-directory: bench/xeng/geseq
+        run: |
+          go mod tidy
+          go build -trimpath -o "$BIN/geseq" .
+
+      - name: OrderBook-rs
+        continue-on-error: true
+        working-directory: bench/xeng/orderbook-rs
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          cargo generate-lockfile
+          cargo build --release
+          cp target/release/xeng-orderbook-rs "$BIN/orderbook-rs"
+
+      - name: CppTrader
+        continue-on-error: true
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q binutils-dev uuid-dev libssl-dev
+          bench/xeng/cpptrader/fetch.sh "$RUNNER_TEMP/CppTrader"
+          cmake -S bench/xeng/cpptrader -B "$RUNNER_TEMP/build-cpptrader" \
+            -DCMAKE_BUILD_TYPE=Release -DCPPTRADER_DIR="$RUNNER_TEMP/CppTrader"
+          cmake --build "$RUNNER_TEMP/build-cpptrader" -j
+          cp "$RUNNER_TEMP/build-cpptrader/cpptrader-xeng" "$BIN/cpptrader"
+
+      - name: Replay, interleaved
+        env:
+          ROUNDS: ${{ inputs.rounds }}
+        run: |
+          engines=(self geseq orderbook-rs cpptrader)
+          declare -A bin=([self]="$BIN/xeng-self run" [geseq]="$BIN/geseq" [orderbook-rs]="$BIN/orderbook-rs" [cpptrader]="$BIN/cpptrader")
+          mkdir -p out
+          n=${#engines[@]}
+          for r in $(seq 1 "$ROUNDS"); do
+            # Rotate the order each round, so no engine always runs first or last.
+            for k in $(seq 0 $((n - 1))); do
+              e=${engines[$(( (k + r) % n ))]}
+              exe=${bin[$e]%% *}
+              if [ ! -x "$exe" ]; then
+                continue
+              fi
+              ${bin[$e]} < tape.txt > "out/$e-$r.out" 2> "out/$e-$r.err" || echo "$e round $r exited $?" | tee -a out/failures.txt
+            done
+          done
+          ls out | head -50
+
+      - name: Table
+        run: |
+          args=()
+          for e in self geseq orderbook-rs cpptrader; do
+            found=0
+            for f in out/$e-*.out; do
+              [ -e "$f" ] && { args+=("$e=$f"); found=1; }
+            done
+            [ $found = 1 ] || args+=("$e=out/$e-not-built.out")
+          done
+          {
+            echo "### Cross-engine replay of bench-basic-v1"
+            echo
+            "$BIN/xeng" table "$TAPE" "$DIGEST" "${args[@]}"
+            echo
+            echo "Runner CPU: $(lscpu | sed -n 's/^Model name: *//p'), $(nproc) vCPUs. Rounds: ${{ inputs.rounds }}, interleaved, rotated."
+            echo "Commit: \`${GITHUB_SHA}\`. A shared runner, one tape: this table ranks nothing outside itself (CROSS-ENGINE.md §1)."
+            if [ -s out/failures.txt ]; then echo; echo '```'; cat out/failures.txt; echo '```'; fi
+            for f in out/*-1.err; do
+              [ -s "$f" ] && { echo; echo "\`$f\`:"; echo '```'; head -20 "$f"; echo '```'; }
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xeng-outputs
+          path: |
+            out/*-1.out
+            out/*.err
+            out/failures.txt
+            bench/xeng/geseq/go.sum
+            bench/xeng/orderbook-rs/Cargo.lock
+          if-no-files-found: ignore
