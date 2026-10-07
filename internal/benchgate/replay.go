@@ -22,7 +22,9 @@ func digestEngine(tp *Tape, keep bool) (Digest, error) {
 	if err != nil {
 		return Digest{}, err
 	}
-	return dg.finish(t), nil
+	out := dg.finish(t)
+	out.EngineEvents = d.published
+	return out, nil
 }
 
 // DigestRefmatch replays a tape through internal/refmatch and digests what it

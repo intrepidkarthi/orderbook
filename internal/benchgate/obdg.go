@@ -124,12 +124,15 @@ func (c *chain) seal() {
 
 // Digest is a finished replay's fingerprint.
 type Digest struct {
-	Core, Full       [32]byte
-	CoreBlocks       [][32]byte
-	FullBlocks       [][32]byte
-	Resting          int
-	Trades           uint64 // prints in the full chain (and, if the two agree, in core)
-	CoreTrades       uint64
+	Core, Full [32]byte
+	CoreBlocks [][32]byte
+	FullBlocks [][32]byte
+	Resting    int
+	Trades     uint64 // prints in the full chain (and, if the two agree, in core)
+	CoreTrades uint64
+	// EngineEvents is how many events the engine published over the replay. It is
+	// not part of either chain; the sink=count benchmark's guard checks against it.
+	EngineEvents     int
 	coreRaw, fullRaw []byte
 }
 

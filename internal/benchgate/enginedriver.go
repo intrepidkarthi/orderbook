@@ -81,11 +81,12 @@ func counterClock() func() time.Time {
 // engineDriver replays a tape through pkg/matching and names everything it sees by
 // tape position.
 type engineDriver struct {
-	e   *matching.Engine
-	log *eventLog
-	ids []int64          // tape position -> engine order id, 0 if none
-	pos map[int64]uint64 // engine order id -> tape position
-	buf []types.Trade
+	e         *matching.Engine
+	log       *eventLog
+	published int              // every event published so far
+	ids       []int64          // tape position -> engine order id, 0 if none
+	pos       map[int64]uint64 // engine order id -> tape position
+	buf       []types.Trade
 }
 
 func newEngineDriver(maxOrders int64, n int) *engineDriver {
@@ -194,6 +195,7 @@ func (d *engineDriver) apply(c tape.Cmd) (outcome, error) {
 // by the first Accepted or Rejected event that mentions its id; any other event
 // naming an id never seen is a hard error rather than a guess.
 func (d *engineDriver) events(c tape.Cmd, out *outcome) error {
+	d.published += len(d.log.evs)
 	for _, e := range d.log.evs {
 		switch e.Kind {
 		case matching.EventAccepted, matching.EventRejected:

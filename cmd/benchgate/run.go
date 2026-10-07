@@ -30,12 +30,38 @@ var pkgs = []struct {
 	{"internal/benchgate", "5x"},
 	{"pkg/matching", "300000x"},
 	{"pkg/orderbook", "500000x"},
+	{"pkg/wal", "20000x"},
 }
 
 // nOverride is the iteration count for a benchmark whose op is much heavier than
 // its package's.
 var nOverride = map[string]string{
 	"BenchmarkLatency_MassCancelBurst": "200x",
+	// pkg/wal: an fsync per op, and whole-log operations whose single op reads or
+	// rebuilds a log. Each count keeps one invocation to about ten seconds on the M4.
+	"BenchmarkRunnerDurableSyncEvery":           "500x",
+	"BenchmarkCheckpoint":                       "20x",
+	"BenchmarkReadAll":                          "20x",
+	"BenchmarkReplayTail":                       "20x",
+	"BenchmarkWriteSnapshot":                    "20x",
+	"BenchmarkRestoreSnapshot":                  "20x",
+	"BenchmarkRecoverSnapshotPlusTail":          "5x",
+	"BenchmarkRecoverBehindACoveredPrefix":      "5x",
+	"BenchmarkRecoverBehindACoveredChurnPrefix": "5x",
+	"BenchmarkRotationAppendTail":               "2000x",
+}
+
+// wholeLog are the pkg/wal benchmarks whose op reads, replays or rebuilds a log.
+// Several run sub-benchmarks at 1,000, 10,000 and 100,000 records, and the gate
+// compares their SUM. Totals run to millions and move by a few between identical
+// runs (a local A/A: 2,593,400 against 2,593,425), so they get a relative slack and
+// one invocation per arm; one extra allocation per record would add 111,000. Timing
+// is never gated on them: they are fsync- and disk-bound.
+var wholeLog = map[string]bool{
+	"BenchmarkCheckpoint": true, "BenchmarkReadAll": true, "BenchmarkReplayTail": true,
+	"BenchmarkWriteSnapshot": true, "BenchmarkRestoreSnapshot": true,
+	"BenchmarkRecoverSnapshotPlusTail": true, "BenchmarkRecoverBehindACoveredPrefix": true,
+	"BenchmarkRecoverBehindACoveredChurnPrefix": true,
 }
 
 // timingGated are the benchmarks whose time may fail a build. Everything else in
@@ -49,11 +75,24 @@ var timingGated = []string{
 	"BenchmarkOrderBook_LevelChurn",
 }
 
+// subBenchmarks lists the sub-benchmarks the gate runs one at a time, because each
+// is its own measurement: the tape replay with emission off and with a counting sink.
+// A tree that lacks one (a base from before sink=count existed) runs it, and the
+// pattern matches nothing, so it shows as missing or new rather than as a result.
+var subBenchmarks = map[string][]string{
+	"BenchmarkTapeReplay": {"sink=nil", "sink=count"},
+}
+
 // allocGated names the families compared on allocations, by prefix.
-var allocGated = regexp.MustCompile(`^Benchmark(TapeReplay|OrderBook_|Engine_|Latency_)`)
+var allocGated = regexp.MustCompile(`^Benchmark(TapeReplay|OrderBook_|Engine_|Latency_|Runner|Checkpoint$|ReadAll$|ReplayTail$|WriteSnapshot$|RestoreSnapshot$|Recover|RotationAppendTail$)`)
 
 // notGated is excluded from both: it measures the machine's core count.
-var notGated = map[string]bool{"BenchmarkShards_Scaling": true}
+var notGated = map[string]bool{
+	"BenchmarkShards_Scaling": true,
+	// Stable at 9,721 allocations, and about 200 s per invocation on the M4: more than
+	// the rest of the gate together. Its cost is the reason, and it is the only one.
+	"BenchmarkRestartWithRetention": true,
+}
 
 const budget = 20 * time.Minute
 
@@ -207,7 +246,11 @@ func compare(args []string) int {
 				// Three per arm, interleaved: a single run's count carries a few
 				// allocations of runtime noise, enough to tip an integer-divided
 				// allocs/op across a boundary; the median of three does not move.
-				for r := 1; r <= 3; r++ {
+				perArm := 3
+				if wholeLog[name.top] {
+					perArm = 1 // one is ten seconds; its slack absorbs the noise
+				}
+				for r := 1; r <= perArm; r++ {
 					for i, arm := range []*tree{base, head} {
 						invs = append(invs, invoke(arm, name, r, i, deadline))
 					}
@@ -293,24 +336,30 @@ func benchmarks(base, head *tree) []bench {
 				if !allocGated.MatchString(top) || notGated[top] {
 					continue
 				}
-				full, sub := top, ""
-				if top == "BenchmarkTapeReplay" {
-					full, sub = "BenchmarkTapeReplay/sink=nil", "sink=nil"
+				subs := subBenchmarks[top]
+				if subs == nil {
+					subs = []string{""}
 				}
-				b := seen[full]
-				if b == nil {
-					n := p.n
-					if o, ok := nOverride[top]; ok {
-						n = o
+				for _, sub := range subs {
+					full := top
+					if sub != "" {
+						full = top + "/" + sub
 					}
-					b = &bench{pkg: p.path, top: top, sub: sub, full: full, n: n}
-					seen[full] = b
-					order = append(order, full)
-				}
-				if t.arm == "base" {
-					b.inBase = true
-				} else {
-					b.inHead = true
+					b := seen[full]
+					if b == nil {
+						n := p.n
+						if o, ok := nOverride[top]; ok {
+							n = o
+						}
+						b = &bench{pkg: p.path, top: top, sub: sub, full: full, n: n}
+						seen[full] = b
+						order = append(order, full)
+					}
+					if t.arm == "base" {
+						b.inBase = true
+					} else {
+						b.inHead = true
+					}
 				}
 			}
 		}
