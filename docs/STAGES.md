@@ -64,3 +64,25 @@ matcher, and are per batch, because that is how the pump works.
 A local run of `obgw` with `obsoak` at a steady rate reads the six histograms. Their
 quantiles go into [`BENCHMARKS.md`](BENCHMARKS.md) with the machine, the rate and the
 durability mode, so the first published breakdown says where a command's time went.
+
+## 6. Splitting the match stage
+
+After [`WAL-SYNC.md`](WAL-SYNC.md), the match stage's p90 sat at ≤ 500 µs. The engine's
+own cost is a few hundred nanoseconds per command, so nearly all of that is the sinks
+`cmd/obgw` attaches. They run on the matching goroutine, in this order, through one
+`matching.MultiSink`:
+
+1. the name index, which makes an order addressable by its client id;
+2. the order-entry publisher's `OnEvents`, which copies the batch into its queue;
+3. the market-data feed;
+4. the metrics collector.
+
+`obgw` wraps each in a timer, one histogram per sink and one observation per batch:
+`obgw_sink_index_ns`, `obgw_sink_publisher_ns`, `obgw_sink_feed_ns` and
+`obgw_sink_collector_ns`. The wrapper is two clock reads per sink per batch, the same
+cost `timedLog` pays per append.
+
+**Tested:** after a session, all four histograms have the same count, and it is greater
+than zero. Each batch passes through every sink once, so unequal counts mean a sink was
+skipped or double-wrapped. **Measured:** STAGES.md §5's soak again, with the four
+quantiles beside the match stage's.
