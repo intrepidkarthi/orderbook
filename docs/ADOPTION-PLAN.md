@@ -63,10 +63,14 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   the `core` digest in every round of two runs. This engine replays the tape in about
   12.5 ms; geseq in 4.5, CppTrader in 3.5, OrderBook-rs in 40–46. Step 3.1 starts from
   that gap.
-- [ ] **1.6 README performance and comparison.** A "what each number measures" table,
+- [x] **1.6 README performance and comparison.** A "what each number measures" table,
   percentiles with machine and workload, the 1.5 result linked, a factual feature
   checklist against the surveyed projects, and the liquibook "3×" claim retired or
   qualified with its book depth. *Done when:* every number in the section has a source.
+  *Done 2026-10-07*: each figure is tied to its source and machine, the cross-engine
+  table links its CI run, every cell of the fact table was read from the engine's
+  source or tags, and the liquibook claim is qualified where it was made (CHANGELOG
+  v0.13.0, PERFORMANCE-ROADMAP).
 
 ## Phase 2 — adoption
 
