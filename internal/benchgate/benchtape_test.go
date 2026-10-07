@@ -40,7 +40,12 @@ func benchHeader() Header {
 
 func readBenchTape(t testing.TB) ([]byte, *Tape) {
 	t.Helper()
-	b, err := os.ReadFile(benchTapeFile)
+	return readTapeFile(t, benchTapeFile)
+}
+
+func readTapeFile(t testing.TB, file string) ([]byte, *Tape) {
+	t.Helper()
+	b, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatalf("%v (write it once with BENCHGATE_WRITE_TAPE=1)", err)
 	}

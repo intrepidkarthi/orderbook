@@ -174,12 +174,19 @@ const benchDigestFile = "testdata/bench-v1.digest"
 // the committed digest, under the rules in digestrules.go.
 func TestBenchTapeDigest(t *testing.T) {
 	_, tp := readBenchTape(t)
+	holdToDigest(t, tp, benchDigestFile, "bench-v1.obt")
+}
+
+// holdToDigest replays a committed tape through the engine and holds it to its
+// committed digest file, under the rules in digestrules.go.
+func holdToDigest(t *testing.T, tp *Tape, digestFile, tapeName string) {
+	t.Helper()
 	d, err := DigestEngine(tp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var recorded *DigestFile
-	if b, err := os.ReadFile(benchDigestFile); err == nil {
+	if b, err := os.ReadFile(digestFile); err == nil {
 		if recorded, err = ParseDigestFile(b); err != nil {
 			t.Fatal(err)
 		}
@@ -187,11 +194,11 @@ func TestBenchTapeDigest(t *testing.T) {
 	verdict, err := checkDigest(recorded, matching.SemanticsVersion, tp.FileSHA256, d, os.Getenv("BENCHGATE_UPDATE") == "1")
 	switch verdict {
 	case digestWrite:
-		out := FormatDigestFile(matching.SemanticsVersion, "bench-v1.obt", tp.FileSHA256, d)
-		if err := os.WriteFile(benchDigestFile, out, 0o644); err != nil {
+		out := FormatDigestFile(matching.SemanticsVersion, tapeName, tp.FileSHA256, d)
+		if err := os.WriteFile(digestFile, out, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("wrote %s: core %x full %x, %d resting, %d trades", benchDigestFile, d.Core, d.Full, d.Resting, d.Trades)
+		t.Logf("wrote %s: core %x full %x, %d resting, %d trades", digestFile, d.Core, d.Full, d.Resting, d.Trades)
 	case digestRefused:
 		if recorded != nil {
 			t.Errorf("first block that differs: %s", firstDiff(recorded.CoreBlocks, d.CoreBlocks, recorded.FullBlocks, d.FullBlocks))
@@ -209,6 +216,11 @@ func TestBenchTapeDigest(t *testing.T) {
 // the two agree.
 func TestBenchTapeRefmatchAgrees(t *testing.T) {
 	_, tp := readBenchTape(t)
+	refmatchAgrees(t, tp)
+}
+
+func refmatchAgrees(t *testing.T, tp *Tape) {
+	t.Helper()
 	e, err := DigestEngine(tp)
 	if err != nil {
 		t.Fatal(err)
@@ -218,8 +230,8 @@ func TestBenchTapeRefmatchAgrees(t *testing.T) {
 		t.Fatal(err)
 	}
 	if e.Core != r.Core || e.Full != r.Full {
-		t.Fatalf("engine and refmatch disagree on the bench tape; first block that differs: %s",
-			firstDiff(e.CoreBlocks, r.CoreBlocks, e.FullBlocks, r.FullBlocks))
+		t.Fatalf("engine and refmatch disagree on %s; first block that differs: %s",
+			tp.Provenance, firstDiff(e.CoreBlocks, r.CoreBlocks, e.FullBlocks, r.FullBlocks))
 	}
 	if e.Resting != r.Resting || e.Trades != r.Trades {
 		t.Fatalf("engine %d resting / %d trades, refmatch %d / %d", e.Resting, e.Trades, r.Resting, r.Trades)

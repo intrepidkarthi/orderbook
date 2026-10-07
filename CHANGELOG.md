@@ -15,13 +15,30 @@ versions may include breaking changes).
     few percent of time over 50,000 commands.
   - **`pkg/wal` allocations, in two classes:** per-command benchmarks are gated
     exactly, and whole-log ones (checkpoint, read, replay, snapshot, recovery) with
-    16 + 0.01% of base. `RestartWithRetention` is left out for its 200 s cost.
+    80 + 0.01% of base. `RestartWithRetention` is left out for its 200 s cost.
   - **One shared probe:** `cmd/obsoak` and the gate now use one copy of the machine
     probe, in `internal/probe`.
 
   Timing enforcement is unchanged.
 
+- **The engine behind a C ABI** (`cmd/libobook`, [`docs/C-API.md`](docs/C-API.md)). A
+  `-buildmode=c-shared` library with submit, cancel, reduce, replace, an event drain
+  and a book read. A C driver replays the bench tape through it to the native digest.
+- **A flash1 adapter** (`cmd/flash1engine`, [`docs/FLASH1.md`](docs/FLASH1.md)). The
+  engine runs in flash1-dev's independent matching-engine harness. A CI job builds the
+  harness at a pinned commit and requires its consensus report hash on all five
+  scenarios.
+- **`bench-basic-v1.obt`**, a second frozen tape of limit GTC submits and cancels only
+  (BENCH-GATE §17), so engines without reduce, replace or exotic orders can replay the
+  same work and be held to the same digest. `tape.Basic` and the `OwnerOnly` profile
+  flag generate it.
+
 ### Fixed
+
+- **`GetBidLevels` and `GetAskLevels` reserve for the levels present, not for `depth`.**
+  Asking for every level with a huge depth reserved 16 GB at `math.MaxInt32` and
+  panicked at `math.MaxInt`. A negative depth now returns no levels instead of
+  panicking.
 
 - **`TestSnapshotDurationIsObserved` no longer fails on a busy runner.** It failed both
   race jobs of one CI run on a docs-only commit:
