@@ -96,8 +96,10 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   it and passed every check: 12 quotes resting, 45 trades in 20 s, the dashboard
   streaming, and 49 orders recovered across a gateway restart. The console in the box
   is the dashboard; the browser console cannot attach to a venue (§2).
-- [ ] **2.5 README front page.** A quickstart that shows the book before and after each
+- [x] **2.5 README front page.** A quickstart that shows the book before and after each
   call, and an order-type checklist at the top.
+  *Done 2026-10-07*: the checklist's rows are read from the code, and the quickstart's
+  output is the program's, held to the README by a test.
 
 ## Phase 3 — engineering, led by Phase 1's numbers
 
