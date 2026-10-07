@@ -407,6 +407,8 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [EXCHANGE-ARCHITECTURE.md](docs/EXCHANGE-ARCHITECTURE.md) | How real venues (MetaTrader, Binance, Coinbase, Nasdaq/LMAX/CME/IEX, dYdX/Hyperliquid) implement matching, and the incidents that shaped this design. |
 | [SPEC.md](docs/SPEC.md) | Architecture, the order model, core design decisions, and performance targets. |
 | [BENCHMARKS.md](docs/BENCHMARKS.md) | Performance results, methodology, and how to reproduce. |
+| [LANDSCAPE.md](docs/LANDSCAPE.md) | Other open-source order books in Go, Rust and C++: what each offers, what each publishes about its speed and under what conditions, and what draws users. |
+| [ADOPTION-PLAN.md](docs/ADOPTION-PLAN.md) | The working plan that follows from it: credibility, then adoption, then engineering. |
 | [BENCH-GATE.md](docs/BENCH-GATE.md) | The benchmark gate: a committed tape another matcher can replay, a portable output digest, and a base-against-head comparison that can fail, with what it found. |
 | [LEARN.md](docs/LEARN.md) | Order books and market making from first principles. |
 | [research-roadmap.md](docs/research-roadmap.md) | The microstructure research agenda: OFI, Kyle's λ, Avellaneda–Stoikov, delta/CVD — and [what data it runs on](docs/research-roadmap.md#0-data-and-scope). |

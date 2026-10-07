@@ -32,7 +32,7 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
 
 ## Phase 1 — credibility
 
-- [ ] **1.1 `LANDSCAPE.md`.** The survey of Go, Rust and C++ books (and exchange-core)
+- [x] **1.1 `LANDSCAPE.md`.** *(done 2026-10-07)* The survey of Go, Rust and C++ books (and exchange-core)
   as evidence, every claim cited, dated, with what each published number measures.
   *Done when:* committed and linked from the docs index.
 - [ ] **1.2 A portable C interface.** A `c-shared` build of the engine behind a small C
