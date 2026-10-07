@@ -116,9 +116,6 @@ Collected here as they come up, so nothing outward happens by default.
   placeholder), and decide how wheels carry the native library per platform.
 - [ ] Issue #6 (2.3): `pkg/fix` now does what it asks. Close it, or reopen its scope for
   a contributor (OrderCancelReplaceRequest, or the session layer).
-- [ ] Follow-up: `pkg/wal`'s `TestRestartCostIsBoundedByRetentionNotByHistory` failed
-  twice on 2026-10-07 under `make check`'s parallel load (1.27× against its bound) and
-  passes alone. Its timing ratio needs a quieter measurement or a wider bound.
 - [ ] Submit the adapter to flash1 (1.3): a PR to flash1-dev/matching-engine-benchmark
   adding it under `additional_references/`, pointing at `cmd/flash1engine` at a
   pinned commit. The CI job is the evidence it conforms.

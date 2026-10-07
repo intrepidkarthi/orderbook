@@ -1,0 +1,59 @@
+# A small venue with a market already trading: docs/EXCHANGE-IN-A-BOX.md.
+#
+#   docker compose up --build        then open http://127.0.0.1:8090
+#
+# Only the dashboard is published, on 127.0.0.1. The gateway speaks plaintext and
+# deploy/accounts holds demo credentials: keep it on this private network.
+name: orderbook-box
+
+x-image: &image
+  build: .
+  image: orderbook-box:local
+  restart: unless-stopped
+
+services:
+  gateway:
+    <<: *image
+    command: >
+      obgw -addr 0.0.0.0:9000 -mdaddr 0.0.0.0:9001 -admin 0.0.0.0:9100
+      -symbol BTC-USD -accounts-file /config/accounts
+      -wal /data/obgw.wal -snapshot /data/obgw.snap -checkpoint 30s
+    volumes:
+      - ./deploy/accounts:/config/accounts:ro
+      - venue-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9100/readyz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  marketmaker:
+    <<: *image
+    command: obquote -addr gateway:9000 -account mm:mm-demo -symbol BTC-USD -mid 100000 -levels 5 -refresh 1s
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  flow:
+    <<: *image
+    command: >
+      obsoak -addr gateway:9000 -admin gateway:9100 -account flow:flow-demo
+      -conns 2 -users 2 -rate 20 -resting 20 -taker 0.3 -price 100000 -spread 20
+      -duration 8760h -warmup 1m -sample 1m
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  dashboard:
+    <<: *image
+    command: >
+      obdash -md gateway:9001 -admin http://gateway:9100/metrics -addr 0.0.0.0:8090
+      -symbol BTC-USD
+    ports:
+      - "127.0.0.1:8090:8090"
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+volumes:
+  venue-data:

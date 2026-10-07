@@ -1,0 +1,80 @@
+name: Exchange in a box
+
+# Builds compose.yaml's image and smoke-tests the running venue
+# (docs/EXCHANGE-IN-A-BOX.md §6). Images are built and run here only.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "compose.yaml"
+      - "deploy/**"
+      - "cmd/obgw/**"
+      - "cmd/obquote/**"
+      - "cmd/obsoak/**"
+      - "cmd/obdash/**"
+      - "internal/wire/**"
+      - ".github/workflows/box.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start
+        run: docker compose up -d --build --wait --wait-timeout 120
+
+      - name: The book is quoted, and the market trades
+        run: |
+          metric() {
+            docker compose exec -T gateway wget -qO- http://127.0.0.1:9100/metrics \
+              | awk -v n="$1" '$1 == n || index($1, n"{") == 1 { s += $2 } END { print s + 0 }'
+          }
+          for i in $(seq 1 30); do
+            resting=$(metric orderbook_resting_orders)
+            [ "$resting" -ge 10 ] && break
+            sleep 2
+          done
+          echo "resting orders: $resting"
+          [ "$resting" -ge 10 ] || { echo "::error::the book never reached one ladder (10 quotes)"; exit 1; }
+          before=$(metric orderbook_trades_total)
+          sleep 20
+          after=$(metric orderbook_trades_total)
+          echo "trades: $before -> $after over 20s"
+          [ "$after" -gt "$before" ] || { echo "::error::no trades in 20s"; exit 1; }
+
+      - name: The dashboard serves its page and its stream
+        run: |
+          curl -fsS http://127.0.0.1:8090/ | grep -qi "<html" || { echo "::error::no page"; exit 1; }
+          curl -sN --max-time 5 http://127.0.0.1:8090/events > events.txt || true
+          head -c 300 events.txt; echo
+          grep -q "^data:" events.txt || { echo "::error::no server-sent event in 5s"; exit 1; }
+
+      - name: The gateway recovers its book across a restart
+        run: |
+          sleep 35   # one checkpoint interval, so a snapshot exists as well as the log
+          docker compose restart gateway
+          for i in $(seq 1 30); do
+            docker compose exec -T gateway wget -qO- http://127.0.0.1:9100/readyz >/dev/null 2>&1 && break
+            sleep 2
+          done
+          resting=$(docker compose exec -T gateway wget -qO- http://127.0.0.1:9100/metrics \
+            | awk '$1 == "orderbook_resting_orders" { print $2 }')
+          echo "resting after restart: $resting"
+          [ "${resting%.*}" -gt 0 ] || { echo "::error::the book came back empty"; exit 1; }
+
+      - name: Logs
+        if: always()
+        run: docker compose logs --tail 40
+
+      - name: Down
+        if: always()
+        run: docker compose down -v

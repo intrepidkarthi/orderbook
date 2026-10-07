@@ -36,6 +36,11 @@ go get github.com/intrepidkarthi/orderbook/pkg/matching
 
 Requires Go 1.23 or later.
 
+**A running venue.** `docker compose up --build` starts the gateway, a market maker
+quoting both sides, a little order flow, and the operator dashboard on
+<http://127.0.0.1:8090> ([docs/EXCHANGE-IN-A-BOX.md](docs/EXCHANGE-IN-A-BOX.md)). CI
+builds and smoke-tests it on every change to its parts.
+
 **From C or Python.** `cmd/libobook` builds the engine as a C shared library behind a
 versioned ABI ([docs/C-API.md](docs/C-API.md)). `python/` binds it with the standard
 library only: `make python` builds the library and runs the bindings' tests

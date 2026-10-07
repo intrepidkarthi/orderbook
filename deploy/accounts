@@ -1,0 +1,5 @@
+# DEMO CREDENTIALS for compose.yaml's private network. Never use these for anything reachable.
+# Passwords: mm-demo (mm), flow-demo (flow0, flow1). Generated with: printf PASSWORD | obgw -hash-secret
+mm:sha256:a279adc04d8226e956f93d0733c40fb06764b9756f4fd99e39dd460fcc150cda
+flow0:sha256:3e9237fb4948eede412e2191be3bccc8eef7f934e238197da95ad8f0c949c7f6
+flow1:sha256:3e9237fb4948eede412e2191be3bccc8eef7f934e238197da95ad8f0c949c7f6
