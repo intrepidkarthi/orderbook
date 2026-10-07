@@ -47,9 +47,12 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   *Done 2026-10-07* ([`FLASH1.md`](FLASH1.md), `.github/workflows/flash1.yml`): the
   first CI run reproduced the consensus hash on all five scenarios, with the harness
   verdict VALID on each.
-- [ ] **1.4 A second, minimal tape.** `bench-basic-v1.obt`: limit orders and cancels
+- [x] **1.4 A second, minimal tape.** `bench-basic-v1.obt`: limit orders and cancels
   only, which every engine in the survey can express, so cross-engine digests are
   comparable. *Done when:* frozen, shape-tested, digest committed, refmatch agrees.
+  *Done 2026-10-07* (BENCH-GATE §17): 21,856 trades and 3,975 resting over 50,000
+  commands. Every cancel that names an order comes from its owner, so an engine with
+  no ownership checks replays it the same way.
 - [ ] **1.5 Cross-engine comparison on CI.** A dispatch-only workflow that checks out
   pinned commits of geseq/orderbook (Go), OrderBook-rs (Rust) and CppTrader (C++),
   builds a small adapter for each that replays `bench-basic-v1.obt`, checks each
