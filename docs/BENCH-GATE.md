@@ -1039,6 +1039,53 @@ only what all of them can express.
   cross-engine comparison, where the digest is the check that each engine did the
   same work before its time means anything.
 
+## 18. Slice D — the rule restated on the lower bound, before its data
+
+Written on 2026-10-07, step 3.3 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md), before any run
+of the calibration it describes.
+
+### 18.1 Why
+
+A timing failure needs **both** a median above 1.10 **and** a k-th ratio above 1.05 (§5).
+§14.2 decided enforcement on the median alone, so it asked whether the median could
+cross 1.10 by chance, which is not the event that fails a build. Over §15.1's 300
+benchmark-runs the median strayed as far as 0.906, while the k-th ratio never rose
+above 1.011. The question the rule should ask is the one that can fail a push: **can
+the lower bound cross 1.05 by chance?**
+
+### 18.2 The rule
+
+Over 60 new A/A′ runs (`mode: aa`, `enforce: true`), dispatched together on
+`ubuntu-latest` from one `main` commit, a timing-gated benchmark is enforced if all of
+these hold:
+
+- **It failed in none of them.** Unchanged.
+- **It was inconclusive, after the retry, in at most 6.** Unchanged.
+- **1.05 ≥ 1 + 3 × max(0, K − 1)**, where K is the largest k-th ratio across the 60
+  runs. That is, K ≤ 1.0167. The factor of three is §14.2's, moved to the quantity that
+  can fail a build.
+- **Power.** It failed in at least 19 of 20 runs against a planted slowdown of about
+  1.20×:
+  - `Engine_MatchInto` and `TapeReplay/sink=nil` met this in §15.2 (20/20, 19/19), and
+    that result stands. Their plant in `Engine.Match` is unchanged.
+  - `OrderBook_CancelReplace` and `OrderBook_LevelChurn` have never been planted. They
+    get a plant in `pkg/orderbook`: a loop on the path both benchmarks run, sized to
+    about 1.20×, on a throwaway branch, with 20 runs against `main`.
+  - A benchmark that clears the first three criteria and fails power stays report-only.
+
+The median criterion is no longer an input. `calibrate` still prints it, so the change
+can be read against §15.1.
+
+### 18.3 What does not move
+
+- **The thresholds stay where they are**: 1.10 on the median and 1.05 on the k-th. The
+  rule decides which benchmarks they apply to.
+- **Allocations stay enforced for every gated benchmark**, as before.
+- **The quiet week for `pull_request` is not restarted by this slice's dispatches**:
+  they are not pushes. It is restarted only if the enforced set changes and a push then
+  falsely fails.
+- **If no further benchmark clears, that is recorded and nothing changes.**
+
 ## Appendix: Review points not taken
 
 - **Statistics B6: skip `TestBenchTapeRefmatchAgrees` under `-race` through a build tag.** Measured instead. At n = 50 k, refmatch takes 2.5-3.4 s under race and the engine 0.3 s, which is small enough to run everywhere.
