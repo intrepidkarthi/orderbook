@@ -46,9 +46,7 @@ jobs:
       - name: geseq/orderbook
         continue-on-error: true
         working-directory: bench/xeng/geseq
-        run: |
-          go mod tidy
-          go build -trimpath -o "$BIN/geseq" .
+        run: go build -mod=readonly -trimpath -o "$BIN/geseq" .
 
       - name: OrderBook-rs
         continue-on-error: true
@@ -56,8 +54,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          cargo generate-lockfile
-          cargo build --release
+          cargo build --release --locked
           cp target/release/xeng-orderbook-rs "$BIN/orderbook-rs"
 
       - name: CppTrader
@@ -123,6 +120,4 @@ jobs:
             out/*-1.out
             out/*.err
             out/failures.txt
-            bench/xeng/geseq/go.sum
-            bench/xeng/orderbook-rs/Cargo.lock
           if-no-files-found: ignore

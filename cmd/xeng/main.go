@@ -92,8 +92,7 @@ func run(in io.Reader, out io.Writer) error {
 	cfg.MaxOrders = 1_000_000
 	e := matching.NewEngine(cfg)
 
-	idOf := make([]int64, len(cmds))          // position -> engine id, 0 if none
-	posOf := make(map[int64]int64, len(cmds)) // engine id -> position
+	idOf := make([]int64, len(cmds)) // position -> engine id, 0 if none
 	orders := make([]*types.Order, len(cmds))
 	for i, c := range cmds {
 		if c.cancel {
@@ -124,16 +123,27 @@ func run(in io.Reader, out io.Writer) error {
 			var st types.OrderStatus
 			buf, st, err = e.Match(o, buf[:0])
 			idOf[i] = o.ID
-			posOf[o.ID] = c.pos
+			// Engine ids are recorded as they come and become positions after the
+			// clock stops, as every other adapter does it.
 			refused[i] = err != nil || st == types.OrderStatusRejected
 			for _, t := range buf {
 				trades = append(trades, trade{price: t.Price, qty: t.Quantity,
-					maker: posOf[t.MakerOrderID], taker: posOf[t.TakerOrderID], sell: t.TakerSide == types.SideSell})
+					maker: t.MakerOrderID, taker: t.TakerOrderID, sell: t.TakerSide == types.SideSell})
 			}
 		}
 		ends[i] = len(trades)
 	}
 	elapsed := time.Since(start)
+
+	posOf := make(map[int64]int64, len(cmds))
+	for i, id := range idOf {
+		if id != 0 {
+			posOf[id] = int64(i)
+		}
+	}
+	for i := range trades {
+		trades[i].maker, trades[i].taker = posOf[trades[i].maker], posOf[trades[i].taker]
+	}
 
 	w := bufio.NewWriterSize(out, 1<<20)
 	from := 0

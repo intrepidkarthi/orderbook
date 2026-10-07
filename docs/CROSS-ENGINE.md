@@ -1,6 +1,6 @@
 # Cross-Engine Comparison — Same Work, Checked, Then Timed
 
-Status: **specified; step 1.5 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
+Status: **running on CI; step 1.5 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
 Author: Karthikeyan NG · 2026-10-07
 
 ## 1. The question, and the one it refuses
@@ -19,9 +19,9 @@ and why they do not compare. This document exists because they do not.
 | Engine | Language | Pinned at | Adapter |
 |---|---|---|---|
 | this one | Go | the commit under test | `cmd/xeng run` |
-| [geseq/orderbook](https://github.com/geseq/orderbook) | Go | see `bench/xeng/geseq` | `bench/xeng/geseq` |
-| [OrderBook-rs](https://github.com/joaquinbejar/OrderBook-rs) | Rust | see `bench/xeng/orderbook-rs` | `bench/xeng/orderbook-rs` |
-| [CppTrader](https://github.com/chronoxor/CppTrader) | C++ | see `bench/xeng/cpptrader` | `bench/xeng/cpptrader` |
+| [geseq/orderbook](https://github.com/geseq/orderbook) | Go | `088c6cf` (2026-07-25) | `bench/xeng/geseq` |
+| [OrderBook-rs](https://github.com/joaquinbejar/OrderBook-rs) | Rust | `54df8eb` (2026-10-05), crate 0.15.0 | `bench/xeng/orderbook-rs` |
+| [CppTrader](https://github.com/chronoxor/CppTrader) | C++ | `39421f5` (2026-09-09), gil modules pinned in `fetch.sh` | `bench/xeng/cpptrader` |
 
 Each is pinned to one commit, recorded in its adapter's build file, and bumped
 deliberately. All three are MIT. **None of their code is built or run on a maintainer's
@@ -108,3 +108,50 @@ anyone reads it as the other engine's bug, its adapter is checked first, against
 engine's documentation and the first command where the output departs. A confirmed
 engine defect is reported upstream, with the command sequence, as flash1 does. An
 adapter defect is fixed here, and the run is repeated.
+
+## 8. What each adapter pays inside its timed loop
+
+Read from each engine's source at its pin. A user of that engine pays the same.
+
+- **This engine.** `Engine.Match` and `Engine.Cancel` with the default configuration:
+  the self-trade check, the per-account open-order count, the counter clock and the
+  trade list. Engine ids become positions after the clock stops.
+- **geseq.** `AddOrder` and `CancelOrder` with a monotonic token per call, and an
+  interface call per notification. Prices and quantities are fixed-point decimals,
+  converted before and after timing. The order pool is prefilled at construction,
+  before the clock starts.
+- **OrderBook-rs.** `add_limit_order_with_user_and_result` and `cancel_order` on a book
+  built for concurrent use: a read lock and per-level lock stripes on every submit, two
+  wall-clock reads per submit, a UUID per trade, a cloned `TradeResult` per submit
+  that trades, and `DashMap` updates for the order index. Its README offers no
+  single-writer path.
+- **CppTrader.** `MarketManager::AddOrder` and `DeleteOrder` with matching enabled.
+  Each fill reaches the adapter as two `onExecuteOrder` callbacks (maker, then taker),
+  which the adapter pairs. After every command the engine also runs its stop-order
+  activation pass and its cross-book check, both empty on this tape.
+
+The final book is read from each engine after the clock stops. geseq and OrderBook-rs
+keep only an order's remaining quantity, so their adapters take the original from the
+tape. CppTrader and this engine report both.
+
+## 9. The first run
+
+[Run 37588247202](https://github.com/intrepidkarthi/orderbook/actions/runs/37588247202),
+2026-10-07, AMD EPYC 9V45 (4 vCPUs), 11 rounds interleaved:
+
+| Engine | `core` digest | Median replay | Range |
+|---|---|---|---|
+| CppTrader | agrees | 3.15 ms | 2.90–3.29 |
+| geseq | agrees | 4.25 ms | 3.76–5.28 |
+| this engine | agrees | 12.22 ms | 9.94–13.87 |
+| OrderBook-rs | agrees | 38.51 ms | 37.86–73.52 |
+
+- **All four agree, on the first run, in every round.** Three engines built by other
+  people, in three languages, produce the same 21,856 trades and the same 3,975-order
+  final book as this one and as `refmatch`. That is the strongest outside evidence this
+  repository has that its price-time matching is the ordinary kind.
+- **On this tape this engine is about 3× slower than geseq and 4× slower than
+  CppTrader.** Moving the adapter's id mapping out of the loop, as the others do it,
+  saved about 0.5 ms locally. The gap is in the engine.
+- What the gap is made of is step 3.1's question, and this table does not answer it.
+
