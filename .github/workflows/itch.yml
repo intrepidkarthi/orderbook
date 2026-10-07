@@ -1,0 +1,61 @@
+name: ITCH replay
+
+# A real NASDAQ TotalView-ITCH 5.0 day, replayed into the book (docs/ITCH.md §6). The
+# sample file is streamed from NASDAQ and never stored; itchbook stops after the
+# requested number of messages, which ends the download. The job fails only if the
+# file does not decode: that would mean this parser and NASDAQ disagree on the format.
+
+on:
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "sample file under emi.nasdaq.com/ITCH/Nasdaq ITCH/"
+        type: string
+        default: "01302019.NASDAQ_ITCH50.gz"
+      messages:
+        description: "messages to replay (0: the whole day, about 4.7 GB compressed)"
+        type: number
+        default: 50000000
+      symbol:
+        description: "stock whose book is printed"
+        type: string
+        default: "AAPL"
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - run: go build -o itchbook ./cmd/itchbook
+
+      - name: Replay
+        env:
+          FILE: ${{ inputs.file }}
+          MESSAGES: ${{ inputs.messages }}
+          SYMBOL: ${{ inputs.symbol }}
+        run: |
+          set +o pipefail
+          url="https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/${FILE}"
+          curl -sSfL "$url" | gzip -dc | ./itchbook -symbol "$SYMBOL" -levels 10 -n "$MESSAGES" - > summary.txt 2> rate.txt
+          status=${PIPESTATUS[2]}
+          cat summary.txt rate.txt
+          {
+            echo "### ITCH replay: \`${FILE}\`, first ${MESSAGES} messages"
+            echo
+            echo '```'
+            cat summary.txt rate.txt
+            echo '```'
+            echo
+            echo "Runner CPU: $(lscpu | sed -n 's/^Model name: *//p'). The rate includes decompression and reading from the network pipe."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

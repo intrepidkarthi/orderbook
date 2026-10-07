@@ -1,6 +1,6 @@
 # ITCH 5.0 Replay — Real Market Data Into the Book
 
-Status: **specified; step 2.2 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
+Status: **implemented; step 2.2 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
 Author: Karthikeyan NG · 2026-10-07
 
 ## 1. What and why
@@ -84,12 +84,20 @@ final book of the selected symbol to `-levels` levels.
   the end both sides of every book must agree level by level, in priority order. The
   stream includes partial executions, partial cancels, replaces, references never added,
   and over-executions.
-- **A committed fixture**, `testdata/sample.itch`, about 40 messages written by hand
-  through `Append`, with its final book committed as text. `itchbook` reproduces it.
+- **A committed fixture**, `testdata/sample.itch`: 17 messages written by hand through
+  `Append`, plus one system event. Every operation and both anomaly kinds appear. Its
+  final book is worked out by hand in the test's comment and asserted row by row.
+  `itchbook`'s whole output for it is pinned in `cmd/itchbook`.
+- **The layout against the specification's bytes.** One Add Order is written out
+  byte by byte from the ITCH field table, so `Append` and `Decode` cannot agree on a
+  wrong layout between themselves.
 - **Sabotage.** A replace that keeps priority, an execution that does not reduce the
   level total, and a mis-read side must each fail a test.
-- **Benchmark.** `BenchmarkApply` replays a 1 M-message synthetic stream and reports
-  ns/message and allocs/message.
+- **Benchmark.** `BenchmarkApply` replays a 1 M-message synthetic stream: about
+  135 ns and 1 allocation per message on an Apple M4. The allocation is the book
+  growing, because half the synthetic messages are adds.
+  `TestSteadyStateDoesNotAllocate` holds the claim that matters: with an add and a
+  delete per step at a fixed book size, nothing is allocated.
 
 ## 6. The real file, on CI only
 
