@@ -192,3 +192,27 @@ cross-engine adapter sets it, as geseq's does, and the run is repeated. The cloc
 as it is: it is a semantic choice, documented above, and a caller who needs no wall
 time can already inject a counter.
 
+
+## 11. Prefilled pools (step 3.2) — written before its code
+
+- **The option.** `orderbook.Config.Prealloc` and `matching.Config.PreallocOrders` take
+  a number of orders, N. At construction the book allocates N nodes and N index entries
+  as two contiguous slabs, and puts them on its free lists. It also allocates
+  min(N, 1024) price levels. The default, 0, changes nothing.
+- **It is a pool, not a cap.** Past N the book allocates as it does today. `MaxOrders`
+  still caps the book.
+- **Tested.**
+  - With `Prealloc` N, resting N orders allocates nothing beyond the orders
+    themselves.
+  - With the default, nothing changes: the existing allocation tests still hold.
+  - Matching and recovery are untouched. The digests of both committed tapes are
+    unchanged, and so is the differential harness.
+- **Measured.**
+  - Locally: base and head alternated (ABAB), the replay loop of
+    `BenchmarkSelfReplay` with the adapter setting `PreallocOrders` to the tape's
+    number of submits.
+  - On CI: a cross-engine run beside the other three.
+  - The bench gate judges the push, and its default-configuration benchmarks must not
+    move.
+- **Reported either way.** If the replay does not get faster, that is the finding, and
+  the option stays only if it removes the allocations it promises.
