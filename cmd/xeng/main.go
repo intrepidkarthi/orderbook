@@ -90,6 +90,13 @@ func run(in io.Reader, out io.Writer) error {
 	}
 	cfg := matching.DefaultConfig("XENG")
 	cfg.MaxOrders = 1_000_000
+	// The book's pools are filled before the clock starts, as geseq's are when its
+	// book is built (docs/CROSS-ENGINE.md §11).
+	for _, c := range cmds {
+		if !c.cancel {
+			cfg.PreallocOrders++
+		}
+	}
 	e := matching.NewEngine(cfg)
 
 	idOf := make([]int64, len(cmds)) // position -> engine id, 0 if none
