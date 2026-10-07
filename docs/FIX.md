@@ -104,7 +104,7 @@ engine id. It refuses a NewOrderSingle whose ClOrdID it has already seen.
   - a post-only that would cross;
   - a cancel of an unknown order.
 
-  `testdata/session.out` holds every report the engine sends back, byte for byte, with
+  `testdata/session.reports` holds every report the engine sends back, byte for byte, with
   `|` for SOH in both files. The clock and the ExecID counter are fixed, so the output
   is reproducible.
 - **Framing.** A corrupted CheckSum, a BodyLength off by one each way, a wrong

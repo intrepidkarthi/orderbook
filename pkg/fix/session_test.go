@@ -84,7 +84,7 @@ func TestCapturedSession(t *testing.T) {
 	got := runSession(t, sessionIn())
 	if os.Getenv("FIX_WRITE") == "1" {
 		os.WriteFile("testdata/session.in", []byte(in.String()), 0o644)
-		os.WriteFile("testdata/session.out", []byte(got), 0o644)
+		os.WriteFile("testdata/session.reports", []byte(got), 0o644)
 	}
 	wantIn, err := os.ReadFile("testdata/session.in")
 	if err != nil {
@@ -93,7 +93,7 @@ func TestCapturedSession(t *testing.T) {
 	if string(wantIn) != in.String() {
 		t.Fatal("testdata/session.in differs from the sequence this test sends")
 	}
-	want, err := os.ReadFile("testdata/session.out")
+	want, err := os.ReadFile("testdata/session.reports")
 	if err != nil {
 		t.Fatal(err)
 	}
