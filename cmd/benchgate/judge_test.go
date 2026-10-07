@@ -224,6 +224,13 @@ func TestJudgeWholeLogSlack(t *testing.T) {
 	if got := judgeOne("BenchmarkRecoverSnapshotPlusTail", 805762, 805762+5000); got != "fail" {
 		t.Errorf("5,000 more allocations judged %q", got)
 	}
+	// The widest spread ten CI A/A runs measured: WriteSnapshot at 71 and 106.
+	if got := judgeOne("BenchmarkWriteSnapshot", 71, 106); got != "pass" {
+		t.Errorf("WriteSnapshot's measured A/A spread (71 to 106) judged %q", got)
+	}
+	if got := judgeOne("BenchmarkWriteSnapshot", 85, 85+1000); got != "fail" {
+		t.Errorf("1,000 more allocations on WriteSnapshot judged %q", got)
+	}
 	if got := judgeOne("BenchmarkRunnerBare", 5, 6); got != "fail" {
 		t.Errorf("a per-command wal benchmark is exact; +1 judged %q", got)
 	}

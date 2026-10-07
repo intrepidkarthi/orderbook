@@ -190,11 +190,18 @@ var allocSlack = map[string]int64{
 	"BenchmarkTapeReplay/sink=count": 8, // same replay, same runtime noise: 9,070 to 9,071 measured
 }
 
+// wholeLogFloor is the absolute part of a whole-log pkg/wal benchmark's slack. It was
+// 16 until ten A/A runs on CI measured the spread: WriteSnapshot read 71 to 106
+// allocations per op on identical code, ReadAll moved by 28, and the covered-churn
+// recovery by 19. 80 is at least twice the largest of those ranges. One extra
+// allocation per record adds more than a thousand on every one of these benchmarks.
+const wholeLogFloor = 80
+
 // allocSlackFor is the slack for one benchmark: its entry in allocSlack, or for a
-// whole-log pkg/wal benchmark, 16 plus 0.01% of base.
+// whole-log pkg/wal benchmark, wholeLogFloor plus 0.01% of base.
 func allocSlackFor(bench string, base int64) int64 {
 	if wholeLog[bench] {
-		return 16 + base/10000
+		return wholeLogFloor + base/10000
 	}
 	return allocSlack[bench]
 }
