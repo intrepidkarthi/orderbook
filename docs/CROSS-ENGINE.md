@@ -216,3 +216,32 @@ time can already inject a counter.
     move.
 - **Reported either way.** If the replay does not get faster, that is the finding, and
   the option stays only if it removes the allocations it promises.
+
+**Result, 2026-10-07.**
+
+- **The bench gate passed the change with nothing moved** ([37599489694](https://github.com/intrepidkarthi/orderbook/actions/runs/37599489694)). Every allocation count was unchanged, and the timed benchmarks sat at 0.99–1.01 of base: the default configuration is untouched, as intended.
+- **Locally, with the adapter prefilling, the replay's median fell from 8.08 ms to
+  6.75 ms**: 16%, with the old and new builds alternated fifteen times each on one M4.
+  That is the clean figure for what this change did.
+- **The cross-engine rerun**
+  ([37600149500](https://github.com/intrepidkarthi/orderbook/actions/runs/37600149500))
+  landed on an Intel Xeon 8370C, not the AMD EPYC of §9:
+
+  | Engine | `core` | Median replay | Intel ÷ AMD (§9, run 2) |
+  |---|---|---:|---:|
+  | CppTrader | agrees | 4.67 ms | 1.21 |
+  | geseq | agrees | 8.49 ms | 1.86 |
+  | this engine | agrees | 15.46 ms | 1.22 |
+  | OrderBook-rs | agrees | 57.41 ms | 1.26 |
+
+  Against geseq the ratio reads 1.8× where §9 read 2.8×, but geseq alone slowed by
+  1.86× on this CPU while the others slowed by about 1.2×. **Most of that narrowing is
+  the machine, not this change**, and against CppTrader the ratio held at 3.3×. A
+  cross-engine ratio is comparable only within one run, which is why §4 interleaves
+  them.
+- **What remains of the gap is the engine's per-command work, not its allocation.**
+  The prefill removed what §10 said it would and bought 16%. Most of what §10's
+  profile showed is still there: the intake clock read, the user-string interning,
+  the self-trade and per-account checks. Each is a feature geseq does not have, so
+  none is a free fix. Narrowing the gap further is a design question about those
+  features' default cost, not a pooling question.

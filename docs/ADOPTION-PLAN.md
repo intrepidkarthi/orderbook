@@ -109,7 +109,10 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   *Done 2026-10-07* ([`CROSS-ENGINE.md`](CROSS-ENGINE.md) §10): the profile puts ~40% of
   the loop in resting orders, much of it allocating book nodes that geseq prefills
   before its clock starts. 3.2 is a prefill option for the book's pools.
-- [ ] **3.2 The chosen optimisation**, behind the bench gate, with the digest unchanged.
+- [x] **3.2 The chosen optimisation**, behind the bench gate, with the digest unchanged.
+  *Done 2026-10-07* ([`CROSS-ENGINE.md`](CROSS-ENGINE.md) §11): prefilled pools, gated
+  clean, digests unchanged, 16% off the local replay. The rest of the gap is the cost of
+  features geseq lacks, which is a design question, not a pooling one.
 - [ ] **3.3 Calibration restated on the lower bound.** A spec change to §14.2 of
   `BENCH-GATE.md` and a fresh 60-run calibration, which may enforce more benchmarks.
 - [ ] **3.4 Stage attribution.** Queue, match, log and publish delay measured separately.
