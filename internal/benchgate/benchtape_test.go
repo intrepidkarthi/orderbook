@@ -12,6 +12,7 @@ import (
 
 	"github.com/intrepidkarthi/orderbook/internal/refmatch"
 	"github.com/intrepidkarthi/orderbook/internal/tape"
+	"github.com/intrepidkarthi/orderbook/pkg/matching"
 )
 
 // The committed bench tape (docs/BENCH-GATE.md §2). The file is the contract and
@@ -192,5 +193,33 @@ func TestBenchTapeShape(t *testing.T) {
 	}
 	if s.trades*4 < s.commands {
 		t.Errorf("%d trades over %d commands, under one per four", s.trades, s.commands)
+	}
+}
+
+// TestPreallocChangesNoDigest: prefilling the book's pools is a memory setting with
+// no semantics, so both committed tapes, replayed through an engine built with it,
+// must give their committed digests (docs/CROSS-ENGINE.md §11).
+func TestPreallocChangesNoDigest(t *testing.T) {
+	for _, tc := range []struct{ tape, digest string }{
+		{benchTapeFile, benchDigestFile},
+		{basicTapeFile, basicDigestFile},
+	} {
+		_, tp := readTapeFile(t, tc.tape)
+		got, err := digestEngine(tp, false, func(c *matching.Config) { c.PreallocOrders = len(tp.Cmds) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(tc.digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := ParseDigestFile(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Core != want.Core || got.Full != want.Full {
+			t.Fatalf("%s with PreallocOrders: core %x full %x, committed core %x full %x",
+				tc.tape, got.Core, got.Full, want.Core, want.Full)
+		}
 	}
 }

@@ -123,7 +123,10 @@ func TestDigestVector(t *testing.T) {
 		}
 	}
 
-	for name, run := range map[string]func(*Tape, bool) (Digest, error){"engine": digestEngine, "refmatch": digestRefmatch} {
+	for name, run := range map[string]func(*Tape, bool) (Digest, error){
+		"engine":   func(tp *Tape, keep bool) (Digest, error) { return digestEngine(tp, keep, nil) },
+		"refmatch": digestRefmatch,
+	} {
 		d, err := run(tp, true)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -316,7 +319,7 @@ func TestEncoderRefusesWhatItCannotName(t *testing.T) {
 	if _, err := engineReason(errors.New("a reason nobody mapped")); err == nil {
 		t.Error("an unmapped engine error got a format code")
 	}
-	d := newEngineDriver(10, 1)
+	d := newEngineDriver(10, 1, nil)
 	d.log.evs = []matching.Event{{Kind: matching.EventCanceled, OrderID: 42}}
 	if err := d.events(tape.Cmd{Pos: 0}, &outcome{}); err == nil {
 		t.Error("an event naming an id never seen was named anyway")

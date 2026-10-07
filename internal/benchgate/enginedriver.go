@@ -89,10 +89,15 @@ type engineDriver struct {
 	buf       []types.Trade
 }
 
-func newEngineDriver(maxOrders int64, n int) *engineDriver {
+// newEngineDriver builds the driver's engine. tweak, if not nil, adjusts the
+// configuration last; it exists so a test can show a setting changes no digest.
+func newEngineDriver(maxOrders int64, n int, tweak func(*matching.Config)) *engineDriver {
 	cfg := matching.DefaultConfig(benchSymbol)
 	cfg.Clock = counterClock()
 	cfg.MaxOrders = int(maxOrders)
+	if tweak != nil {
+		tweak(&cfg)
+	}
 	log := &eventLog{}
 	cfg.EventSink = log
 	return &engineDriver{e: matching.NewEngine(cfg), log: log, ids: make([]int64, n), pos: map[int64]uint64{}}
