@@ -53,12 +53,16 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   *Done 2026-10-07* (BENCH-GATE §17): 21,856 trades and 3,975 resting over 50,000
   commands. Every cancel that names an order comes from its owner, so an engine with
   no ownership checks replays it the same way.
-- [ ] **1.5 Cross-engine comparison on CI.** A dispatch-only workflow that checks out
+- [x] **1.5 Cross-engine comparison on CI.** A dispatch-only workflow that checks out
   pinned commits of geseq/orderbook (Go), OrderBook-rs (Rust) and CppTrader (C++),
   builds a small adapter for each that replays `bench-basic-v1.obt`, checks each
   engine's `core` digest against ours, and times the replay interleaved in one job.
   Engines whose digest differs are reported as disagreeing, not timed. *Done when:* one
   run produces the table, and the document says exactly what it measures.
+  *Done 2026-10-07* ([`CROSS-ENGINE.md`](CROSS-ENGINE.md)): all four engines agree on
+  the `core` digest in every round of two runs. This engine replays the tape in about
+  12.5 ms; geseq in 4.5, CppTrader in 3.5, OrderBook-rs in 40–46. Step 3.1 starts from
+  that gap.
 - [ ] **1.6 README performance and comparison.** A "what each number measures" table,
   percentiles with machine and workload, the 1.5 result linked, a factual feature
   checklist against the surveyed projects, and the liquibook "3×" claim retired or

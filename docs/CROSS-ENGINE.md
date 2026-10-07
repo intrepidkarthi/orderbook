@@ -1,6 +1,6 @@
 # Cross-Engine Comparison — Same Work, Checked, Then Timed
 
-Status: **running on CI; step 1.5 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
+Status: **running on CI, dispatch only; step 1.5 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
 Author: Karthikeyan NG · 2026-10-07
 
 ## 1. The question, and the one it refuses
@@ -153,5 +153,10 @@ tape. CppTrader and this engine report both.
 - **On this tape this engine is about 3× slower than geseq and 4× slower than
   CppTrader.** Moving the adapter's id mapping out of the loop, as the others do it,
   saved about 0.5 ms locally. The gap is in the engine.
+- **A second run, on the committed lockfiles**
+  ([37588666344](https://github.com/intrepidkarthi/orderbook/actions/runs/37588666344),
+  AMD EPYC 9V74 80-Core Processor, 4 vCPUs), agrees again: CppTrader 3.86 ms, geseq 4.56, this engine 12.69,
+  OrderBook-rs 45.68. The order and the ratios hold; the absolute figures moved with
+  the runner, which is why none of them is quoted alone.
 - What the gap is made of is step 3.1's question, and this table does not answer it.
 
