@@ -86,3 +86,39 @@ cost `timedLog` pays per append.
 than zero. Each batch passes through every sink once, so unequal counts mean a sink was
 skipped or double-wrapped. **Measured:** STAGES.md §5's soak again, with the four
 quantiles beside the match stage's.
+
+## 7. What the split found: the feed's ring
+
+Measured with §6's histograms, same soak:
+
+| Sink | Mean | p90 ≤ | Total over 60 s |
+|---|---:|---:|---:|
+| market-data feed | 138 µs | 500 µs | **14.97 s of the match stage's 15.52 s** |
+| publisher | 1.7 µs | 5 µs | 0.19 s |
+| name index | 0.2 µs | 500 ns | 0.02 s |
+| collector | 0.1 µs | 250 ns | 0.01 s |
+
+`marketdata.Feed.publishLocked` evicted from its gap-fill ring with
+`copy(f.ring, f.ring[1:])`. Once the ring was full, every update shifted the whole ring
+by one slot on the matching goroutine. At obgw's default 65,536 updates of about 120 bytes
+each, that is about 7.8 MB moved per update. The cost appeared only after the first
+65,536 updates, which is why a short test never saw it, and why it showed in the mean
+and not the median.
+
+**The fix.**
+- The ring becomes a fixed circular buffer: a head index and a count, so an eviction
+  advances the head instead of moving memory.
+- `Since` copies out in at most two pieces, across the wrap.
+- Everything callers see is unchanged: sequences, `ErrSequenceEvicted`, the gap-fill
+  window.
+
+**Tested.**
+- The existing feed tests pass unchanged.
+- A new test publishes three times the ring's capacity, and requires `Since` to return
+  exactly the retained window at many points across the wrap. It also requires
+  eviction to start where it did before.
+- A test compares the cost per publish into a full ring of 1,024 with one of 65,536. On
+  the old code the large ring is about 64× slower per publish, and the test requires
+  the two within 3×.
+
+**Re-measured** with §5's soak: the feed's histogram, and the match stage's.
