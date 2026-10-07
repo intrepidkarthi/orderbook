@@ -85,9 +85,11 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   Tested on a synthetic fixture; a real NASDAQ sample is fetched and replayed only on CI.
   *Done 2026-10-07* ([`ITCH.md`](ITCH.md)): 50 M messages of a NASDAQ day decoded on CI
   with no anomaly; AAPL's rebuilt book ends uncrossed.
-- [ ] **2.3 FIX 4.4 order entry** (issue #6). `pkg/fix`: tag=value with BodyLength and
+- [x] **2.3 FIX 4.4 order entry** (issue #6). `pkg/fix`: tag=value with BodyLength and
   CheckSum verified, NewOrderSingle and OrderCancelRequest in, ExecutionReports out of
   the event stream. Session layer out of scope. *Done when:* the issue's checklist holds.
+  *Done 2026-10-07* ([`FIX.md`](FIX.md), `pkg/fix`): every item on issue #6's list holds;
+  a ten-message session is pinned byte for byte, and twelve sabotages are caught.
 - [ ] **2.4 Exchange in a box.** A compose file that runs the gateway, the dashboard,
   a market maker and the console. Built and smoke-tested only on CI.
 - [ ] **2.5 README front page.** A quickstart that shows the book before and after each
@@ -112,6 +114,11 @@ Collected here as they come up, so nothing outward happens by default.
 - [ ] Reply on the scheduled 2026-10-14 check (routine proposed, not created).
 - [ ] Publish the Python bindings (2.1): choose the PyPI name (`obook` is a
   placeholder), and decide how wheels carry the native library per platform.
+- [ ] Issue #6 (2.3): `pkg/fix` now does what it asks. Close it, or reopen its scope for
+  a contributor (OrderCancelReplaceRequest, or the session layer).
+- [ ] Follow-up: `pkg/wal`'s `TestRestartCostIsBoundedByRetentionNotByHistory` failed
+  twice on 2026-10-07 under `make check`'s parallel load (1.27× against its bound) and
+  passes alone. Its timing ratio needs a quieter measurement or a wider bound.
 - [ ] Submit the adapter to flash1 (1.3): a PR to flash1-dev/matching-engine-benchmark
   adding it under `additional_references/`, pointing at `cmd/flash1engine` at a
   pinned commit. The CI job is the evidence it conforms.
