@@ -185,7 +185,19 @@ func judgeTiming(v *Verdict, pairs []Pair) {
 // exact rule failed identical code, and the slack is twice the measured spread. A
 // real regression on that path is not close: one extra allocation per Match call is
 // +30,840.
-var allocSlack = map[string]int64{"BenchmarkTapeReplay/sink=nil": 8}
+var allocSlack = map[string]int64{
+	"BenchmarkTapeReplay/sink=nil":   8,
+	"BenchmarkTapeReplay/sink=count": 8, // same replay, same runtime noise: 9,070 to 9,071 measured
+}
+
+// allocSlackFor is the slack for one benchmark: its entry in allocSlack, or for a
+// whole-log pkg/wal benchmark, 16 plus 0.01% of base.
+func allocSlackFor(bench string, base int64) int64 {
+	if wholeLog[bench] {
+		return 16 + base/10000
+	}
+	return allocSlack[bench]
+}
 
 // judgeAllocs compares the median allocation count of each arm. Counts are compared
 // within the job and never against a stored number, because they differ by platform.
@@ -208,7 +220,7 @@ func judgeAllocs(v *Verdict, invs []Invocation) {
 		return
 	}
 	v.AllocsBase, v.AllocsHead = int64(median(base)), int64(median(head))
-	if v.AllocsHead > v.AllocsBase+allocSlack[v.Bench] {
+	if v.AllocsHead > v.AllocsBase+allocSlackFor(v.Bench, v.AllocsBase) {
 		v.Allocations = "fail"
 		return
 	}

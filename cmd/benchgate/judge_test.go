@@ -209,3 +209,22 @@ func TestParseOutput(t *testing.T) {
 		t.Fatal("output with no result line was accepted")
 	}
 }
+
+// TestJudgeWholeLogSlack: the whole-log pkg/wal benchmarks carry the measured noise
+// and still fail on one allocation per record.
+func TestJudgeWholeLogSlack(t *testing.T) {
+	judgeOne := func(bench string, base, head int64) string {
+		v := Verdict{Bench: bench}
+		judgeAllocs(&v, []Invocation{{Arm: "base", Allocs: base}, {Arm: "head", Allocs: head}})
+		return v.Allocations
+	}
+	if got := judgeOne("BenchmarkRecoverSnapshotPlusTail", 805762, 805771); got != "pass" {
+		t.Errorf("the measured spread (805,762 to 805,771) judged %q", got)
+	}
+	if got := judgeOne("BenchmarkRecoverSnapshotPlusTail", 805762, 805762+5000); got != "fail" {
+		t.Errorf("5,000 more allocations judged %q", got)
+	}
+	if got := judgeOne("BenchmarkRunnerBare", 5, 6); got != "fail" {
+		t.Errorf("a per-command wal benchmark is exact; +1 judged %q", got)
+	}
+}
