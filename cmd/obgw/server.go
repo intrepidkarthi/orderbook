@@ -368,6 +368,8 @@ func NewServer(cfg Config) (*Server, error) {
 		stageQueue.Observe(q)
 		stageMatch.Observe(m)
 	}
+	sinkIndex, sinkPublisher := col.Histogram(sinkIndexMetric), col.Histogram(sinkPublisherMetric)
+	sinkFeed, sinkCollector := col.Histogram(sinkFeedMetric), col.Histogram(sinkCollectorMetric)
 	publishWait, publishFanout := col.Histogram(stagePublishWaitMetric), col.Histogram(stagePublishFanoutMetric)
 	pub.ObservePublish(func(w, f time.Duration) {
 		publishWait.Observe(w)
@@ -428,7 +430,14 @@ func NewServer(cfg Config) (*Server, error) {
 		//
 		// The index, the publisher and the collector are venue-wide and shared by
 		// every book; only the feed is per instrument.
-		sink := matching.MultiSink{orderentry.NewNameIndex(reg), pub, feed, col}
+		// Each sink timed on its own (docs/STAGES.md §6): together they are nearly all
+		// of the match stage, and one histogram for all four could not say which.
+		sink := matching.MultiSink{
+			&timedSink{orderentry.NewNameIndex(reg), sinkIndex},
+			&timedSink{pub, sinkPublisher},
+			&timedSink{feed, sinkFeed},
+			&timedSink{col, sinkCollector},
+		}
 
 		eng := matching.DefaultConfig(symbol)
 		eng.DedupClientOrderIDs = 4096

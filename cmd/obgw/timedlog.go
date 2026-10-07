@@ -194,3 +194,17 @@ func (t *timedLog) AppendSetPhase(phase matching.EngineState) (int64, error) {
 	t.hist.Observe(time.Since(start))
 	return seq, err
 }
+
+// timedSink times one EventSink's OnEvents into a histogram, so the match stage
+// can be split by sink (docs/STAGES.md §6). Two clock reads per batch, on the
+// matching goroutine, like timedLog's per append.
+type timedSink struct {
+	inner matching.EventSink
+	hist  *observability.Histogram
+}
+
+func (t *timedSink) OnEvents(evs []matching.Event) {
+	start := time.Now()
+	t.inner.OnEvents(evs)
+	t.hist.Observe(time.Since(start))
+}

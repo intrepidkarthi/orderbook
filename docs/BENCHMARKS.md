@@ -507,9 +507,25 @@ gets its own spec and tests rather than riding on a measurement step, and the fo
 is listed in [ADOPTION-PLAN.md](ADOPTION-PLAN.md).
 
 **Match is the apply plus every sink**, not the engine alone: the client-id index, the
-publisher's copy and the metrics collector all run inside it. The engine's own cost is
-in the microbenchmarks above, at hundreds of nanoseconds. The gap to 250 µs at p90 is
-the next thing to attribute.
+publisher's copy, the market-data feed and the metrics collector all run inside it.
+
+**Update, 2026-10-07: both stalls this table showed are fixed.**
+- **The WAL append's 5 ms p99 was the `fsync`**, which held the log's lock. It is now
+  taken outside it; see [WAL-SYNC.md](WAL-SYNC.md).
+- **The match stage's p90 was the market-data feed's gap-fill ring.** It shifted all
+  65,536 slots on every update once full, which is
+  [STAGES.md](STAGES.md) §7.
+
+After both fixes, the same soak reads:
+
+| Stage | p90 ≤ | p99 ≤ |
+|---|---:|---:|
+| WAL append | 10 µs | 100 µs |
+| match | 25 µs | 50 µs |
+| queue wait | 10–25 µs | swings between runs |
+
+The queue's p99 swings from 250 µs to 250 ms between runs of either build, so it is
+the machine's tail, not the venue's.
 
 ## The durable path
 

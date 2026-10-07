@@ -122,3 +122,24 @@ and not the median.
   the two within 3×.
 
 **Re-measured** with §5's soak: the feed's histogram, and the match stage's.
+
+**Result (2026-10-07).**
+- Publishing into a full ring now costs 16 ns at both 1,024 and 65,536 slots, where
+  65,536 had cost 258 µs.
+- The ring tests pass; the four sabotages of the circular indexing are caught.
+- The soak was run four times, alternating the two builds:
+
+| | Old ring | New ring |
+|---|---|---|
+| match p90 / p99 | ≤ 500 µs / ≤ 1 ms, both runs | ≤ 25 µs / ≤ 50 µs, both runs |
+| match mean | 129 µs | 6.4 µs |
+| queue p90 | ≤ 500 µs, both runs | ≤ 10–25 µs, both runs |
+| queue p99 / client p99 | 5 ms / 5 ms, then 100 ms / 100 ms | 250 ms / 250 ms, then 250 µs / 5 ms |
+
+**The match stage is now what the engine and its sinks actually cost.** The queue's
+p99, and the client's, swung between 5 ms and 250 ms across runs of either build.
+That tail does not belong to either ring. Each run also includes one or two
+checkpoints, taken on the matching goroutine at 13–14 ms each with about 640 resting
+orders. That fits the smaller tail spikes, not the large ones. The large spikes are
+most likely this laptop, as §5's 100 ms run of both builds suggested. Telling the two
+apart needs a quieter machine, and it is the next open question here.

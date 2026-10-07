@@ -41,10 +41,15 @@ const (
 	stageMatchMetric         = "obgw_stage_match_ns"
 	stagePublishWaitMetric   = "obgw_stage_publish_wait_ns"
 	stagePublishFanoutMetric = "obgw_stage_publish_fanout_ns"
-	snapshotAgeMetric        = "orderbook_snapshot_age_seconds"
-	snapshotDurationMetric   = "obgw_snapshot_duration_ns"
-	snapshotFailuresMetric   = "obgw_snapshot_failures_total"
-	recoveryDurationMetric   = "obgw_recovery_duration_ns"
+	// The match stage split by sink, one observation per batch (docs/STAGES.md §6).
+	sinkIndexMetric        = "obgw_sink_index_ns"
+	sinkPublisherMetric    = "obgw_sink_publisher_ns"
+	sinkFeedMetric         = "obgw_sink_feed_ns"
+	sinkCollectorMetric    = "obgw_sink_collector_ns"
+	snapshotAgeMetric      = "orderbook_snapshot_age_seconds"
+	snapshotDurationMetric = "obgw_snapshot_duration_ns"
+	snapshotFailuresMetric = "obgw_snapshot_failures_total"
+	recoveryDurationMetric = "obgw_recovery_duration_ns"
 	// obgw_ rather than orderbook_: it is a fact only this process knows, because
 	// this process is what read the log and decided those records were insufficient.
 	icebergReserveUnknownMetric = "obgw_recovery_iceberg_reserve_unknown_total"
