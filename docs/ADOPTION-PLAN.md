@@ -74,10 +74,12 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
 
 ## Phase 2 — adoption
 
-- [ ] **2.1 Python bindings.** A `pip`-installable package over the 1.2 C interface,
+- [x] **2.1 Python bindings.** A `pip`-installable package over the 1.2 C interface,
   written with the standard library (`ctypes`) only, with tests and an example notebook
   script. *Done when:* tests pass locally on our own build. Then **needs Karthik:**
   publish to PyPI.
+  *Done 2026-10-07* ([`PYTHON.md`](PYTHON.md)): 14 tests, among them bench-basic-v1
+  through Python to the committed digest, green locally and on CI (Python 3.9).
 - [ ] **2.2 ITCH 5.0 replay.** A parser for the add, execute, cancel, delete and
   replace messages, an example that rebuilds a book from a file, and a benchmark.
   Tested on a synthetic fixture; a real NASDAQ sample is fetched and replayed only on CI.
@@ -106,6 +108,8 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
 Collected here as they come up, so nothing outward happens by default.
 
 - [ ] Reply on the scheduled 2026-10-14 check (routine proposed, not created).
+- [ ] Publish the Python bindings (2.1): choose the PyPI name (`obook` is a
+  placeholder), and decide how wheels carry the native library per platform.
 - [ ] Submit the adapter to flash1 (1.3): a PR to flash1-dev/matching-engine-benchmark
   adding it under `additional_references/`, pointing at `cmd/flash1engine` at a
   pinned commit. The CI job is the evidence it conforms.
