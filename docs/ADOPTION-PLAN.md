@@ -103,9 +103,12 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
 
 ## Phase 3 — engineering, led by Phase 1's numbers
 
-- [ ] **3.1 Read 1.5 and decide.** If a competitor is measurably faster on the shared
+- [x] **3.1 Read 1.5 and decide.** If a competitor is measurably faster on the shared
   tape, profile the gap and pick the M11 experiment that addresses it; if not, record
   that and skip 3.2.
+  *Done 2026-10-07* ([`CROSS-ENGINE.md`](CROSS-ENGINE.md) §10): the profile puts ~40% of
+  the loop in resting orders, much of it allocating book nodes that geseq prefills
+  before its clock starts. 3.2 is a prefill option for the book's pools.
 - [ ] **3.2 The chosen optimisation**, behind the bench gate, with the digest unchanged.
 - [ ] **3.3 Calibration restated on the lower bound.** A spec change to §14.2 of
   `BENCH-GATE.md` and a fresh 60-run calibration, which may enforce more benchmarks.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -238,5 +239,25 @@ func TestMalformedOutputIsAnError(t *testing.T) {
 				t.Fatal("accepted without an error")
 			}
 		})
+	}
+}
+
+// BenchmarkSelfReplay times this engine's adapter over bench-basic-v1, the loop the
+// cross-engine table times (docs/CROSS-ENGINE.md §4), for profiling the gap.
+func BenchmarkSelfReplay(b *testing.B) {
+	tp, err := readTape(basicTape)
+	if err != nil {
+		b.Fatal(err)
+	}
+	var in bytes.Buffer
+	if err := benchgate.ExportText(tp, &in); err != nil {
+		b.Fatal(err)
+	}
+	text := in.Bytes()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := run(bytes.NewReader(text), io.Discard); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

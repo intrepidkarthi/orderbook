@@ -114,7 +114,8 @@ adapter defect is fixed here, and the run is repeated.
 Read from each engine's source at its pin. A user of that engine pays the same.
 
 - **This engine.** `Engine.Match` and `Engine.Cancel` with the default configuration:
-  the self-trade check, the per-account open-order count, the counter clock and the
+  the self-trade check, the per-account open-order count, one wall-clock read per
+  command (the default clock; a counter can be injected) and the
   trade list. Engine ids become positions after the clock stops.
 - **geseq.** `AddOrder` and `CancelOrder` with a monotonic token per call, and an
   interface call per notification. Prices and quantities are fixed-point decimals,
@@ -159,4 +160,35 @@ tape. CppTrader and this engine report both.
   OrderBook-rs 45.68. The order and the ratios hold; the absolute figures moved with
   the runner, which is why none of them is quoted alone.
 - What the gap is made of is step 3.1's question, and this table does not answer it.
+
+## 10. Where this engine's time goes (step 3.1)
+
+Profiled 2026-10-07 on an Apple M4: `BenchmarkSelfReplay` in `cmd/xeng`, the same loop
+§4 times, with the CPU profile cut to the timed region and the allocation profile at
+rate 1.
+
+| Share of the timed loop | What |
+|---|---|
+| ~40% | resting an order: `settle` and `OrderBook.Add`, of which a large part is allocating its book node and index entry |
+| ~14% | one `time.Now` per command, by design (`nextID`): the engine stamps every order on intake. geseq reads no clock |
+| ~17% | allocation and GC write barriers in general |
+| ~15% | map lookups, including interning each order's user string |
+| the rest | matching proper, cancels, the adapter's own bookkeeping |
+
+**About 8,200 allocations per replay come from inside `Match`**: one book node and one
+index entry for every order that comes to rest while the book grows to about 4,000.
+The pools only refill from orders that have left. geseq avoids exactly this: its book
+prefills a pool of 1 M orders at construction, before its adapter starts the clock.
+This engine cannot be told to, so on this tape it pays for its pools in the timed loop.
+
+Two things were tried and are not the gap. A forced GC before the clock moved the
+median by 0.7 ms, and a 10× smaller index by 1.4 ms, both against about 8 ms. The book's
+`RWMutex` barely shows.
+
+**Decision.** Step 3.2 is M11 experiment 4's missing half, scoped to what the profile
+shows: let a caller **prefill the book's node and index pools**
+(`orderbook.Config.Prealloc`, default 0 so no existing user's memory changes). The
+cross-engine adapter sets it, as geseq's does, and the run is repeated. The clock stays
+as it is: it is a semantic choice, documented above, and a caller who needs no wall
+time can already inject a counter.
 
