@@ -972,6 +972,26 @@ measures, about 1.20× on `Engine_CancelReplaceInto`, is printed in every summar
 - **Not yet:** the `pull_request` trigger. §14.1 waits for a week of enforced pushes
   without a false failure, and that week starts with the push that landed this.
 
+## 16. Slice C — written before its code
+
+Three independent additions §14.3 deferred, none of which changes what fails a build
+on timing.
+
+- **`TapeReplay/sink=count`.** The same replay with a counting `EventSink` attached, so
+  the engine builds and publishes its event stream, the configuration the documentation
+  recommends embedding. Its guard compares the sink's count against the events the
+  correctness driver recorded on the same tape. It is allocation-gated with the tape's
+  slack of 8; its timing is reported, not gated, until a calibration says otherwise.
+- **`pkg/wal` allocation classes.** Per-command benchmarks (the `Runner*` family and
+  `RotationAppendTail`) repeat exactly and are gated exactly. Whole-log benchmarks
+  (checkpoint, read, replay, snapshot write and restore, the three recoveries) repeat
+  within a few allocations of totals in the millions. They are gated with a slack of
+  16 + 0.01% of base, at one invocation per arm. `RestartWithRetention` is stable but
+  costs about 200 s per invocation and is left out for that reason only. Timing is never
+  gated on `pkg/wal`.
+- **One probe.** `internal/probe` holds the ALU loop and the memory walk, and both
+  `cmd/obsoak` and `cmd/benchgate` call it, instead of carrying two copies of the loop.
+
 ## Appendix: Review points not taken
 
 - **Statistics B6: skip `TestBenchTapeRefmatchAgrees` under `-race` through a build tag.** Measured instead. At n = 50 k, refmatch takes 2.5-3.4 s under race and the engine 0.3 s, which is small enough to run everywhere.
