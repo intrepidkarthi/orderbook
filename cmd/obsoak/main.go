@@ -74,6 +74,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/intrepidkarthi/orderbook/internal/probe"
 	"github.com/intrepidkarthi/orderbook/internal/wire"
 	"github.com/intrepidkarthi/orderbook/pkg/observability"
 	"github.com/intrepidkarthi/orderbook/pkg/orderentry"
@@ -770,10 +771,7 @@ func scrape(client *http.Client, addr string) (map[string]float64, error) {
 
 // --- how much of the machine did this run actually get? -----------------------
 
-// probeSink keeps the compiler from deleting the probe's arithmetic.
-var probeSink uint64
-
-// speedProbe runs a fixed amount of arithmetic and reports how long it took.
+// speedProbe reports how long a fixed amount of arithmetic took.
 //
 // Every absolute figure in this report — throughput, latency, the rate at which the
 // queue saturates — is only comparable to another run's if both got the same share of
@@ -782,19 +780,9 @@ var probeSink uint64
 // harness published capacity numbers that did not reproduce four hours later on the
 // same machine, on the same code, because the machine had got busier in between.
 //
-// A load average would answer this on Linux and need a different mechanism on Darwin.
-// This needs neither, and it measures the thing that actually matters — how much CPU
-// this process can get — rather than a number the kernel keeps about everybody.
-func speedProbe() time.Duration {
-	start := time.Now()
-	x := uint64(1)
-	for i := 0; i < 20_000_000; i++ {
-		x = x*6364136223846793005 + 1442695040888963407
-		x ^= x >> 33
-	}
-	probeSink = x
-	return time.Since(start)
-}
+// The loop lives in internal/probe, shared with cmd/benchgate, which probes before
+// every benchmark run for the same reason.
+func speedProbe() time.Duration { return probe.ALU() }
 
 // --- the report --------------------------------------------------------------
 
