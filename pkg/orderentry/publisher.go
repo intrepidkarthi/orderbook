@@ -3,6 +3,7 @@ package orderentry
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/intrepidkarthi/orderbook/pkg/matching"
 )
@@ -31,6 +32,20 @@ type Publisher struct {
 	busy     bool       // the pump is mid-batch
 	drained  *sync.Cond // signalled when the queue empties
 	doneOnce sync.Once  // whoever finishes first closes done
+	// observe, if set, receives each batch's wait and fan-out time
+	// (ObservePublish). since is when the queue last went from empty to not.
+	observe func(wait, fanout time.Duration)
+	since   time.Time
+}
+
+// ObservePublish sets fn to receive, for each batch the pump takes, how long its
+// oldest event waited in the queue and how long fanning the batch out to the
+// account streams took (docs/STAGES.md). Call it before Pump; nil, the default,
+// reads no clock.
+func (p *Publisher) ObservePublish(fn func(wait, fanout time.Duration)) {
+	p.mu.Lock()
+	p.observe = fn
+	p.mu.Unlock()
 }
 
 // NewPublisher builds a publisher feeding reg. maxDepth bounds the queue between
@@ -59,6 +74,9 @@ func (p *Publisher) OnEvents(evs []matching.Event) {
 	if p.closed {
 		p.mu.Unlock()
 		return
+	}
+	if p.observe != nil && len(p.pending) == 0 && len(evs) > 0 {
+		p.since = time.Now()
 	}
 	for i := range evs {
 		p.pending = append(p.pending, copyEvent(&evs[i]))
@@ -121,9 +139,17 @@ func (p *Publisher) Pump() {
 		batch := p.pending
 		p.pending = nil
 		p.busy = true
+		observe, since := p.observe, p.since
 		p.mu.Unlock()
 
+		var taken time.Time
+		if observe != nil {
+			taken = time.Now()
+		}
 		p.reg.Publish(batch)
+		if observe != nil {
+			observe(taken.Sub(since), time.Since(taken))
+		}
 
 		p.mu.Lock()
 		p.busy = false

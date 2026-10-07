@@ -487,6 +487,7 @@ matching.RunnerConfig struct
 matching.RunnerConfig.Engine Config
 matching.RunnerConfig.LastApplied int64
 matching.RunnerConfig.Log CommandLog
+matching.RunnerConfig.ObserveStages func(queue, match time.Duration)
 matching.RunnerConfig.QueueSize int
 matching.RunnerConfig.Replaying bool
 matching.STPAllow const
@@ -626,6 +627,7 @@ orderentry.(*HashedAccounts).Count() int
 orderentry.(*NameIndex).OnEvents(evs []matching.Event)
 orderentry.(*Publisher).Close()
 orderentry.(*Publisher).Dropped() uint64
+orderentry.(*Publisher).ObservePublish(fn func(wait, fanout time.Duration))
 orderentry.(*Publisher).OnEvents(evs []matching.Event)
 orderentry.(*Publisher).Pump()
 orderentry.(*Publisher).Wait()

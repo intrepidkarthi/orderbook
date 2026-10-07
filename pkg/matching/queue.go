@@ -73,7 +73,11 @@ type command struct {
 	// the venue matches.
 	resolve   func() (int64, bool)
 	reduceQty int64
-	userID    string
+	// enq is when the command entered the queue, in nanoseconds since the Runner's
+	// epoch. It is set only when the Runner observes stages (docs/STAGES.md); zero
+	// otherwise, and then nothing reads it.
+	enq    int64
+	userID string
 	// bustReason is the operator's free-text reason for a cmdBust. The trade id
 	// travels in cancelID, which every id-bearing command already uses.
 	bustReason string

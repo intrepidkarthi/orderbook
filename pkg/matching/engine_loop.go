@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/intrepidkarthi/orderbook/pkg/orderbook"
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -75,6 +76,10 @@ type Runner struct {
 	// over one of those will checkpoint a complete book as covering nothing. See
 	// RunnerConfig.LastApplied.
 	lastApplied int64
+	// observe, if set, receives each command's queue wait and match time
+	// (RunnerConfig.ObserveStages), measured against epoch.
+	observe func(queue, match time.Duration)
+	epoch   time.Time
 }
 
 // CommandLog is the write-ahead seam: the Runner appends each mutating command
@@ -167,6 +172,12 @@ type RunnerConfig struct {
 	// RecoverReport.LogLastSeq): the snapshot's position, or the last record
 	// replayed on top of it, whichever is further along.
 	LastApplied int64
+	// ObserveStages, if set, is called on the matching goroutine once per command
+	// with the time it waited in the queue and the time the engine took to apply it,
+	// from the end of its log append to the end of its events (docs/STAGES.md). It
+	// must be cheap. When it is nil the Runner reads no clock for it and stamps
+	// nothing.
+	ObserveStages func(queue, match time.Duration)
 }
 
 // NewRunner builds a Runner over a fresh Engine and starts its matching
@@ -203,6 +214,8 @@ func NewRunnerFor(eng *Engine, cfg RunnerConfig) *Runner {
 		// Set before the matching goroutine starts, which is the only moment anything
 		// but that goroutine may touch it.
 		lastApplied: cfg.LastApplied,
+		observe:     cfg.ObserveStages,
+		epoch:       time.Now(),
 	}
 	if cfg.Replaying {
 		r.engine.SetReplaying(true)
@@ -236,6 +249,10 @@ func (r *Runner) loop() {
 
 func (r *Runner) dispatch(cmd command) {
 	var rep cmdReply
+	var start, logged int64
+	if r.observe != nil {
+		start = int64(time.Since(r.epoch))
+	}
 	// Resolution first, and before the log: the journal must record the engine order
 	// id, not the client's name for it, or a replay would have to reconstruct a
 	// mapping that only ever existed in the gateway.
@@ -248,6 +265,9 @@ func (r *Runner) dispatch(cmd command) {
 			rep.err = types.ErrOrderNotFound
 		}
 		if rep.err != nil {
+			if r.observe != nil {
+				r.observe(time.Duration(start-cmd.enq), 0)
+			}
 			if cmd.reply != nil {
 				cmd.reply <- rep
 			}
@@ -256,6 +276,9 @@ func (r *Runner) dispatch(cmd command) {
 		cmd.cancelID = id
 	}
 	r.logCommand(cmd)
+	if r.observe != nil {
+		logged = int64(time.Since(r.epoch))
+	}
 	switch cmd.kind {
 	case cmdSubmit:
 		rep.match = r.engine.Process(cmd.order)
@@ -308,6 +331,9 @@ func (r *Runner) dispatch(cmd command) {
 		snap := r.engine.TakeSnapshot()
 		snap.WALSeq = r.lastApplied
 		cmd.snapOut <- snap
+	}
+	if r.observe != nil {
+		r.observe(time.Duration(start-cmd.enq), time.Duration(int64(time.Since(r.epoch))-logged))
 	}
 	if cmd.reply != nil {
 		cmd.reply <- rep
@@ -405,6 +431,16 @@ func (r *Runner) logCommand(cmd command) {
 	r.lastApplied = seq
 }
 
+// stamp records when cmd enters the queue, if stages are observed. Every enqueue
+// goes through it; a command that skipped it would report the Runner's whole
+// lifetime as queue wait, which TestStagesStampEveryEntryPoint looks for.
+func (r *Runner) stamp(cmd command) command {
+	if r.observe != nil {
+		cmd.enq = int64(time.Since(r.epoch))
+	}
+	return cmd
+}
+
 // send enqueues cmd and blocks until the matching goroutine has applied it,
 // reporting ok=false if the runner is shutting down. It never panics and never
 // blocks forever: the fence is checked before enqueueing, while waiting for queue
@@ -420,7 +456,7 @@ func (r *Runner) send(cmd command) (cmdReply, bool) {
 	}
 
 	select {
-	case r.queue <- cmd:
+	case r.queue <- r.stamp(cmd):
 	case <-r.quit:
 		return cmdReply{}, false
 	}
@@ -547,7 +583,7 @@ func (r *Runner) SubmitAsync(order *types.Order) <-chan *MatchResult {
 	out := make(chan *MatchResult, 1)
 	reply := make(chan cmdReply, 1)
 	select {
-	case r.queue <- command{kind: cmdSubmit, order: order, reply: reply}:
+	case r.queue <- r.stamp(command{kind: cmdSubmit, order: order, reply: reply}):
 	case <-r.quit:
 		out <- shutdownResult(order)
 		return out
@@ -581,7 +617,7 @@ func (r *Runner) TrySubmit(order *types.Order) (*MatchResult, error) {
 	}
 	reply := make(chan cmdReply, 1)
 	select {
-	case r.queue <- command{kind: cmdSubmit, order: order, reply: reply}:
+	case r.queue <- r.stamp(command{kind: cmdSubmit, order: order, reply: reply}):
 		select {
 		case rep := <-reply:
 			return rep.match, nil
@@ -608,7 +644,7 @@ func (r *Runner) TrySubmitAsync(order *types.Order) (<-chan *MatchResult, error)
 	}
 	reply := make(chan cmdReply, 1)
 	select {
-	case r.queue <- command{kind: cmdSubmit, order: order, reply: reply}:
+	case r.queue <- r.stamp(command{kind: cmdSubmit, order: order, reply: reply}):
 		out := make(chan *MatchResult, 1)
 		go func() {
 			select {
@@ -676,7 +712,7 @@ func (r *Runner) Checkpoint() (*EngineSnapshot, error) {
 	default:
 	}
 	select {
-	case r.queue <- cmd:
+	case r.queue <- r.stamp(cmd):
 	case <-r.quit:
 		return nil, ErrShuttingDown
 	}
@@ -768,7 +804,7 @@ func (r *Runner) tryReplaceAsync(orderID int64, userID string, replacement *type
 	reply := make(chan cmdReply, 1)
 	cmd := command{kind: cmdReplace, cancelID: orderID, userID: userID, replace: replacement, reply: reply, resolve: resolve}
 	select {
-	case r.queue <- cmd:
+	case r.queue <- r.stamp(cmd):
 	default:
 		return nil, ErrQueueFull
 	}
@@ -806,7 +842,7 @@ func (r *Runner) TryCancelAllAsync(userID string) (<-chan int, error) {
 	}
 	reply := make(chan cmdReply, 1)
 	select {
-	case r.queue <- command{kind: cmdCancelAll, userID: userID, reply: reply}:
+	case r.queue <- r.stamp(command{kind: cmdCancelAll, userID: userID, reply: reply}):
 	default:
 		return nil, ErrQueueFull
 	}
@@ -864,7 +900,7 @@ func (r *Runner) tryReduceAsync(orderID, newQty int64, userID string, resolve fu
 	reply := make(chan cmdReply, 1)
 	cmd := command{kind: cmdReduce, cancelID: orderID, reduceQty: newQty, userID: userID, reply: reply, resolve: resolve}
 	select {
-	case r.queue <- cmd:
+	case r.queue <- r.stamp(cmd):
 	default:
 		return nil, ErrQueueFull
 	}
@@ -897,7 +933,7 @@ func (r *Runner) tryEnqueue(cmd command) error {
 	default:
 	}
 	select {
-	case r.queue <- cmd:
+	case r.queue <- r.stamp(cmd):
 		return nil
 	default:
 		return ErrQueueFull
