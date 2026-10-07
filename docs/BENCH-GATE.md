@@ -1006,6 +1006,39 @@ shipping with M4 measurements before CI had measured the class. §14.1 waits for
 of enforced pushes **without** a false failure before `pull_request`, so that week
 restarts on 2026-10-07.
 
+## 17. `bench-basic-v1.obt` — the subset every engine can replay
+
+Written before its code; step 1.4 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md).
+
+`bench-v1.obt` uses this engine's whole alphabet: reduce, replace, market orders,
+IOC, FOK and post-only. Most engines in [`LANDSCAPE.md`](LANDSCAPE.md) cannot express
+half of it, so a digest from them over that tape cannot exist. A second tape draws
+only what all of them can express.
+
+- **Commands.** Limit GTC submits and cancels, nothing else. Profile `tape.Basic`:
+  submit 65, cancel 35, 64 accounts, 41 price levels from 1000, quantity 1–9, no
+  exotic draws, Portable, so no account ever meets its own order.
+- **Owner-only cancels.** The other profiles send one cancel in four from the wrong
+  account on purpose, to sweep "not yours". An engine with no notion of ownership
+  would carry out that cancel, and the tapes would part on a question it cannot ask.
+  So `Basic` sets `OwnerOnly`. A cancel that names an order goes out from that
+  order's account. A cancel that names a position where no order was made, or an
+  order already gone, still goes out, and every engine refuses it. The flag follows
+  `Portable`'s rule: every draw is still taken, and only the value written changes,
+  so it cannot move any other profile's stream.
+- **Size and seed.** 50,000 commands, seed `0x5EED1234`, capacity 1,000,000, the
+  same as `bench-v1`.
+- **Held to.** The file's SHA-256 is pinned, and the generator must reproduce it.
+  Replaying it through `refmatch` must give the engine's digest, which is committed as
+  `bench-basic-v1.digest`. A test checks that every command is a limit GTC submit or
+  a cancel, and that every cancel naming an order comes from that order's account.
+  The shape floors are §2.1's: no full-book refusal, no self-trade decision, under 5%
+  of submits rejected, at least 1,000 resting at the end, at least one trade per four
+  commands, and at least 10% of cancels reaching a live order.
+- **Not gated.** Nothing in the bench gate reads it. It exists for step 1.5's
+  cross-engine comparison, where the digest is the check that each engine did the
+  same work before its time means anything.
+
 ## Appendix: Review points not taken
 
 - **Statistics B6: skip `TestBenchTapeRefmatchAgrees` under `-race` through a build tag.** Measured instead. At n = 50 k, refmatch takes 2.5-3.4 s under race and the engine 0.3 s, which is small enough to run everywhere.
