@@ -1,6 +1,6 @@
 # flash1 Adapter — the Engine in an Independent Harness
 
-Status: **specified; step 1.3 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
+Status: **implemented, checked on CI; step 1.3 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
 Author: Karthikeyan NG · 2026-10-07
 
 ## 1. What and why
@@ -61,12 +61,21 @@ says the differential harness lacks.
 - **Locally:** `internal/flash1` unit tests cover each row of the table above, priority
   loss on modify, the IOC residual, rejects for unknown and already-cancelled ids, and
   the audit queries. Each test is watched failing against a broken mapping.
+- **Across the boundary, locally:** `TestTheCABIEmitsWhatTheAdapterEmits` builds the
+  shared library and drives it from a C stand-in for the harness
+  (`internal/flash1/testdata/driver.c`), whose transport refuses every fifth push. A
+  random 20,000-message stream, through both `engine_on_batch` and the one-message
+  entry points with audit queries in between, must print exactly what the Go adapter
+  emits. That checks the glue, not the layout: the stand-in and the glue declare the
+  structs from the same documentation.
 - **On CI:** `.github/workflows/flash1.yml` checks out the harness at a pinned commit
   (`60049226c1a1dad127a50a7c12d62baf0377fbaa`), builds it, builds this adapter, and runs
   all five scenarios in `--mode perf`.
   - **It gates on correctness:** every scenario's report hash must equal the consensus.
   - **Throughput is reported and never gated.** Shared runners are not calibrated, and
     no CI figure is a claim.
+  - **The harness's own verdict is reported and not gated.** It also fails a run on core
+    pinning and timing checks that a shared runner cannot promise.
   - **The anti-cheat state audit is skipped**, as geseq's own CI skips it, because it
     replays through a Liquibook build.
 - **Submission to flash1** is **needs Karthik**.

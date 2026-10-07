@@ -1,0 +1,142 @@
+name: flash1
+
+# The engine in an independent harness (docs/FLASH1.md). flash1-dev's
+# matching-engine-benchmark replays about 2 M messages per scenario through its C ABI
+# and hashes the report stream against a consensus that other engines reproduce. This
+# job builds the harness at a pinned commit, builds cmd/flash1engine against it, and
+# fails if any scenario's hash differs from the consensus.
+#
+# Throughput is printed in the summary and never gated: a shared runner is not a
+# calibrated machine, and no figure from here is a claim. The harness's own verdict is
+# also shown and not gated, because it fails a run on core pinning and timing checks a
+# shared runner cannot promise. The state audit (--mode audit) is not run: it replays
+# through a Liquibook build, which this job does not make.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pkg/matching/**"
+      - "pkg/orderbook/**"
+      - "pkg/types/**"
+      - "internal/flash1/**"
+      - "cmd/flash1engine/**"
+      - "go.mod"
+      - ".github/workflows/flash1.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "41 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flash1-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HARNESS_REPO: https://github.com/flash1-dev/matching-engine-benchmark.git
+  # Pinned: the consensus hashes live in the harness, so a moving harness would move
+  # what "correct" means under this job. Bump deliberately.
+  HARNESS_SHA: 60049226c1a1dad127a50a7c12d62baf0377fbaa
+  ADAPTER: intrepidkarthi_orderbook_adapter.so
+
+jobs:
+  harness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q g++-14 cmake libboost-dev
+
+      - name: Harness, at the pinned commit
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: |
+          git init -q harness
+          git -C harness remote add origin "$HARNESS_REPO"
+          git -C harness fetch -q --depth 1 origin "$HARNESS_SHA"
+          git -C harness checkout -q FETCH_HEAD
+          test "$(git -C harness rev-parse HEAD)" = "$HARNESS_SHA"
+          make -C harness
+
+      - name: Adapter
+        run: |
+          CGO_ENABLED=1 go build -buildmode=c-shared -o "harness/$ADAPTER" ./cmd/flash1engine
+          rm -f "harness/${ADAPTER%.so}.h"
+
+      - name: Scenarios
+        working-directory: harness
+        run: |
+          mkdir -p results
+          for s in static normal swing-25 swing-40 flash-crash; do
+            echo "::group::$s"
+            # The exit status folds in the timing and pinning gates; correctness is
+            # read from the result file in the next step.
+            ./harness --engine "./$ADAPTER" --scenario "$s" --mode perf \
+              --matcher-core 2 --drainer-core 3 || true
+            echo "::endgroup::"
+          done
+
+      - name: Correctness gate
+        working-directory: harness
+        run: |
+          python3 - <<'EOF'
+          import glob, json, os, sys
+          want = ["static", "normal", "swing-25", "swing-40", "flash-crash"]
+          got = {}
+          for path in glob.glob("results/*.json"):
+              with open(path) as f:
+                  r = json.load(f)
+              got[r["scenario"]] = r
+          rows, bad = [], []
+          for s in want:
+              r = got.get(s)
+              if r is None:
+                  rows.append(f"| {s} | no result file | | | |")
+                  bad.append(s)
+                  continue
+              c = r["correctness"]
+              if c["status"] != "PASS":
+                  bad.append(s)
+              rows.append(f"| {s} | {c['status']} | {r['throughput_msgs_per_s'] / 1e6:.2f} M/s"
+                          f" | {r['verdict']} | `{c['computed_hash'][:16]}` |")
+          out = ["### flash1 harness, pinned at `" + os.environ["HARNESS_SHA"][:12] + "`", "",
+                 "| scenario | correctness | throughput (informational) | harness verdict | report hash |",
+                 "|---|---|---|---|---|", *rows, "",
+                 "Throughput on a shared runner is not a benchmark figure."]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("\n".join(out) + "\n")
+          print("\n".join(out))
+          if bad:
+              print("correctness failed: " + ", ".join(bad), file=sys.stderr)
+              sys.exit(1)
+          EOF
+
+      # Where the report stream first departs from the consensus, for the scenario the
+      # harness ships a canonical stream for.
+      - name: First divergence
+        if: failure()
+        working-directory: harness
+        run: |
+          ./harness --engine "./$ADAPTER" --scenario normal --mode perf \
+            --matcher-core 2 --drainer-core 3 --write-canonical-output candidate.txt || true
+          python3 scripts/explain_divergence.py reference/canonical_output.txt.gz candidate.txt \
+            --json-output results/divergence.json || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: flash1-results
+          path: harness/results/
+          if-no-files-found: ignore
