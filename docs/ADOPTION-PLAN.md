@@ -40,10 +40,13 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   it through cgo and checks the OBDG digest of the bench tape matches the native
   engine's. It is shaped so that an adapter for the flash1 harness is a thin shim.
   *Done when:* the digest test passes, sabotaged once.
-- [ ] **1.3 flash1 adapter.** The shim from 1.2 to flash1's `matching_engine_api.h`
+- [x] **1.3 flash1 adapter.** The shim from 1.2 to flash1's `matching_engine_api.h`
   (read via the API; its license checked before anything is copied), built and checked
   only in CI. *Done when:* a CI job builds it against the pinned header. Then
   **needs Karthik:** submit it to flash1.
+  *Done 2026-10-07* ([`FLASH1.md`](FLASH1.md), `.github/workflows/flash1.yml`): the
+  first CI run reproduced the consensus hash on all five scenarios, with the harness
+  verdict VALID on each.
 - [ ] **1.4 A second, minimal tape.** `bench-basic-v1.obt`: limit orders and cancels
   only, which every engine in the survey can express, so cross-engine digests are
   comparable. *Done when:* frozen, shape-tested, digest committed, refmatch agrees.
@@ -92,3 +95,6 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
 Collected here as they come up, so nothing outward happens by default.
 
 - [ ] Reply on the scheduled 2026-10-14 check (routine proposed, not created).
+- [ ] Submit the adapter to flash1 (1.3): a PR to flash1-dev/matching-engine-benchmark
+  adding it under `additional_references/`, pointing at `cmd/flash1engine` at a
+  pinned commit. The CI job is the evidence it conforms.
