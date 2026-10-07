@@ -132,21 +132,24 @@ func applyAcceptances(v *Verdict, accs []*Acceptance) []string {
 	return problems
 }
 
-// enforcedTiming names the benchmarks whose TIMING may fail a build, chosen by the
-// calibration in docs/BENCH-GATE.md §15 under the rule in §14.2, fixed before the
-// data: over 60 A/A runs on ubuntu-latest, only Engine_CancelReplaceInto had a worst
-// |median - 1| (0.0199) small enough that 1 + 3x it stays under 1.10. Every other
-// timing-gated benchmark is still measured and reported, and its failure says it is
-// report-only. Allocations are enforced for every gated benchmark regardless: they
-// disagreed between arms in none of the 60 runs.
+// enforcedTiming names the benchmarks whose TIMING may fail a build, chosen under
+// the rule in docs/BENCH-GATE.md §18.2, fixed before its data: over 60 A/A runs the
+// largest k-th ratio stayed at or under 1.0167, and a planted ~1.20x slowdown failed
+// at least 19 of 20 runs. OrderBook_CancelReplace cleared the A/A criteria and failed
+// power (10 of 19 at a plant measured 0.95-1.28x), so its timing stays report-only.
+// Allocations are enforced for every gated benchmark regardless.
 var enforcedTiming = map[string]bool{
 	"BenchmarkEngine_CancelReplaceInto": true,
+	"BenchmarkEngine_MatchInto":         true,
+	"BenchmarkTapeReplay/sink=nil":      true,
+	"BenchmarkOrderBook_LevelChurn":     true,
 }
 
-// detectionFloor is what the power study measured (docs/BENCH-GATE.md §15), printed
-// in every summary so a pass is read as what it is.
-const detectionFloor = "a ~1.20x slowdown on Engine_CancelReplaceInto (measured medians 1.196-1.306) failed 20 of 20 power runs; " +
-	"smaller slowdowns, and the report-only benchmarks, are not guarded by timing"
+// detectionFloor is what the power studies measured (docs/BENCH-GATE.md §15.2 and
+// §19), printed in every summary so a pass is read as what it is.
+const detectionFloor = "planted slowdowns failed at least 19 of 20 power runs at medians of 1.196-1.306x (Engine_CancelReplaceInto), " +
+	"1.236-1.447x (Engine_MatchInto), 1.166-1.281x (TapeReplay/sink=nil) and 1.259-1.545x (OrderBook_LevelChurn); " +
+	"smaller slowdowns, and OrderBook_CancelReplace, are not guarded by timing"
 
 // settle decides whether a verdict fails the run, and labels a timing failure that
 // calibration has not cleared to enforce.

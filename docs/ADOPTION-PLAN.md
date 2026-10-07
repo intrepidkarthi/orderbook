@@ -113,8 +113,11 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   *Done 2026-10-07* ([`CROSS-ENGINE.md`](CROSS-ENGINE.md) §11): prefilled pools, gated
   clean, digests unchanged, 16% off the local replay. The rest of the gap is the cost of
   features geseq lacks, which is a design question, not a pooling one.
-- [ ] **3.3 Calibration restated on the lower bound.** A spec change to §14.2 of
+- [x] **3.3 Calibration restated on the lower bound.** A spec change to §14.2 of
   `BENCH-GATE.md` and a fresh 60-run calibration, which may enforce more benchmarks.
+  *Done 2026-10-07* (BENCH-GATE §18, §19): 60 A/A runs and 40 power runs. Timing is
+  enforced on four benchmarks instead of one; `OrderBook_CancelReplace` failed power
+  and stays report-only.
 - [ ] **3.4 Stage attribution.** Queue, match, log and publish delay measured separately.
 - [ ] **3.5 `pull_request` for the gate**, no earlier than 2026-10-14 and only after a
   week of enforced pushes without a false failure.

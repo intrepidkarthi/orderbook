@@ -100,3 +100,20 @@ func TestNearestRank(t *testing.T) {
 		t.Fatalf("p50 of 1..60 = %v, want 30", got)
 	}
 }
+
+// TestEnforcedSetIsTheSection19Decision pins the set §19 recorded: each enforced
+// benchmark is timing-gated, and the one that failed power is not enforced.
+func TestEnforcedSetIsTheSection19Decision(t *testing.T) {
+	for b := range enforcedTiming {
+		found := false
+		for _, g := range timingGated {
+			found = found || g == b
+		}
+		if !found {
+			t.Errorf("%s is enforced but not timing-gated", b)
+		}
+	}
+	if len(enforcedTiming) != 4 || enforcedTiming["BenchmarkOrderBook_CancelReplace"] {
+		t.Fatalf("enforced %v; §19 decided four, without OrderBook_CancelReplace", enforcedTiming)
+	}
+}

@@ -1086,6 +1086,57 @@ can be read against §15.1.
   falsely fails.
 - **If no further benchmark clears, that is recorded and nothing changes.**
 
+## 19. What slice D found
+
+Written on 2026-10-07, after the calibration and power runs §18.2 describes.
+
+### 19.1 Calibration: 60 A/A′ runs
+
+Dispatched together from `33dd23c`, `mode: aa`, `enforce: true`. They landed on six CPU
+models: AMD EPYC 7763 (37 runs), 9V74 (8), 9V45 (6), Intel Xeon Platinum 8370C (6),
+8573C (2) and Xeon 6973P-C (1). **All 60 passed.**
+
+| Benchmark | Failed | Inconclusive | Median range | Largest k-th | §18.2's first three |
+|---|---:|---:|---|---:|---|
+| `Engine_CancelReplaceInto` | 0 | 0 | 0.984 – 1.013 | 1.0011 | clear |
+| `OrderBook_LevelChurn` | 0 | 0 | 0.964 – 1.020 | 1.0016 | clear |
+| `TapeReplay/sink=nil` | 0 | 0 | 0.966 – 1.038 | 1.0091 | clear |
+| `OrderBook_CancelReplace` | 0 | 0 | 0.884 – 1.087 | 1.0131 | clear |
+| `Engine_MatchInto` | 0 | 0 | 0.973 – 1.035 | 1.0157 | clear, near the 1.0167 limit |
+
+Allocation counts again disagreed between arms in none of the 60.
+
+### 19.2 Power for the order-book benchmarks
+
+A loop at the top of `OrderBook.Add` and `OrderBook.Remove`, on the throwaway branch
+`power-orderbook`, against `33dd23c`, 20 dispatched runs per size:
+
+| Plant | Benchmark | Failed | Median range |
+|---|---|---:|---|
+| 75 iterations | `OrderBook_LevelChurn` | **20 / 20** | 1.259 – 1.545 |
+| 75 iterations | `OrderBook_CancelReplace` | 20 / 20 | 1.706 – 3.030 (far above the ~1.20 asked for) |
+| 15 iterations | `OrderBook_CancelReplace` | **10 / 19** | 0.952 – 1.283 |
+
+The 75-iteration plant was sized on an M4. On the CI machines it came out far larger
+for `OrderBook_CancelReplace`, and catching a 1.7× slowdown says nothing about 1.20×.
+So that benchmark got a second, smaller plant: one run's artifact is missing, and of
+the other 19 it failed 10. Its medians span 0.884 to 1.087 even with no change at all,
+so a real 1.2× regression often reads below the 1.10 median threshold.
+
+### 19.3 What changed on the strength of it
+
+- **Timing is now enforced on four benchmarks**: `Engine_CancelReplaceInto`,
+  `Engine_MatchInto`, `TapeReplay/sink=nil` and `OrderBook_LevelChurn`. The last three
+  are new.
+  - `Engine_MatchInto` and `TapeReplay/sink=nil` take their power from §15.2.
+  - `OrderBook_LevelChurn` takes its power from §19.2.
+- **`OrderBook_CancelReplace` stays report-only.** It failed power. A rule that let it
+  through would catch a 1.2× regression about half the time and call that a gate.
+- **Every summary prints the detection floor** measured for each enforced benchmark.
+- **The quiet week for `pull_request` keeps its 2026-10-07 start.** It restarts if a
+  push now falsely fails on a newly enforced benchmark, and §14.1 waits for a full
+  week without one.
+
 ## Appendix: Review points not taken
 
 - **Statistics B6: skip `TestBenchTapeRefmatchAgrees` under `-race` through a build tag.** Measured instead. At n = 50 k, refmatch takes 2.5-3.4 s under race and the engine 0.3 s, which is small enough to run everywhere.
