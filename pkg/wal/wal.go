@@ -311,6 +311,57 @@ type Writer struct {
 	// protocol and can fail it. Test-only: it is how the crash matrix in
 	// docs/LOG-ROTATION.md §3.3 is exercised without killing a process.
 	beforeRotateStep func(step int) error
+	// fsyncHook, when set, replaces f.Sync for the group-commit Sync. Test-only: it
+	// is how docs/WAL-SYNC.md's tests make an fsync slow or fail.
+	fsyncHook func(f *os.File) error
+
+	// The group-commit fsync runs outside mu (docs/WAL-SYNC.md). syncMu keeps syncs
+	// from overlapping; syncing says one holds a file outside the lock, and
+	// syncDone, on mu, wakes the rotation or Close waiting for it to finish. closed
+	// makes a Sync after Close refuse rather than touch a closed file.
+	syncMu    sync.Mutex
+	syncing   bool
+	holdSyncs bool // a rotation or Close is waiting: no new Sync may start
+	syncDone  *sync.Cond
+	closed    bool
+}
+
+// ErrClosed is returned by Sync on a Writer that has been closed.
+var ErrClosed = errors.New("wal: writer is closed")
+
+func (w *Writer) syncCond() *sync.Cond {
+	if w.syncDone == nil {
+		w.syncDone = sync.NewCond(&w.mu)
+	}
+	return w.syncDone
+}
+
+// holdSyncsLocked stops new Syncs from starting and returns once none holds a file
+// outside the lock. Holding first is what makes it finish: waiting alone can lose
+// the lock, each time, to the next Sync in a tight loop. It releases mu while it
+// waits, so it is called only where nothing else can change the writer: before a
+// rotation's first step, on the one goroutine that appends, and in Close. Pair it
+// with releaseSyncsLocked.
+func (w *Writer) holdSyncsLocked() {
+	w.holdSyncs = true
+	for w.syncing {
+		w.syncCond().Wait()
+	}
+}
+
+func (w *Writer) releaseSyncsLocked() {
+	w.holdSyncs = false
+	if w.syncDone != nil {
+		w.syncDone.Broadcast()
+	}
+}
+
+// fsync syncs f through the test hook if one is set.
+func (w *Writer) fsync(f *os.File) error {
+	if w.fsyncHook != nil {
+		return w.fsyncHook(f)
+	}
+	return f.Sync()
 }
 
 // Options configure a Writer's segment set. The zero value is the shipped default:
@@ -915,6 +966,10 @@ func (w *Writer) append(e Entry) (int64, error) {
 // else is writing this set, and the right answer is to fail the append (which halts
 // the engine) rather than to overwrite a file that may hold records.
 func (w *Writer) rotateLocked(base int64) error {
+	// Before anything changes: a Sync may be fsyncing the active file outside the
+	// lock, and this rotation is about to close it (docs/WAL-SYNC.md §2.2).
+	w.holdSyncsLocked()
+	defer w.releaseSyncsLocked()
 	if base >= 1e16 {
 		return fmt.Errorf("wal: sequence %d needs more than %d digits, which the segment naming cannot express", base, segDigits)
 	}
@@ -1263,10 +1318,55 @@ func (w *Writer) AppendSetPhase(phase matching.EngineState) (int64, error) {
 // a record into the middle of a torn one. Latching also stops the engine flapping
 // open and closed as space transiently appears; clearing it takes a restart, which
 // is where an operator gets to decide whether the disk is actually fixed.
+//
+// The fsync itself runs outside w.mu (docs/WAL-SYNC.md), so appends carry on while the
+// disk works. The promise is unchanged: when Sync returns nil, every record appended
+// before it was called is durable. Records appended during its fsync may or may not
+// be covered by it; the next Sync covers them.
 func (w *Writer) Sync() error {
+	w.syncMu.Lock()
+	defer w.syncMu.Unlock()
+
+	w.mu.Lock()
+	for w.holdSyncs {
+		w.syncCond().Wait()
+	}
+	if w.closed {
+		w.mu.Unlock()
+		return ErrClosed
+	}
+	if w.failed != nil {
+		err := w.failed
+		w.mu.Unlock()
+		return err
+	}
+	if err := w.w.Flush(); err != nil {
+		w.failed = fmt.Errorf("wal: %s is no longer being journalled and this writer will not be used again: %w", w.stem, err)
+		err := w.failed
+		w.mu.Unlock()
+		return err
+	}
+	// The file the flush wrote to. A rotation waits for syncing to clear before it
+	// closes this file, so it stays open for the fsync below.
+	f := w.f
+	w.syncing = true
+	w.mu.Unlock()
+
+	err := w.fsync(f)
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.syncLocked()
+	w.syncing = false
+	if w.syncDone != nil {
+		w.syncDone.Broadcast()
+	}
+	if err != nil {
+		if w.failed == nil {
+			w.failed = fmt.Errorf("wal: %s is no longer being journalled and this writer will not be used again: %w", w.stem, err)
+		}
+		return w.failed
+	}
+	return nil
 }
 
 func (w *Writer) syncLocked() error {
@@ -1277,7 +1377,7 @@ func (w *Writer) syncLocked() error {
 		w.failed = fmt.Errorf("wal: %s is no longer being journalled and this writer will not be used again: %w", w.stem, err)
 		return w.failed
 	}
-	if err := w.f.Sync(); err != nil {
+	if err := w.fsync(w.f); err != nil {
 		w.failed = fmt.Errorf("wal: %s is no longer being journalled and this writer will not be used again: %w", w.stem, err)
 		return w.failed
 	}
@@ -1322,6 +1422,9 @@ func (w *Writer) ActiveSegment() (path string, base int64) {
 func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.holdSyncsLocked()
+	w.closed = true
+	defer w.releaseSyncsLocked() // a Sync waiting on the hold then sees closed
 	err := w.syncLocked()
 	if cerr := w.f.Close(); err == nil {
 		err = cerr

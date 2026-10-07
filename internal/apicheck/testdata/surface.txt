@@ -1194,6 +1194,7 @@ wal.Entry.UserID string
 wal.EntryKind type
 wal.ErrArchiveIsTheLog var
 wal.ErrBelowFloor var
+wal.ErrClosed var
 wal.ErrCorrupt var
 wal.ErrIcebergReserveUnknown var
 wal.ErrLogGap var
