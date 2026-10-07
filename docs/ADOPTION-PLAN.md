@@ -35,7 +35,7 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
 - [x] **1.1 `LANDSCAPE.md`.** *(done 2026-10-07)* The survey of Go, Rust and C++ books (and exchange-core)
   as evidence, every claim cited, dated, with what each published number measures.
   *Done when:* committed and linked from the docs index.
-- [ ] **1.2 A portable C interface.** A `c-shared` build of the engine behind a small C
+- [x] **1.2 A portable C interface.** *(done 2026-10-07; [`C-API.md`](C-API.md))* A `c-shared` build of the engine behind a small C
   ABI (submit, cancel, replace, events out), in our own code, with a Go test that drives
   it through cgo and checks the OBDG digest of the bench tape matches the native
   engine's. It is shaped so that an adapter for the flash1 harness is a thin shim.
