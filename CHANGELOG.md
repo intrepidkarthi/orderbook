@@ -9,6 +9,29 @@ versions may include breaking changes).
 
 ### Added
 
+- **The benchmark gate covers more.** It now runs three more groups:
+  - **The event path:** a second tape replay with a counting `EventSink` attached, the
+    configuration the docs recommend embedding. It costs about 8 more allocations and a
+    few percent of time over 50,000 commands.
+  - **`pkg/wal` allocations, in two classes:** per-command benchmarks are gated
+    exactly, and whole-log ones (checkpoint, read, replay, snapshot, recovery) with
+    16 + 0.01% of base. `RestartWithRetention` is left out for its 200 s cost.
+  - **One shared probe:** `cmd/obsoak` and the gate now use one copy of the machine
+    probe, in `internal/probe`.
+
+  Timing enforcement is unchanged.
+
+### Fixed
+
+- **`TestSnapshotDurationIsObserved` no longer fails on a busy runner.** It failed both
+  race jobs of one CI run on a docs-only commit:
+  - It compared the median of three recorded snapshot writes against one write the test
+    timed afterwards. It now times its own writes while the venue is writing, and
+    compares median to median.
+  - It required a histogram count to equal a failure count. The two can differ by one
+    when shutdown lands mid-tick, so the test now allows a difference of one. The
+    defect it guards against would roughly double the count.
+
 - **The benchmark gate now fails pushes, for what its calibration cleared.** Sixty A/A
   runs on `ubuntu-latest`, across six CPU models, produced no false failure. Under a
   rule written down before the data ([BENCH-GATE.md](docs/BENCH-GATE.md) §14.2), that
