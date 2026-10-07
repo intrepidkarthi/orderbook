@@ -80,9 +80,11 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   publish to PyPI.
   *Done 2026-10-07* ([`PYTHON.md`](PYTHON.md)): 14 tests, among them bench-basic-v1
   through Python to the committed digest, green locally and on CI (Python 3.9).
-- [ ] **2.2 ITCH 5.0 replay.** A parser for the add, execute, cancel, delete and
+- [x] **2.2 ITCH 5.0 replay.** A parser for the add, execute, cancel, delete and
   replace messages, an example that rebuilds a book from a file, and a benchmark.
   Tested on a synthetic fixture; a real NASDAQ sample is fetched and replayed only on CI.
+  *Done 2026-10-07* ([`ITCH.md`](ITCH.md)): 50 M messages of a NASDAQ day decoded on CI
+  with no anomaly; AAPL's rebuilt book ends uncrossed.
 - [ ] **2.3 FIX 4.4 order entry** (issue #6). `pkg/fix`: tag=value with BodyLength and
   CheckSum verified, NewOrderSingle and OrderCancelRequest in, ExecutionReports out of
   the event stream. Session layer out of scope. *Done when:* the issue's checklist holds.

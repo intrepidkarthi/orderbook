@@ -1,6 +1,6 @@
 # ITCH 5.0 Replay — Real Market Data Into the Book
 
-Status: **implemented; step 2.2 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
+Status: **implemented, real NASDAQ day replayed on CI; step 2.2 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
 Author: Karthikeyan NG · 2026-10-07
 
 ## 1. What and why
@@ -107,6 +107,20 @@ with `itchbook`. It reports the counts, the anomaly counters and the rate in the
 summary. It fails only if decoding fails, which would mean the parser and NASDAQ
 disagree on the format. Nothing is downloaded on a maintainer's machine. The file is
 data, but the rule is kept simple.
+
+**First run** ([37593894826](https://github.com/intrepidkarthi/orderbook/actions/runs/37593894826),
+2026-10-07): the first 50,000,000 messages of `01302019.NASDAQ_ITCH50.gz`, 1.55 GB
+uncompressed, with AAPL's book built.
+
+- **Every message decoded.** There were 17 types, among them 21.4 M adds, 20.0 M deletes,
+  3.9 M replaces, 1.5 M cancels and 0.8 M executions.
+- **No anomaly at all.** Not one execution, cancel, delete or replace named an order the
+  book did not hold, and none removed more shares than an order had. An index or
+  quantity mistake would surface here first.
+- **AAPL ends uncrossed.** 39,387 resting orders; best bid 160.83, best ask 160.87.
+- **298 ns per message**, end to end on the runner. That includes the network pipe
+  and `gzip -dc`, and 48.2 M of the messages were skipped as other stocks. It is a
+  pipeline figure, not a book figure; §5's benchmark is the book figure.
 
 ## 7. Not in this step
 
