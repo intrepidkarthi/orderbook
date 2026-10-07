@@ -2878,6 +2878,12 @@ clock was 46% of the match path; a stop cascade ran over an empty stop book afte
 every match; and the order index was a Go map where a purpose-built one is 12×
 faster. On the same machine and the same 200,000-order book, cancel is now ~3×
 faster than liquibook's C++ book and at parity with `geseq/orderbook`.
+*(Qualified 2026-10-07. Liquibook's cancel scans the orders at its price, and about 50
+orders shared each level in that preload, so the ratio measured queue depth as much
+as the two engines. It was a local run of third-party code and cannot be repeated
+under this project's rules. On a whole tape replayed on CI, geseq is about 3× faster
+than this engine; see [`docs/CROSS-ENGINE.md`](docs/CROSS-ENGINE.md) and
+[`docs/LANDSCAPE.md`](docs/LANDSCAPE.md) §6.)*
 
 **A note on how most of this was found.** Six of the ten fixes below came from
 building the next feature and asking what it would be sitting on, not from testing

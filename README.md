@@ -287,6 +287,20 @@ goroutine. See [docs/INTEGRATION.md](docs/INTEGRATION.md).
 
 ## Performance
 
+Every number on this page answers a narrower question than "how fast is it". This is
+the question each one answers:
+
+| Number | What it measures | Machine | Source |
+|---|---|---|---|
+| Microbenchmark ns/op | One in-process call into the core, at a stated book depth | Apple M4, go1.23.5 | `make bench`, [BENCHMARKS.md](docs/BENCHMARKS.md#results) |
+| p50 · p99 · p999 | Per-operation latency of `Match`/`Cancel` on a ~90%-cancel flow, warm book | Apple M4 | [BENCHMARKS.md](docs/BENCHMARKS.md#tail-latency-by-scenario) |
+| Books × cores | Aggregate throughput of N books, each behind its own queue | Apple M4, `GOMAXPROCS=4` | `BenchmarkShards_Scaling` |
+| Cross-engine replay | Whole replay of one 50,000-command tape, beside three other engines, after all four produce the same trades and book | Shared CI runner | [CROSS-ENGINE.md](docs/CROSS-ENGINE.md) |
+| Bench gate | Base against head on one runner, as ratios; never an absolute figure | Shared CI runner | [BENCH-GATE.md](docs/BENCH-GATE.md) |
+
+None of them includes the network, the wire codec, the order-entry session or the
+write-ahead log unless it says so.
+
 Core-library microbenchmarks (Apple M4, `go1.23.5 darwin/arm64`, single-threaded):
 
 | Benchmark | ns/op | allocs/op | ~ops/sec |
@@ -361,6 +375,38 @@ the queue — so past core count the machine is spent on the handoff rather than
 matching. Adding books beyond the core count buys queue headroom, not throughput.
 The per-book figure is also not comparable to the single-threaded table above: it is
 a different workload, and both the queue handoff and order allocation are inside it.
+
+**Against other engines.** Microbenchmarks from different projects measure different
+things on different machines, so this repository does not compare them
+([LANDSCAPE.md](docs/LANDSCAPE.md) §6). It compares engines on one tape instead.
+`bench-basic-v1` is 50,000 limit orders and cancels that any engine can express. Each
+engine is built at a pinned commit on the same CI runner, in the same job, interleaved
+over 11 rounds. An engine is timed only after its trades and final book reproduce this
+one's digest exactly.
+
+| Engine | Language | Same trades and book | Median replay |
+|---|---|---|---:|
+| [CppTrader](https://github.com/chronoxor/CppTrader) | C++ | yes | 3.86 ms |
+| [geseq/orderbook](https://github.com/geseq/orderbook) | Go | yes | 4.56 ms |
+| this engine | Go | yes | 12.69 ms |
+| [OrderBook-rs](https://github.com/joaquinbejar/OrderBook-rs) | Rust | yes | 45.68 ms |
+
+[CI run 37588666344](https://github.com/intrepidkarthi/orderbook/actions/runs/37588666344),
+AMD EPYC 9V74, 4 vCPUs, one shared runner. On this tape this engine is about 3× slower
+than geseq and CppTrader. It is reported because it was measured, and finding where
+the time goes is the next performance step. The table ranks nothing outside this tape.
+What each adapter pays inside its timed loop is in
+[CROSS-ENGINE.md](docs/CROSS-ENGINE.md) §8.
+
+Facts about the same three engines, from their source at the pinned commits:
+
+| | this engine | geseq/orderbook | OrderBook-rs | CppTrader |
+|---|---|---|---|---|
+| License | MIT | MIT | MIT | MIT |
+| Price type | `int64` ticks | fixed-point, 8 dp | `u128` | `uint64` |
+| Self-trade prevention | yes | no | yes | no |
+| Book reports original and filled quantity | yes | remaining only | remaining only | yes |
+| Tagged releases | yes | no | yes | yes |
 
 Reproduce with `make bench`. CI runs the benchmarks on every push. Methodology
 and full results: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).

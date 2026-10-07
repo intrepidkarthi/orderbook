@@ -953,6 +953,12 @@ Assert after every command:
 > two real optimizations — survives only as prose in `CHANGELOG.md` (v0.13.0) and
 > **cannot be re-run**. That is the single most load-bearing gap in this milestone,
 > because it is the one that makes a published comparison unfalsifiable.
+>
+> *Update 2026-10-07:* it exists now, and it can be re-run.
+> [`CROSS-ENGINE.md`](CROSS-ENGINE.md) replays one tape through this engine, geseq,
+> OrderBook-rs and CppTrader on CI, after checking that all four produce the same
+> trades and book. geseq is about 3× faster on it, not at parity, and the liquibook
+> ratio is qualified where it was claimed.
 
 Create a shared benchmark harness for Go, C++, and Rust.
 
