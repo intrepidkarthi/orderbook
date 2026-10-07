@@ -33,10 +33,18 @@ const (
 	connsRefusedMetric     = "obgw_connections_refused_total"
 	walAppendLatencyMetric = "obgw_wal_append_latency_ns"
 	walSyncLatencyMetric   = "obgw_wal_sync_latency_ns"
-	snapshotAgeMetric      = "orderbook_snapshot_age_seconds"
-	snapshotDurationMetric = "obgw_snapshot_duration_ns"
-	snapshotFailuresMetric = "obgw_snapshot_failures_total"
-	recoveryDurationMetric = "obgw_recovery_duration_ns"
+	// The stages of docs/STAGES.md: a command's wait in the Runner's queue and its
+	// apply, both per command and across every book; a publisher batch's wait and
+	// fan-out, per batch. With the two WAL histograms they split where a command's
+	// time went.
+	stageQueueMetric         = "obgw_stage_queue_ns"
+	stageMatchMetric         = "obgw_stage_match_ns"
+	stagePublishWaitMetric   = "obgw_stage_publish_wait_ns"
+	stagePublishFanoutMetric = "obgw_stage_publish_fanout_ns"
+	snapshotAgeMetric        = "orderbook_snapshot_age_seconds"
+	snapshotDurationMetric   = "obgw_snapshot_duration_ns"
+	snapshotFailuresMetric   = "obgw_snapshot_failures_total"
+	recoveryDurationMetric   = "obgw_recovery_duration_ns"
 	// obgw_ rather than orderbook_: it is a fact only this process knows, because
 	// this process is what read the log and decided those records were insufficient.
 	icebergReserveUnknownMetric = "obgw_recovery_iceberg_reserve_unknown_total"

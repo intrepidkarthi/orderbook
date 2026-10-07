@@ -361,6 +361,18 @@ func NewServer(cfg Config) (*Server, error) {
 	// wrapping the handlers is the difference between metrics that can disagree with
 	// the engine and metrics that cannot.
 	col := observability.NewCollector()
+	// Stage attribution (docs/STAGES.md). The queue and match histograms are shared
+	// by every book's Runner; the publish pair is fed by the one publisher.
+	stageQueue, stageMatch := col.Histogram(stageQueueMetric), col.Histogram(stageMatchMetric)
+	observeStages := func(q, m time.Duration) {
+		stageQueue.Observe(q)
+		stageMatch.Observe(m)
+	}
+	publishWait, publishFanout := col.Histogram(stagePublishWaitMetric), col.Histogram(stagePublishFanoutMetric)
+	pub.ObservePublish(func(w, f time.Duration) {
+		publishWait.Observe(w)
+		publishFanout.Observe(f)
+	})
 	// The naming index goes FIRST, and the order is load-bearing. It runs on the
 	// matching goroutine and makes an order addressable by its client's own id the
 	// moment the engine accepts it; everything after it may lag. Behind the publisher
@@ -577,7 +589,7 @@ func NewServer(cfg Config) (*Server, error) {
 		// pointer, so the Runner's `log != nil` check passes and the first command
 		// dereferences nil. This is the standard Go typed-nil trap and it cost a
 		// segfault on the first run with durability disabled.
-		rc := matching.RunnerConfig{Engine: eng, QueueSize: 8192, LastApplied: recoveredThrough}
+		rc := matching.RunnerConfig{Engine: eng, QueueSize: 8192, LastApplied: recoveredThrough, ObserveStages: observeStages}
 		if w != nil {
 			// timedLog goes INSIDE syncingLog, never outside. Outside, the append
 			// histogram would contain syncingLog's fsync and would be a copy of the
