@@ -1,0 +1,30 @@
+  (empty book)
+
+eng.Process(limit("alice", types.SideSell, 101, 5))
+  -> NEW
+  ask  101    5  alice:5
+  ------------
+
+eng.Process(limit("bob", types.SideSell, 101, 2))
+  -> NEW
+  ask  101    7  alice:5 bob:2
+  ------------
+
+eng.Process(limit("carol", types.SideBuy, 99, 4))
+  -> NEW
+  ask  101    7  alice:5 bob:2
+  ------------
+  bid   99    4  carol:4
+
+eng.Process(limit("dave", types.SideBuy, 101, 6))
+  -> FILLED, traded 5 @ 101, traded 1 @ 101
+  ask  101    1  bob:1
+  ------------
+  bid   99    4  carol:4
+
+eng.Process(limit("erin", types.SideBuy, 101, 1).AsPostOnly())
+  -> REJECTED (post-only order would cross the spread)
+  ask  101    1  bob:1
+  ------------
+  bid   99    4  carol:4
+

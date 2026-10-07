@@ -26,6 +26,18 @@ layers around it. It has never run a live market, and
 [what that costs you](#experimental-use-at-your-own-risk) is written down rather
 than implied.
 
+| What | Supported |
+|---|---|
+| Order types | limit, market; stop and stop-limit; trailing stop; iceberg; one-cancels-other; pegged to bid, ask or mid (priced at entry, not re-pegged) |
+| Time in force | GTC, IOC, FOK, DAY, GTD |
+| Flags | post-only |
+| Amend | cancel; reduce, keeping queue priority; replace, losing it; cancel all for a user |
+| Matching | price-time (FIFO), or pro-rata at each level (`Config.ProRata`) |
+| Self-trade prevention | cancel newest, cancel oldest, cancel both, decrement, or allow |
+| Sessions | halt, cancel-only, and a uniform-price call auction (`pkg/auction`) |
+| Not provided | all-or-none, minimum fill per order, hidden (non-displayed) orders, re-pegging |
+| Reached from | Go; C and Python ([C-API](docs/C-API.md), [Python](docs/PYTHON.md)); TCP ([obgw](docs/PROTOCOL.md)); FIX 4.4 order entry ([`pkg/fix`](docs/FIX.md)) |
+
 ---
 
 ## Installation
@@ -66,17 +78,50 @@ The engine works in integer ticks and lots. Pass them directly, or use an
 API excerpts; [examples/basic](examples/basic/main.go) is the complete program
 with imports and error handling.
 
+Each call, then the book it leaves ([examples/quickstart](examples/quickstart/main.go);
+the output below is that program's, checked by its test):
+
 ```go
 eng := matching.NewEngine(matching.DefaultConfig("BTC-USD"))
 
-// A resting sell, then a crossing buy that trades against it at the maker price.
-sell, _ := types.NewOrder("mm", "BTC-USD", types.SideSell, types.OrderTypeLimit, 100, 5, types.TIFGoodTillCancel)
-eng.Process(sell)
+eng.Process(limit("alice", types.SideSell, 101, 5)) // limit = types.NewOrder(..., OrderTypeLimit, ..., TIFGoodTillCancel)
+eng.Process(limit("bob", types.SideSell, 101, 2))   // same price, behind alice in time
+eng.Process(limit("carol", types.SideBuy, 99, 4))
+eng.Process(limit("dave", types.SideBuy, 101, 6))   // crosses: alice first, then bob
+eng.Process(limit("erin", types.SideBuy, 101, 1).AsPostOnly())
+```
 
-buy, _ := types.NewOrder("taker", "BTC-USD", types.SideBuy, types.OrderTypeLimit, 101, 3, types.TIFGoodTillCancel)
-res := eng.Process(buy) // res.Trades, res.Status, res.RejectionReason
+```text
+  (empty book)
 
-bid, qty, ok := eng.BestBid()
+eng.Process(limit("alice", types.SideSell, 101, 5))
+  -> NEW
+  ask  101    5  alice:5
+  ------------
+
+eng.Process(limit("bob", types.SideSell, 101, 2))
+  -> NEW
+  ask  101    7  alice:5 bob:2
+  ------------
+
+eng.Process(limit("carol", types.SideBuy, 99, 4))
+  -> NEW
+  ask  101    7  alice:5 bob:2
+  ------------
+  bid   99    4  carol:4
+
+eng.Process(limit("dave", types.SideBuy, 101, 6))
+  -> FILLED, traded 5 @ 101, traded 1 @ 101
+  ask  101    1  bob:1
+  ------------
+  bid   99    4  carol:4
+
+eng.Process(limit("erin", types.SideBuy, 101, 1).AsPostOnly())
+  -> REJECTED (post-only order would cross the spread)
+  ask  101    1  bob:1
+  ------------
+  bid   99    4  carol:4
+
 ```
 
 Decimals at the boundary, concurrent submission, and the zero-allocation path:
