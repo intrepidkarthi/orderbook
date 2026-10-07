@@ -169,53 +169,62 @@ func TestRestartCostIsBoundedByRetentionNotByHistory(t *testing.T) {
 		// Both rows must exceed the retained budget, or the small one measures a set
 		// retention never had to touch and the comparison is between two different
 		// things. 60,000 records of churn is roughly 11 MiB against a 4 MiB budget.
-		small = 60_000
-		large = 600_000 // 10x the history
+		smallHistory = 60_000
+		largeHistory = 600_000 // 10x the history
 	)
 
-	measure := func(total int, retainBytes int64) (time.Duration, int64) {
-		dir := t.TempDir()
-		stem, snapPath := buildRetainedChurnLog(t, dir, total, tail, segBytes, retainBytes)
-		info, err := Stat(stem)
-		if err != nil {
-			t.Fatalf("Stat: %v", err)
+	// Both histories are built first and then recovered alternately, seven times
+	// each, keeping each one's fastest. Measured one after the other, a burst of
+	// load from a parallel test run landed on one side only: 2.62x on 2026-10-07,
+	// three times that day, on a fixture whose real separation is an order of
+	// magnitude. Interleaved, both sides see the same machine.
+	pair := func(retainBytes int64) (small, large time.Duration, bytesSmall, bytesLarge int64) {
+		type fixture struct{ stem, snap string }
+		build := func(total int) (fixture, int64) {
+			stem, snap := buildRetainedChurnLog(t, t.TempDir(), total, tail, segBytes, retainBytes)
+			info, err := Stat(stem)
+			if err != nil {
+				t.Fatalf("Stat: %v", err)
+			}
+			return fixture{stem, snap}, info.Bytes
 		}
-		// Two runs, the faster kept: the first pays for a cold page cache.
-		best := time.Duration(1<<62 - 1)
-		for i := 0; i < 3; i++ {
+		fs, bs := build(smallHistory)
+		fl, bl := build(largeHistory)
+		recover := func(f fixture) time.Duration {
 			start := time.Now()
-			if _, err := Recover(tapeCfg(), snapPath, stem); err != nil {
+			if _, err := Recover(tapeCfg(), f.snap, f.stem); err != nil {
 				t.Fatalf("Recover: %v", err)
 			}
-			if d := time.Since(start); d < best {
-				best = d
-			}
+			return time.Since(start)
 		}
-		return best, info.Bytes
+		small, large = time.Duration(1<<62-1), time.Duration(1<<62-1)
+		for i := 0; i < 7; i++ {
+			small = min(small, recover(fs))
+			large = min(large, recover(fl))
+		}
+		return small, large, bs, bl
 	}
 
-	onSmall, bytesSmall := measure(small, retain)
-	onLarge, bytesLarge := measure(large, retain)
-	t.Logf("retention on:  %6d records of history -> %v, %.1f MiB retained", small, onSmall, float64(bytesSmall)/(1<<20))
-	t.Logf("retention on:  %6d records of history -> %v, %.1f MiB retained", large, onLarge, float64(bytesLarge)/(1<<20))
+	onSmall, onLarge, bytesSmall, bytesLarge := pair(retain)
+	t.Logf("retention on:  %6d records of history -> %v, %.1f MiB retained", smallHistory, onSmall, float64(bytesSmall)/(1<<20))
+	t.Logf("retention on:  %6d records of history -> %v, %.1f MiB retained", largeHistory, onLarge, float64(bytesLarge)/(1<<20))
 
-	offSmall, offBytesSmall := measure(small, 0)
-	offLarge, offBytesLarge := measure(large, 0)
-	t.Logf("retention off: %6d records of history -> %v, %.1f MiB retained", small, offSmall, float64(offBytesSmall)/(1<<20))
-	t.Logf("retention off: %6d records of history -> %v, %.1f MiB retained", large, offLarge, float64(offBytesLarge)/(1<<20))
+	offSmall, offLarge, offBytesSmall, offBytesLarge := pair(0)
+	t.Logf("retention off: %6d records of history -> %v, %.1f MiB retained", smallHistory, offSmall, float64(offBytesSmall)/(1<<20))
+	t.Logf("retention off: %6d records of history -> %v, %.1f MiB retained", largeHistory, offLarge, float64(offBytesLarge)/(1<<20))
 
 	if ratio := float64(onLarge) / float64(onSmall); ratio > 1.25 {
 		t.Errorf("recovery took %.2fx longer for %dx the total history with retention fixed at %d MiB (%v -> %v).\n"+
 			"Retention has stopped bounding the read, which is the only thing this slice is for.\n"+
 			"Check that the oldest segments are actually being deleted (floor %d) and that recovery reads only what is on disk.",
-			ratio, large/small, retain>>20, onSmall, onLarge, bytesLarge)
+			ratio, largeHistory/smallHistory, retain>>20, onSmall, onLarge, bytesLarge)
 	}
 	// The control. If this does not grow, the fixture is not producing more history
 	// and the assertion above is measuring nothing.
 	if ratio := float64(offLarge) / float64(offSmall); ratio < 3 {
 		t.Errorf("with retention OFF, %dx the history only cost %.2fx the recovery time (%v -> %v, %.1f -> %.1f MiB).\n"+
 			"The fixture is not growing the log, so the retention-on assertion is vacuous.",
-			large/small, ratio, offSmall, offLarge, float64(offBytesSmall)/(1<<20), float64(offBytesLarge)/(1<<20))
+			largeHistory/smallHistory, ratio, offSmall, offLarge, float64(offBytesSmall)/(1<<20), float64(offBytesLarge)/(1<<20))
 	}
 	if offBytesLarge <= bytesLarge {
 		t.Errorf("the retained set (%d bytes) is not smaller than the unretained one (%d bytes)", bytesLarge, offBytesLarge)
