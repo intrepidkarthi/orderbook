@@ -52,6 +52,49 @@ backtest.Result.Sharpe float64
 backtest.Result.Steps int
 backtest.Result.Volume int64
 backtest.Run(cfg Config) *Result
+fix.(*Builder).Add(tag int, value string) *Builder
+fix.(*Builder).AddInt(tag int, v int64) *Builder
+fix.(*Builder).Bytes() []byte
+fix.(*Entry).Handle(raw []byte) error
+fix.(*FieldError).Error() string
+fix.(*Reporter).OnEvents(evs []matching.Event)
+fix.(Message).Get(tag int) (string, bool)
+fix.(Message).Type() string
+fix.Builder struct
+fix.CancelRequest struct
+fix.CancelRequest.ClOrdID string
+fix.CancelRequest.OrigClOrdID string
+fix.CancelRequest.Side types.Side
+fix.CancelRequest.Symbol string
+fix.CancelRequest.User string
+fix.DecodeNewOrderSingle(m Message, in types.Instrument) (*types.Order, error)
+fix.DecodeOrderCancelRequest(m Message) (CancelRequest, error)
+fix.Entry struct
+fix.ErrBeginString var
+fix.ErrBodyLength var
+fix.ErrCheckSum var
+fix.ErrGarbled var
+fix.ErrIncomplete var
+fix.ErrWrongType var
+fix.Field struct
+fix.Field.Tag int
+fix.Field.Value string
+fix.FieldError struct
+fix.FieldError.Reason string
+fix.FieldError.Tag int
+fix.Message struct
+fix.Message.Fields []Field
+fix.NewBuilder(msgType string) *Builder
+fix.NewEntry(e *matching.Engine, rep *Reporter) *Entry
+fix.NewReporter(cfg ReporterConfig, out Out) *Reporter
+fix.Out func type
+fix.Parse(b []byte) (Message, int, error)
+fix.Reporter struct
+fix.ReporterConfig struct
+fix.ReporterConfig.Clock func() time.Time
+fix.ReporterConfig.Instrument types.Instrument
+fix.ReporterConfig.SenderCompID string
+fix.SOH const
 gateway.(*Gateway).Allow(o *types.Order, now time.Time) bool
 gateway.(*Gateway).Cancel(orderID int64, user string) (*types.Order, error)
 gateway.(*Gateway).IsTaker(o *types.Order) bool

@@ -1,6 +1,6 @@
 # FIX 4.4 Order Entry — the Codec, Without the Session
 
-Status: **specified; step 2.3 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md), issue #6** ·
+Status: **implemented; step 2.3 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md), issue #6** ·
 Author: Karthikeyan NG · 2026-10-07
 
 ## 1. Scope
@@ -73,9 +73,20 @@ ExecutionReports, one per affected order, each addressed to that order's owner:
   It does not read them through an event's `*Order`, because that pointer shows the
   order's state at publication, not at the event ([`BENCH-GATE.md`](BENCH-GATE.md)
   §3.2).
-- **OrdRejReason** follows `pkg/orderentry`'s mapping onto the FIX code list: 1 unknown
-  symbol, 3 exceeds limit, 6 duplicate order, 11 unsupported order characteristic, and
-  99 other. Text is the engine's error.
+- **OrdRejReason** goes through `pkg/orderentry`'s mapping, so the two protocols cannot
+  drift apart:
+
+  | Code | Meaning | Engine refusals |
+  |---|---|---|
+  | 2 | exchange closed | halted |
+  | 3 | exceeds limit | too large |
+  | 5 | unknown order | unknown order |
+  | 6 | duplicate order | duplicate ClOrdID |
+  | 11 | unsupported characteristic | a DAY order with no session close |
+  | 13 | incorrect quantity | too small, invalid quantity |
+  | 99 | other | everything else, such as a post-only that would cross |
+
+  Text (58) is the engine's error in every case.
 - **A cancel the engine refuses publishes no event.** So `fix.Entry` answers it with an
   OrderCancelReject: 434=1, CxlRejReason 102 = 1 unknown order or 0 too late to
   cancel.

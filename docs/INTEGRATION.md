@@ -433,7 +433,10 @@ THREAT-MODEL.md §6 for why the boundary is drawn here):
   `types.Order`, and translating the `EventSink` stream back to execution reports /
   market data. `examples/eventfeed` shows the pattern: consume the sequenced event
   stream into an exec-report feed and an order→deal→position projection (the
-  MetaTrader-style lineage). A common deployment is as the **internal ECN behind an
+  MetaTrader-style lineage). **`pkg/fix`** is that pattern on a real wire: FIX 4.4
+  NewOrderSingle and OrderCancelRequest in, ExecutionReport and OrderCancelReject
+  out, with BodyLength and CheckSum verified, and no session layer
+  ([FIX.md](FIX.md)). A common deployment is as the **internal ECN behind an
   MT5 Gateway** — the real price-time crossing venue a B-book broker lacks.
 - **Credit & margin** — buying power, position/notional limits, collateral,
   liquidation selection. The core supplies the *primitives* (`ForceTrade`,
