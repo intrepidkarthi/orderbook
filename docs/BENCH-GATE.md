@@ -970,7 +970,8 @@ measures, about 1.20× on `Engine_CancelReplaceInto`, is printed in every summar
 - Timing failures on the other four still print, marked
   `fail (report only: not calibrated to enforce)`.
 - **Not yet:** the `pull_request` trigger. §14.1 waits for a week of enforced pushes
-  without a false failure, and that week starts with the push that landed this.
+  without a false failure. That week first started on 2026-10-06 and restarted on
+  2026-10-07 after the false failure §16 records.
 
 ## 16. Slice C — written before its code
 
@@ -994,6 +995,16 @@ on timing.
   gated on `pkg/wal`.
 - **One probe.** `internal/probe` holds the ALU loop and the memory walk, and both
   `cmd/obsoak` and `cmd/benchgate` call it, instead of carrying two copies of the loop.
+
+**The first false failure on `main` came from this slice.** The push of `d14f1ed`
+failed: `WriteSnapshot` read 89 on base and 107 on head, on identical code, against the
+slack of 16 in its base's judge. The floor of 80 had landed one commit earlier, but a
+push is judged from its base, so it took effect one push late. The same commit passed a
+dispatched comparison judged by the new floor (102 → 81). The calibrated timing check
+was not involved (`Engine_CancelReplaceInto` 1.000). The cause was slice C's slack
+shipping with M4 measurements before CI had measured the class. §14.1 waits for a week
+of enforced pushes **without** a false failure before `pull_request`, so that week
+restarts on 2026-10-07.
 
 ## Appendix: Review points not taken
 
