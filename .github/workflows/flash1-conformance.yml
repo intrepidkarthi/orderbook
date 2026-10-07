@@ -1,0 +1,118 @@
+name: flash1 conformance
+
+# The bar flash1's roster sets for "conforming" (its README, docs/CONFORMANCE.md):
+# the 34-case conformance gate, the book-state audit, and byte-identical output
+# across many seeds. flash1.yml checks the five canonical hashes nightly; this runs
+# the rest, on dispatch, before anything is submitted (docs/FLASH1.md §5). Every
+# third-party engine it builds is built here and nowhere else.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: "seeds per scenario in the output sweep against Liquibook"
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+env:
+  HARNESS_REPO: https://github.com/flash1-dev/matching-engine-benchmark.git
+  HARNESS_SHA: 60049226c1a1dad127a50a7c12d62baf0377fbaa
+  ADAPTER: intrepidkarthi_adapter.so
+
+jobs:
+  conformance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q g++-14 cmake libboost-dev
+
+      - name: Harness, baselines and the gate's oracle engines
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: |
+          git init -q harness
+          git -C harness remote add origin "$HARNESS_REPO"
+          git -C harness fetch -q --depth 1 origin "$HARNESS_SHA"
+          git -C harness checkout -q FETCH_HEAD
+          cd harness
+          make
+          # The state audit's reference.
+          scripts/build_baselines.sh liquibook quantcup
+          # The conformance gate's oracle: three fast public conformers.
+          for e in cpp_orderbook llc993 hroptatyr_clob; do
+            bash "additional_references/${e}_adapter/build.sh"
+          done
+          ls -1 *_adapter.so
+
+      - name: This engine's adapter
+        run: |
+          CGO_ENABLED=1 go build -buildmode=c-shared -o "harness/$ADAPTER" ./cmd/flash1engine
+          rm -f "harness/${ADAPTER%.so}.h"
+
+      - name: Conformance gate (34 cases)
+        working-directory: harness
+        run: python3 scripts/conformance_check.py "./$ADAPTER" | tee ../gate.txt
+
+      - name: State audit, five scenarios
+        working-directory: harness
+        run: |
+          mkdir -p results
+          fail=0
+          for s in static normal swing-25 swing-40 flash-crash; do
+            ./harness --engine "./$ADAPTER" --scenario "$s" --mode audit \
+              --matcher-core 2 --drainer-core 3 > "audit-$s.txt" 2>&1 || true
+            grep -E "State audit|Correctness|Verdict" "audit-$s.txt" | sed "s/^/$s: /" | tee -a ../audit.txt
+            grep -q "State audit: PASS" "audit-$s.txt" || fail=1
+          done
+          exit $fail
+
+      - name: Output against Liquibook, seed by seed
+        working-directory: harness
+        env:
+          SEEDS: ${{ inputs.seeds }}
+        run: |
+          # The canonical seed has a committed reference; other seeds do not, so each
+          # is compared against Liquibook's canonical output for the same seed and
+          # scenario. The same files the harness hashes, compared byte for byte.
+          bad=0; n=0
+          for seed in $(seq 1 "$SEEDS"); do
+            for s in static normal swing-25 swing-40 flash-crash; do
+              ./harness --baseline liquibook --scenario "$s" --seed "$seed" --mode perf \
+                --write-canonical-output ref.txt > /dev/null 2>&1 || true
+              ./harness --engine "./$ADAPTER" --scenario "$s" --seed "$seed" --mode perf \
+                --write-canonical-output cand.txt > /dev/null 2>&1 || true
+              n=$((n + 1))
+              if [ ! -s ref.txt ] || ! cmp -s ref.txt cand.txt; then
+                bad=$((bad + 1))
+                echo "differs: scenario $s seed $seed" | tee -a ../seeds.txt
+                python3 scripts/explain_divergence.py ref.txt cand.txt | head -20 | tee -a ../seeds.txt || true
+              fi
+              rm -f orders_*_s"$seed"_*.bin
+            done
+          done
+          echo "$((n - bad)) of $n scenario-seeds byte-identical to Liquibook" | tee -a ../seeds.txt
+          [ "$bad" -eq 0 ]
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### flash1 conformance, harness \`${HARNESS_SHA:0:12}\`"
+            echo; echo '**Conformance gate**'; echo '```'; tail -15 gate.txt 2>/dev/null; echo '```'
+            echo; echo '**State audit**'; echo '```'; cat audit.txt 2>/dev/null; echo '```'
+            echo; echo '**Seed sweep**'; echo '```'; tail -25 seeds.txt 2>/dev/null; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
