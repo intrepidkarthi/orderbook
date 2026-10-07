@@ -123,9 +123,12 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   histograms beside the two WAL ones. The first measurement found `Writer.Sync` holding
   the log's mutex through each `fsync`, which stalls the matcher's next append (queue
   p99 ≤ 5 ms on an M4).
-- [ ] **3.4a The `fsync` outside the log's lock.** Spec first: what a group commit must
+- [x] **3.4a The `fsync` outside the log's lock.** Spec first: what a group commit must
   still guarantee when appends continue during its `fsync`. Durability tests, then the
   stage histograms re-measured. Found by 3.4.
+  *Done 2026-10-07* ([`WAL-SYNC.md`](WAL-SYNC.md) §5): WAL append p99 5 ms → 100 µs, the
+  client's p99.9 100 → 25 ms; the match stage rose a bucket, recorded as the next thing to
+  attribute.
 - [ ] **3.5 `pull_request` for the gate**, no earlier than 2026-10-14 and only after a
   week of enforced pushes without a false failure.
 

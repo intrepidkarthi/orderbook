@@ -1,6 +1,6 @@
 # The `fsync` Outside the Log's Lock
 
-Status: **specified; step 3.4a of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
+Status: **implemented and re-measured; step 3.4a of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
 Author: Karthikeyan NG · 2026-10-07
 
 ## 1. What was found
@@ -71,3 +71,43 @@ make it slow or make it fail.
   - dropping `syncMu`.
 - **Re-measured.** The §5 soak of [`STAGES.md`](STAGES.md) runs again, and the queue and
   append tails are reported beside the first measurement.
+
+## 5. What it did (2026-10-07)
+
+**Built as specified, with one addition the first test run forced.** The first version
+had rotation and `Close` wait while `syncing` was set and nothing more. Under a tight
+loop of syncs it hung for over 300 s. Each time a sync finished, the next one took the
+lock before the waiting rotation re-took it, and set `syncing` again. Now a rotation or
+`Close` first sets `holdSyncs`, so no new `Sync` starts, and then waits only for the one
+in flight.
+
+**Tests.**
+- The stall test was watched failing on the old code first: an append during a 150 ms
+  `fsync` took 161 ms. It passes now.
+- `TestSyncsDoNotOverlap` was added after the first sabotage of `syncMu` survived. It
+  makes overlapping syncs observable directly.
+- Five of six sabotages are caught: `fsync` under the lock, rotation not waiting,
+  `Close` not waiting, no latch, and no `syncMu`.
+- The sixth, waiting without the hold, survives. Starvation is a liveness failure that
+  needs the losing interleaving, and no test here can force it. The first version's
+  hang is the evidence the hold is needed.
+- The whole `pkg/wal` and `cmd/obgw` suites pass under `-race`, the rotation crash
+  matrix included.
+
+**Re-measured**, with STAGES.md §5's soak (M4, 2,000 msg/s, group commit, 60 s). Old and
+new builds were run back to back twice. Bucket upper bounds:
+
+| Stage | Old p50 / p90 / p99 | New p50 / p90 / p99 |
+|---|---|---|
+| WAL append | 2 µs / 10–25 µs / **5 ms** | 2–5 µs / 25 µs / **100 µs** |
+| queue wait (first pair) | 10 µs / 1 ms / 5 ms | 5 µs / 250 µs / 1 ms |
+| match | 10 µs / **250 µs** / **500 µs** | 10 µs / **500 µs** / **1 ms** |
+| client end-to-end p99.9 (first pair) | 100 ms | 25 ms |
+
+- **The append no longer waits for the disk.** Its p99 fell fifty-fold in both pairs, and
+  the client's worst tail shrank.
+- **The match stage got a bucket slower, in both pairs.** The matcher now runs while the
+  `fsync` is in flight instead of sitting it out, and the two compete. That is the next
+  thing stage attribution should split. It is recorded rather than averaged into a win.
+- The second pair's queue p99 read 100 ms for **both** builds. That was the machine, not
+  the change.
