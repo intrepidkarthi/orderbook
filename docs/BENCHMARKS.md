@@ -476,6 +476,41 @@ shedding and has least to spare.
 | Best bid/ask read | < 1 µs | 5.8 ns | ✅ |
 | Hot-path allocations | 0 on submit/cancel/match | 0 via `Match`; 0.0002 on cancel; `Process` allocates 4 | ✅ |
 
+## Where a command's time goes in the venue
+
+Stage attribution ([STAGES.md](STAGES.md)), first measured on 2026-10-07. The setup:
+- **Machine:** Apple M4, go1.23.5.
+- **Venue:** `cmd/obgw` with a write-ahead log in its default group-commit mode.
+- **Load:** `cmd/obsoak` with 8 connections at 2,000 messages a second for 60 s: about
+  120,000 commands, a fifth of them marketable.
+- **Reading:** the six histograms, read off `/metrics` at the end. The histograms have
+  fixed buckets, so each figure is the bucket the quantile falls in.
+
+| Stage | Per | p50 ≤ | p90 ≤ | p99 ≤ |
+|---|---|---:|---:|---:|
+| queue wait | command | 10 µs | 1 ms | 5 ms |
+| WAL append | command | 2 µs | 25 µs | 5 ms |
+| match (apply and publish to sinks) | command | 10 µs | 250 µs | 500 µs |
+| publish wait | batch | 10 µs | 25 µs | 50 µs |
+| fan-out | batch | 25 µs | 50 µs | 100 µs |
+| WAL `fsync` | sync (3,031 in 60 s) | 5 ms | 5 ms | 5 ms |
+
+**What it found.** The append's p99 sits in the same bucket as the `fsync`, and the
+queue's tail matches it. The cause is in `pkg/wal`: `Writer.Sync` holds the writer's
+mutex for the whole `fsync`. So each group commit stops the matching goroutine's next
+append until the disk returns, and every command queued behind that append waits too.
+The append histogram is right to contain no `fsync`. What it does contain is the wait
+for one.
+
+Moving the `fsync` out from under the lock is a change to the log's durability path. It
+gets its own spec and tests rather than riding on a measurement step, and the follow-up
+is listed in [ADOPTION-PLAN.md](ADOPTION-PLAN.md).
+
+**Match is the apply plus every sink**, not the engine alone: the client-id index, the
+publisher's copy and the metrics collector all run inside it. The engine's own cost is
+in the microbenchmarks above, at hundreds of nanoseconds. The gap to 250 µs at p90 is
+the next thing to attribute.
+
 ## The durable path
 
 The table above measures the `Engine` directly. Most embedders do not use the

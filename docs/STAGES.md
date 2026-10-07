@@ -1,6 +1,6 @@
 # Stage Attribution — Where a Command's Time Goes in the Venue
 
-Status: **specified; step 3.4 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
+Status: **implemented; first measurement in BENCHMARKS.md; step 3.4 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
 Author: Karthikeyan NG · 2026-10-07
 
 ## 1. The question

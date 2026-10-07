@@ -118,7 +118,14 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   *Done 2026-10-07* (BENCH-GATE §18, §19): 60 A/A runs and 40 power runs. Timing is
   enforced on four benchmarks instead of one; `OrderBook_CancelReplace` failed power
   and stays report-only.
-- [ ] **3.4 Stage attribution.** Queue, match, log and publish delay measured separately.
+- [x] **3.4 Stage attribution.** Queue, match, log and publish delay measured separately.
+  *Done 2026-10-07* ([`STAGES.md`](STAGES.md), [`BENCHMARKS.md`](BENCHMARKS.md)): four new
+  histograms beside the two WAL ones. The first measurement found `Writer.Sync` holding
+  the log's mutex through each `fsync`, which stalls the matcher's next append (queue
+  p99 ≤ 5 ms on an M4).
+- [ ] **3.4a The `fsync` outside the log's lock.** Spec first: what a group commit must
+  still guarantee when appends continue during its `fsync`. Durability tests, then the
+  stage histograms re-measured. Found by 3.4.
 - [ ] **3.5 `pull_request` for the gate**, no earlier than 2026-10-14 and only after a
   week of enforced pushes without a false failure.
 
