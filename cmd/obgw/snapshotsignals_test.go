@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -371,11 +372,29 @@ func TestSnapshotDurationIsObserved(t *testing.T) {
 				t.Fatalf("d%d not accepted", i)
 			}
 		}
-		deadline := time.Now().Add(5 * time.Second)
-		for srv.snapHist.Count() < 3 && time.Now().Before(deadline) {
-			time.Sleep(5 * time.Millisecond)
+		// The test times its OWN writes of the same book while the venue is writing,
+		// one per poll, so contention on the runner lands on both sides of the
+		// comparison. Comparing the venue's median of three writes against one write
+		// taken afterwards failed CI twice in one run: an fsync stall made the median
+		// 25 ms while the test's single write, taken a moment later, took 0.5 ms.
+		var own []float64
+		ownWrite := func() {
+			snap, err := srv.books.first().runner.Checkpoint()
+			if err != nil {
+				t.Fatalf("Checkpoint: %v", err)
+			}
+			start := time.Now()
+			if err := wal.WriteSnapshot(filepath.Join(t.TempDir(), "measure.snap"), snap); err != nil {
+				t.Fatalf("WriteSnapshot: %v", err)
+			}
+			own = append(own, float64(time.Since(start).Nanoseconds()))
 		}
-		if srv.snapHist.Count() < 3 {
+		deadline := time.Now().Add(10 * time.Second)
+		for (srv.snapHist.Count() < 9 || len(own) < 5) && time.Now().Before(deadline) {
+			ownWrite()
+			time.Sleep(40 * time.Millisecond)
+		}
+		if srv.snapHist.Count() < 9 {
 			t.Fatalf("%s_count = %d after several ticks", snapshotDurationMetric, srv.snapHist.Count())
 		}
 		if n := snapFailureCount(t, srv, "X"); n != 0 {
@@ -387,15 +406,8 @@ func TestSnapshotDurationIsObserved(t *testing.T) {
 		// over _count is exact at any magnitude, which is why the alert threshold is
 		// written against it.
 		mean := float64(srv.snapHist.Sum()) / float64(srv.snapHist.Count())
-		snap, err := srv.books.first().runner.Checkpoint()
-		if err != nil {
-			t.Fatalf("Checkpoint: %v", err)
-		}
-		start := time.Now()
-		if err := wal.WriteSnapshot(filepath.Join(t.TempDir(), "measure.snap"), snap); err != nil {
-			t.Fatalf("WriteSnapshot: %v", err)
-		}
-		measured := float64(time.Since(start).Nanoseconds())
+		sort.Float64s(own)
+		measured := own[len(own)/2] // the median of the test's own writes
 
 		// Two statistics, and which bound gets which is the point.
 		//
@@ -413,15 +425,15 @@ func TestSnapshotDurationIsObserved(t *testing.T) {
 		// on a 20-order book the buckets are nowhere near saturating.
 		med := float64(srv.snapHist.Quantile(0.5))
 		if mean*20 < measured {
-			t.Errorf("mean recorded duration %.0f ns against %.0f ns measured by the test; more than an order of "+
+			t.Errorf("mean recorded duration %.0f ns against a median %.0f ns measured by the test; more than an order of "+
 				"magnitude too small means this is not timing the write", mean, measured)
 		}
 		if med > measured*20 {
-			t.Errorf("median recorded duration %.0f ns against %.0f ns measured by the test; the typical write "+
+			t.Errorf("median recorded duration %.0f ns against a median %.0f ns measured by the test; the typical write "+
 				"being that much slower means this is timing more than the write", med, measured)
 		}
-		t.Logf("snapshot duration median %.0f ns, mean %.0f ns over %d writes; the test's own write took %.0f ns",
-			med, mean, srv.snapHist.Count(), measured)
+		t.Logf("snapshot duration median %.0f ns, mean %.0f ns over %d writes; the test's own %d writes, median %.0f ns",
+			med, mean, srv.snapHist.Count(), len(own), measured)
 	})
 
 	t.Run("a failed write is counted and never timed", func(t *testing.T) {
@@ -455,7 +467,12 @@ func TestSnapshotDurationIsObserved(t *testing.T) {
 		if failures < 4 {
 			t.Fatalf("only %d failures on a book whose snapshot path is a directory", failures)
 		}
-		if got := srv.snapHist.Count(); got != failures {
+		// Within one, not equal: a tick writes the books in turn, and Close can land
+		// between the healthy book's success and the broken book's failure, which
+		// leaves the count one above. That was a CI failure (5 against 4) on a venue
+		// with nothing wrong. The defect this names, a failed write timed as if it had
+		// succeeded, would put the count near TWICE the failures.
+		if got := srv.snapHist.Count(); got < failures-1 || got > failures+1 {
 			t.Errorf("%s_count = %d against %d failures on the other book; every tick writes exactly one of "+
 				"each, so a failed write is being timed as if it had succeeded", snapshotDurationMetric, got, failures)
 		}
