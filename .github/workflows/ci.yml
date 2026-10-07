@@ -58,3 +58,24 @@ jobs:
       # Reproduce locally with the same command: `make cover-check`.
       - name: Coverage floor
         run: make cover-check
+
+  python:
+    name: python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      # Builds libobook from this commit into the package and runs the tests
+      # (docs/PYTHON.md §4), including bench-basic-v1 through Python to the committed
+      # digest. 3.9 is the oldest Python the package claims.
+      - name: obook
+        run: make python

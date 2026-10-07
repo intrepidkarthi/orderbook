@@ -1,0 +1,30 @@
+# The distribution name and the wheel layout are not settled: publishing is a
+# maintainer decision (docs/PYTHON.md §5). This builds an sdist/wheel of the pure
+# Python package; the native library is built by `make python` and is not yet
+# packaged per platform.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "obook"
+version = "0.0.0"
+description = "Python bindings for the intrepidkarthi/orderbook matching engine, over its C ABI"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+[project.urls]
+Source = "https://github.com/intrepidkarthi/orderbook"
+Documentation = "https://github.com/intrepidkarthi/orderbook/blob/main/docs/PYTHON.md"
+
+[tool.setuptools]
+packages = ["obook"]
+
+[tool.setuptools.package-data]
+obook = ["libobook.so", "libobook.dylib"]

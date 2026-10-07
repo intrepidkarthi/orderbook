@@ -1,6 +1,6 @@
 # Python Bindings — the C ABI, From the Standard Library
 
-Status: **specified; step 2.1 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
+Status: **implemented, tested on CI; step 2.1 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
 Author: Karthikeyan NG · 2026-10-07
 
 ## 1. Why, and why this shape

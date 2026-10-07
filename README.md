@@ -36,6 +36,11 @@ go get github.com/intrepidkarthi/orderbook/pkg/matching
 
 Requires Go 1.23 or later.
 
+**From C or Python.** `cmd/libobook` builds the engine as a C shared library behind a
+versioned ABI ([docs/C-API.md](docs/C-API.md)). `python/` binds it with the standard
+library only: `make python` builds the library and runs the bindings' tests
+([docs/PYTHON.md](docs/PYTHON.md)). The bindings are not on PyPI yet.
+
 Before evaluating a change or trusting a claim, run the local gate:
 
 ```sh

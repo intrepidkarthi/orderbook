@@ -92,6 +92,12 @@ bench-check: ## Gate: benchmarks of the working tree against the merge base (ENF
 demo: ## Run the CLI demo (cmd/obdemo)
 	$(GO) run ./cmd/obdemo
 
+.PHONY: python
+python: ## Build the C library into python/obook and run the Python tests
+	$(GO) build -buildmode=c-shared -o python/obook/libobook$(if $(filter Darwin,$(shell uname -s)),.dylib,.so) ./cmd/libobook
+	rm -f python/obook/libobook.h
+	cd python && python3 -m unittest discover -s tests -v
+
 .PHONY: check
 check: tidy vet test race cover-check ## Full local gate: tidy + vet + test + race + coverage floor
 

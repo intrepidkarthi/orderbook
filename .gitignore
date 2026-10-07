@@ -50,3 +50,7 @@ web/obook.wasm
 .idea/
 .vscode/
 *.swp
+
+# Python bindings: the native library is built into the package by `make python`.
+python/obook/libobook.*
+__pycache__/
