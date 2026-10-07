@@ -160,6 +160,10 @@ func (ob *OrderBook) putLevel(l *PriceLevel) {
 type Config struct {
 	Symbol    string
 	MaxOrders int // 0 => default of 100_000
+	// IndexHint is the order index's initial size; it grows past it as needed.
+	// 0 => MaxOrders, which is right for one book sized to its cap and wrong for
+	// thousands of books that each need a high cap and mostly hold few orders.
+	IndexHint int
 	// Clock supplies the timestamps stamped on snapshots and the last-trade time.
 	// nil => time.Now. Inject a deterministic clock to make snapshots byte-identical
 	// under replay.
@@ -174,11 +178,14 @@ func New(config Config) *OrderBook {
 	if config.Clock == nil {
 		config.Clock = time.Now
 	}
+	if config.IndexHint <= 0 {
+		config.IndexHint = config.MaxOrders
+	}
 	return &OrderBook{
 		symbol:    config.Symbol,
 		bids:      make(map[int64]*PriceLevel),
 		asks:      make(map[int64]*PriceLevel),
-		nodes:     newOrderIndex(config.MaxOrders),
+		nodes:     newOrderIndex(config.IndexHint),
 		perUser:   newUserTable(),
 		bidPrices: make([]int64, 0),
 		askPrices: make([]int64, 0),

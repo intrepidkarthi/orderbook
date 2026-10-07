@@ -258,3 +258,21 @@ func TestLevelsAskedForMoreThanExist(t *testing.T) {
 		}
 	}
 }
+
+// TestIndexHintSizesTheIndexNotTheCap: a small hint starts small and still holds
+// as many orders as MaxOrders allows, and a zero hint keeps the old sizing.
+func TestIndexHintSizesTheIndexNotTheCap(t *testing.T) {
+	small := New(Config{Symbol: "BTC-USD", MaxOrders: 1 << 20, IndexHint: 8})
+	if n := len(small.nodes.buckets); n > 16 {
+		t.Fatalf("IndexHint 8 started the index at %d buckets", n)
+	}
+	for i := 0; i < 5000; i++ {
+		mustAdd(t, small, limit(t, "a", types.SideBuy, 100+int64(i%50), 1))
+	}
+	if small.Count() != 5000 {
+		t.Fatalf("%d orders resting, want 5000", small.Count())
+	}
+	if def := New(Config{Symbol: "BTC-USD", MaxOrders: 1 << 12}); len(def.nodes.buckets) < 1<<12 {
+		t.Fatalf("IndexHint 0 sized the index at %d buckets, under MaxOrders", len(def.nodes.buckets))
+	}
+}
