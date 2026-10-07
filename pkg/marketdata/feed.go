@@ -51,9 +51,14 @@ type Feed struct {
 	mu          sync.Mutex
 	incarnation string
 	seq         uint64
-	ring        []Update
-	start       uint64 // sequence of ring[0]; 0 when empty
-	max         int
+	// ring is a fixed circular buffer of the last max updates: ring[head] is the
+	// oldest, n are held, and start is the oldest one's sequence (0 when empty).
+	// Evicting advances head; it never moves the buffer (docs/STAGES.md §7).
+	ring  []Update
+	head  int
+	n     int
+	start uint64
+	max   int
 
 	// book is the current aggregated state, maintained from the same events, so a
 	// snapshot can be minted at any point without asking the engine.
@@ -187,7 +192,7 @@ func NewFeed(incarnation string, retain int) *Feed {
 	}
 	return &Feed{
 		incarnation: incarnation,
-		ring:        make([]Update, 0, retain),
+		ring:        make([]Update, retain),
 		max:         retain,
 		book:        NewL2Feed(),
 	}
@@ -279,15 +284,18 @@ func (f *Feed) OnEvents(evs []matching.Event) {
 func (f *Feed) publishLocked(u Update) {
 	f.seq++
 	u.Seq = f.seq
-	if len(f.ring) == f.max {
-		copy(f.ring, f.ring[1:])
-		f.ring = f.ring[:len(f.ring)-1]
-		f.start++
-	}
-	if len(f.ring) == 0 {
+	if f.n == 0 {
 		f.start = u.Seq
 	}
-	f.ring = append(f.ring, u)
+	if f.n == f.max {
+		// Full: the new update overwrites the oldest, in place.
+		f.ring[f.head] = u
+		f.head = (f.head + 1) % f.max
+		f.start++
+		return
+	}
+	f.ring[(f.head+f.n)%f.max] = u
+	f.n++
 }
 
 // Since returns every update after seq, for a subscriber filling a gap.
@@ -305,15 +313,18 @@ func (f *Feed) Since(seq uint64) ([]Update, error) {
 	if seq == f.seq {
 		return nil, nil
 	}
-	if len(f.ring) == 0 || seq+1 < f.start {
+	if f.n == 0 || seq+1 < f.start {
 		return nil, ErrSequenceEvicted
 	}
 	idx := int(seq + 1 - f.start)
-	if idx < 0 || idx > len(f.ring) {
+	if idx < 0 || idx > f.n {
 		return nil, ErrSequenceEvicted
 	}
-	out := make([]Update, len(f.ring)-idx)
-	copy(out, f.ring[idx:])
+	// The window is ring[head+idx : head+n], modulo max: at most two pieces.
+	out := make([]Update, f.n-idx)
+	from := (f.head + idx) % f.max
+	k := copy(out, f.ring[from:min(from+len(out), f.max)])
+	copy(out[k:], f.ring[:len(out)-k])
 	return out, nil
 }
 
@@ -369,8 +380,8 @@ func (f *Feed) PublishIndicative(price, volume, imbalance int64) {
 func (f *Feed) Retained() (oldest uint64, count int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.ring) == 0 {
+	if f.n == 0 {
 		return 0, 0
 	}
-	return f.start, len(f.ring)
+	return f.start, f.n
 }
