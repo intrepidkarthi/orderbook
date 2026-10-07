@@ -79,3 +79,23 @@ says the differential harness lacks.
   - **The anti-cheat state audit is skipped**, as geseq's own CI skips it, because it
     replays through a Liquibook build.
 - **Submission to flash1** is **needs Karthik**.
+
+## 5. The full conformance bar (2026-10-07)
+
+flash1 lists an engine as conforming after its gate, the state audit, and
+byte-identical output across many seeds. `.github/workflows/flash1-conformance.yml`
+runs all three at the pinned harness commit, building the gate's oracle engines and
+the audit baseline on CI
+([run 37646190523](https://github.com/intrepidkarthi/orderbook/actions/runs/37646190523)):
+
+- **`conformance_check.py`:** `CONFORMANT`, with the report stream matching on 34 cases
+  and book state on 33.
+- **`--mode audit`:** the state audit passes on all five scenarios, 192 of 192 checks
+  matching Liquibook each time.
+- **Seed sweep:** seeds 1 to 20 on all five scenarios, 100 runs, every one byte-identical
+  to Liquibook's canonical output.
+
+The submission is drafted: `additional_references/intrepidkarthi_adapter/` with a
+README and a `build.sh` that builds `cmd/flash1engine` from a pinned commit of this
+repository. Opening it is **needs Karthik**.
+
