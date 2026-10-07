@@ -41,7 +41,7 @@ func TestCalibrateEnforcesAQuietBenchmark(t *testing.T) {
 	}
 }
 
-// TestCalibrateRule is §14.2's three criteria, each broken alone.
+// TestCalibrateRule is §18.2's first three criteria, each broken alone.
 func TestCalibrateRule(t *testing.T) {
 	b := timingGated[1]
 	oneFail := runsOf(60, b, "pass", 1.0)
@@ -63,13 +63,28 @@ func TestCalibrateRule(t *testing.T) {
 	if c := decision(calibrate(six), b); !c.Enforce {
 		t.Errorf("6 inconclusive runs is within the limit: %+v", c)
 	}
-	// The maximum |median-1| of 60 is the nearest-rank p99: 0.087 gives 1.261 > 1.10.
-	if c := decision(calibrate(runsOf(60, b, "pass", 1.0, 1.0, 1.087)), b); c.Enforce || c.P99Dev < 0.0869 {
-		t.Errorf("a median of 1.087 among 60: %+v", c)
+	// The k-th criterion: 1.0167 is the largest K for which 1 + 3(K-1) stays at 1.05.
+	kth := func(ks ...float64) []*Report {
+		rs := runsOf(60, b, "pass", 1.0)
+		for i, r := range rs {
+			r.Verdicts[1].KthRatio = ks[i%len(ks)]
+		}
+		return rs
 	}
-	// 0.033 gives 1.099: inside.
-	if c := decision(calibrate(runsOf(60, b, "pass", 0.967, 1.033)), b); !c.Enforce {
-		t.Errorf("a spread of 0.033: %+v", c)
+	if c := decision(calibrate(kth(0.98, 1.0, 1.020)), b); c.Enforce || c.MaxKth != 1.020 || !strings.Contains(c.Missed, "k-th") {
+		t.Errorf("a k-th of 1.020 among 60: %+v", c)
+	}
+	if c := decision(calibrate(kth(0.98, 1.0, 1.016)), b); !c.Enforce {
+		t.Errorf("a largest k-th of 1.016 is inside: %+v", c)
+	}
+	// The median no longer decides: §15.1's widest spread, with a quiet lower bound,
+	// is enforced.
+	wide := runsOf(60, b, "pass", 0.906, 1.058)
+	for _, r := range wide {
+		r.Verdicts[1].KthRatio = 0.99
+	}
+	if c := decision(calibrate(wide), b); !c.Enforce || c.P99Dev < 0.09 {
+		t.Errorf("a wide median spread with a quiet lower bound: %+v", c)
 	}
 }
 

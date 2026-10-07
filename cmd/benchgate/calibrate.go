@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// Calibration is what §14.2 decides from, per timing-gated benchmark.
+// Calibration is what §18.2 decides from, per timing-gated benchmark.
 type Calibration struct {
 	Bench        string    `json:"bench"`
 	Runs         int       `json:"runs"`
@@ -18,18 +18,22 @@ type Calibration struct {
 	Inconclusive int       `json:"inconclusive"`
 	AllocFailed  int       `json:"alloc_failed"`
 	Medians      []float64 `json:"medians"`
-	P99Dev       float64   `json:"p99_dev"` // nearest-rank p99 of |median - 1|
+	P99Dev       float64   `json:"p99_dev"` // nearest-rank p99 of |median - 1|; reported, no longer decides
+	MaxKth       float64   `json:"max_kth"` // the largest k-th ratio: what §18.2 decides on
 	Enforce      bool      `json:"enforce"`
 	Missed       string    `json:"missed,omitempty"` // the first criterion it missed
 }
 
-// calibrationRule is docs/BENCH-GATE.md §14.2, fixed before the data existed.
+// calibrationRule is docs/BENCH-GATE.md §18.2, fixed before its data existed. It
+// replaced §14.2, which decided on the median although a failure needs the k-th
+// ratio above failBound as well.
 const (
 	maxInconclusiveRuns = 6
 	devMultiplier       = 3.0
 )
 
-// calibrate reads every bench-result.json under dir and applies §14.2.
+// calibrate reads every bench-result.json under dir and applies §18.2's first three
+// criteria. The fourth, power, comes from planted runs and is read separately.
 func calibrate(reports []*Report) []Calibration {
 	byBench := map[string]*Calibration{}
 	for _, name := range timingGated {
@@ -54,6 +58,7 @@ func calibrate(reports []*Report) []Calibration {
 			if v.Median > 0 {
 				c.Medians = append(c.Medians, v.Median)
 			}
+			c.MaxKth = math.Max(c.MaxKth, v.KthRatio)
 		}
 	}
 	out := make([]Calibration, 0, len(timingGated))
@@ -71,8 +76,9 @@ func calibrate(reports []*Report) []Calibration {
 			c.Missed = fmt.Sprintf("failed in %d of %d A/A runs", c.Failed, c.Runs)
 		case c.Inconclusive > maxInconclusiveRuns:
 			c.Missed = fmt.Sprintf("inconclusive in %d runs (limit %d)", c.Inconclusive, maxInconclusiveRuns)
-		case failMedian < 1+devMultiplier*c.P99Dev:
-			c.Missed = fmt.Sprintf("p99 abs(median-1) %.4f: 1 + 3x that is %.3f, above the %.2f threshold", c.P99Dev, 1+devMultiplier*c.P99Dev, failMedian)
+		case failBound < 1+devMultiplier*math.Max(0, c.MaxKth-1):
+			c.Missed = fmt.Sprintf("largest k-th ratio %.4f: 1 + 3x its excess is %.4f, above the %.2f bound",
+				c.MaxKth, 1+devMultiplier*math.Max(0, c.MaxKth-1), failBound)
 		default:
 			c.Enforce = true
 		}
@@ -126,8 +132,8 @@ func runCalibrate(args []string) int {
 		return 2
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "## Calibration over %d A/A runs (docs/BENCH-GATE.md §14.2)\n\n", len(reports))
-	b.WriteString("| benchmark | runs | failed | inconclusive | alloc failed | median range | p99 abs(median-1) | decision |\n|---|---:|---:|---:|---:|---|---:|---|\n")
+	fmt.Fprintf(&b, "## Calibration over %d A/A runs (docs/BENCH-GATE.md §18.2)\n\n", len(reports))
+	b.WriteString("| benchmark | runs | failed | inconclusive | alloc failed | median range | p99 abs(median-1) | largest k-th | decision before power |\n|---|---:|---:|---:|---:|---|---:|---:|---|\n")
 	for _, c := range calibrate(reports) {
 		lo, hi := "", ""
 		if len(c.Medians) > 0 {
@@ -139,7 +145,7 @@ func runCalibrate(args []string) int {
 		if !c.Enforce {
 			decision = "report only: " + c.Missed
 		}
-		fmt.Fprintf(&b, "| %s | %d | %d | %d | %d | %s – %s | %.4f | %s |\n", c.Bench, c.Runs, c.Failed, c.Inconclusive, c.AllocFailed, lo, hi, c.P99Dev, decision)
+		fmt.Fprintf(&b, "| %s | %d | %d | %d | %d | %s – %s | %.4f | %.4f | %s |\n", c.Bench, c.Runs, c.Failed, c.Inconclusive, c.AllocFailed, lo, hi, c.P99Dev, c.MaxKth, decision)
 	}
 	fmt.Print(b.String())
 	return 0
