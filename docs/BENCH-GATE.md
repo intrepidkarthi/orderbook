@@ -986,7 +986,10 @@ on timing.
   `RotationAppendTail`) repeat exactly and are gated exactly. Whole-log benchmarks
   (checkpoint, read, replay, snapshot write and restore, the three recoveries) repeat
   within a few allocations of totals in the millions. They are gated with a slack of
-  16 + 0.01% of base, at one invocation per arm. `RestartWithRetention` is stable but
+  80 + 0.01% of base, at one invocation per arm. *(The floor was first written as 16,
+  from M4 runs. Ten A/A runs on CI then measured `WriteSnapshot` moving between 71 and
+  106 on identical code, and 80 is at least twice the largest range any of them
+  showed.)* `RestartWithRetention` is stable but
   costs about 200 s per invocation and is left out for that reason only. Timing is never
   gated on `pkg/wal`.
 - **One probe.** `internal/probe` holds the ALU loop and the memory walk, and both
