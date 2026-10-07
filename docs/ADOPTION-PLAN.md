@@ -90,8 +90,12 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   the event stream. Session layer out of scope. *Done when:* the issue's checklist holds.
   *Done 2026-10-07* ([`FIX.md`](FIX.md), `pkg/fix`): every item on issue #6's list holds;
   a ten-message session is pinned byte for byte, and twelve sabotages are caught.
-- [ ] **2.4 Exchange in a box.** A compose file that runs the gateway, the dashboard,
+- [x] **2.4 Exchange in a box.** A compose file that runs the gateway, the dashboard,
   a market maker and the console. Built and smoke-tested only on CI.
+  *Done 2026-10-07* ([`EXCHANGE-IN-A-BOX.md`](EXCHANGE-IN-A-BOX.md)): the first CI run built
+  it and passed every check: 12 quotes resting, 45 trades in 20 s, the dashboard
+  streaming, and 49 orders recovered across a gateway restart. The console in the box
+  is the dashboard; the browser console cannot attach to a venue (§2).
 - [ ] **2.5 README front page.** A quickstart that shows the book before and after each
   call, and an order-type checklist at the top.
 
