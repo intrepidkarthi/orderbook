@@ -60,6 +60,10 @@
         replayable, and ships both the order types real venues use and an opt-in layer of
         <a href="#security">pre-trade risk &amp; anti-manipulation controls</a>.</p>
         <pre class="code"><code>go get github.com/intrepidkarthi/orderbook/pkg/matching</code></pre>
+        <p>From Python, with the engine inside the wheel (Linux and macOS):</p>
+        <pre class="code"><code>pip install obook</code></pre>
+        <p>A running venue with a market maker and order flow, dashboard on <code>127.0.0.1:8090</code>:</p>
+        <pre class="code"><code>docker compose up --build</code></pre>
         <p>New to order books? Start with the <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">from-scratch guide</a>.
         For the full API, see <a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">pkg.go.dev</a>;
         for release history, the <a href="https://github.com/intrepidkarthi/orderbook/blob/main/CHANGELOG.md">changelog</a>.</p>
@@ -320,12 +324,20 @@ types      (Order, Trade, iceberg, errors)</code></pre>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCHMARKS.md">BENCHMARKS.md</a></td><td>Performance results, methodology, and how to reproduce.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LANDSCAPE.md">LANDSCAPE.md</a></td><td>Other open-source order books in Go, Rust and C++: features, published speed figures and their conditions, and what draws users.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCH-GATE.md">BENCH-GATE.md</a></td><td>The benchmark gate: a committed command tape any language can replay, a portable output digest, and a base-against-head comparison that can fail.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/CROSS-ENGINE.md">CROSS-ENGINE.md</a></td><td>This engine beside geseq/orderbook, OrderBook-rs and CppTrader on one tape, on CI: each must reproduce the same trades and book before it is timed.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/FLASH1.md">FLASH1.md</a></td><td>The engine inside flash1's independent harness: the adapter and the conformance bar it meets on CI.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/PYTHON.md">PYTHON.md</a></td><td>The Python bindings, <code>pip install obook</code>: the interface, the tests, and how the wheels are built and published.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/C-API.md">C-API.md</a></td><td>The engine as a C shared library behind a versioned ABI.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/FIX.md">FIX.md</a></td><td>FIX 4.4 order entry over the event stream: the codec and the application messages, without a session layer.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/ITCH.md">ITCH.md</a></td><td>Replaying NASDAQ TotalView-ITCH 5.0 into books, by applying the feed rather than re-matching it.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/EXCHANGE-IN-A-BOX.md">EXCHANGE-IN-A-BOX.md</a></td><td>One command for a running venue: gateway, market maker, order flow and dashboard.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/STAGES.md">STAGES.md</a></td><td>Where a command's time goes in the venue, stage by stage, and what measuring it found.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/LEARN.md">LEARN.md</a></td><td>Order books and market making from first principles.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/PRODUCTION-READINESS.md">PRODUCTION-READINESS.md</a></td><td>What a venue actually needs, with an honest status for each item. Production readiness is a property of a deployment, not of a library — this document says so and shows its work.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/PROTOCOL.md">PROTOCOL.md</a></td><td>The binary order-entry protocol: framing, session &amp; resume, every message, and what is deliberately absent from the wire.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/RUNBOOKS.md">RUNBOOKS.md</a></td><td>Procedures for the failures this venue can have, each drilled in CI — including failover to a warm follower, and what has no runbook.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/SOAK.md">SOAK.md</a></td><td>Sustained load: methodology, the heap-floor discipline, and the correctness defect the first hour found.</td></tr>
-            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/REPLICATION.md">REPLICATION.md</a></td><td>The primary-backup reference: what "committed" means, the incarnation fence, drills D1–D6, and what building it found versus what the spec predicted.</td></tr>
+            <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/REPLICATION.md">REPLICATION.md</a></td><td>The primary-backup reference: what "committed" means, the incarnation fence, drills D1–D7, and what building it found versus what the spec predicted.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/CONSOLE-SPEC.md">CONSOLE-SPEC.md</a></td><td>The live console and the operator dashboard (<code>cmd/obdash</code>): every panel mapped to the library call that produces it.</td></tr>
             <tr><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/CHANGELOG.md">CHANGELOG.md</a></td><td>Release history with breaking-change notes.</td></tr>
             <tr><td><a href="https://pkg.go.dev/github.com/intrepidkarthi/orderbook">pkg.go.dev</a></td><td>Generated API reference for every package, with runnable examples.</td></tr>
