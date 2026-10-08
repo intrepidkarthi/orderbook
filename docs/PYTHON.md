@@ -81,9 +81,42 @@ and each step is commented so it can be pasted into a notebook cell.
 
 ## 5. Not in this step
 
-- **Publishing to PyPI** is **needs Karthik**. That includes the distribution name,
-  `obook` until decided, and how wheels carry the native library, one per
-  platform.
 - **Windows** has no build here yet: `c-shared` needs a C toolchain on CI.
 - **numpy or pandas helpers** are not provided. A list of named tuples converts to a
   DataFrame in one call, and a dependency would be a cost every user pays.
+
+## 6. Wheels and publishing (2026-10-08)
+
+The distribution name is **`obook`**, and it was free on PyPI.
+
+- **One wheel per platform, each carrying its own `libobook`.**
+
+  | Wheel tag | Built on |
+  |---|---|
+  | `manylinux_2_28_x86_64` | the `quay.io/pypa/manylinux_2_28_x86_64` container |
+  | `manylinux_2_28_aarch64` | the matching container, on an arm64 runner |
+  | `macosx_12_0_arm64` | macOS 14 |
+  | `macosx_12_0_x86_64` | macOS 13 |
+
+  - The Linux wheels build inside the manylinux containers, so the library links
+    against the glibc its tag claims. Go's `c-shared` output needs only libc and
+    pthreads.
+  - macOS 12 is the oldest release current Go toolchains support.
+  - The Python and ABI tags are `py3-none`. The package itself is pure Python, and
+    only the native library differs.
+- **Each wheel is installed into a fresh virtual environment, away from the source
+  tree, and the test suite runs against it** before anything is uploaded. The digest
+  test needs the repository and a Go toolchain, so it runs on the Linux x86_64 wheel
+  only.
+- **Publishing is trusted publishing (OIDC)**, from `python-wheels.yml`, in a GitHub
+  environment named `pypi`. No API token exists anywhere. It runs only on a manual
+  dispatch with `publish: true`, and only after every wheel built and passed.
+- **Before the first publish, the maintainer registers a pending publisher on PyPI:**
+  - project `obook`;
+  - owner `intrepidkarthi`, repository `orderbook`;
+  - workflow `python-wheels.yml`, environment `pypi`.
+
+  That is an account action, and nothing here can do it.
+- **Versions.** `python/pyproject.toml` holds the version, starting at 0.1.0. It is
+  bumped by hand per release, separate from the Go module's tags, because the wheel
+  carries ABI 1, which is not tied to an engine release.
