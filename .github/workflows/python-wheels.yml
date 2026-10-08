@@ -70,18 +70,24 @@ jobs:
       - name: libobook into the package
         shell: bash
         run: |
-          CGO_ENABLED=1 go build -trimpath -buildmode=c-shared -o "python/obook/${{ matrix.lib }}" ./cmd/libobook
+          # -buildvcs=false: inside the manylinux container the checkout's owner is not
+          # the container's user, and git refuses to describe it.
+          CGO_ENABLED=1 go build -trimpath -buildvcs=false -buildmode=c-shared -o "python/obook/${{ matrix.lib }}" ./cmd/libobook
           rm -f python/obook/libobook.h
           ls -l python/obook/
 
       - name: Wheel, tagged for this platform
         shell: bash
         run: |
-          "$PY" -m pip install --quiet build wheel
-          "$PY" -m build --wheel python --outdir dist
-          "$PY" -m wheel tags --python-tag py3 --abi-tag none --platform-tag "${{ matrix.tag }}" --remove dist/*.whl
+          # The build tools go in a throwaway venv: Homebrew's Python refuses
+          # installs into itself (PEP 668).
+          "$PY" -m venv "$RUNNER_TEMP/buildenv"
+          B="$RUNNER_TEMP/buildenv/bin/python"
+          "$B" -m pip install --quiet build wheel
+          "$B" -m build --wheel python --outdir dist
+          "$B" -m wheel tags --python-tag py3 --abi-tag none --platform-tag "${{ matrix.tag }}" --remove dist/*.whl
           ls -l dist/
-          "$PY" -m zipfile -l dist/*.whl | grep -E "libobook|__init__"
+          "$B" -m zipfile -l dist/*.whl | grep -E "libobook|__init__"
 
       - name: Install it fresh and run the tests against it
         shell: bash
