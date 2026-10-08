@@ -9,7 +9,7 @@ Author: Karthikeyan NG · 2026-10-07
 (MIT) replays about 2.0 M messages per scenario into every engine through one C ABI,
 `api/matching_engine_api.h`. It hashes each engine's report stream against a consensus
 and publishes worst-case throughput. About 30 Go engines are on its list
-([`LANDSCAPE.md`](LANDSCAPE.md) §2). This one is not.
+([`LANDSCAPE.md`](LANDSCAPE.md) §2). This one was not, until the submission §5 records.
 
 The adapter makes it eligible. It also gives this repository something it has never had:
 **an outside oracle** for its matching, written by people who have never read

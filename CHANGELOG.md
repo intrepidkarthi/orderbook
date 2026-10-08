@@ -33,7 +33,59 @@ versions may include breaking changes).
   same work and be held to the same digest. `tape.Basic` and the `OwnerOnly` profile
   flag generate it.
 
+- **`pip install obook`.** Python bindings over the C ABI, standard library only, on
+  PyPI as `obook` 0.1.0 ([`docs/PYTHON.md`](docs/PYTHON.md)).
+  - Four platform wheels carry the engine inside: manylinux_2_28 x86_64 and aarch64,
+    and macOS 12+ on arm64 and x86_64.
+  - Each wheel is tested installed, away from the source tree.
+  - Releases go out by trusted publishing.
+- **A cross-engine comparison on CI** (`cmd/xeng`, `bench/xeng`,
+  [`docs/CROSS-ENGINE.md`](docs/CROSS-ENGINE.md)). geseq/orderbook, OrderBook-rs and
+  CppTrader replay `bench-basic-v1` at pinned commits. Each must reproduce this engine's
+  digest before it is timed, and all three do. On that tape this engine is about 3×
+  slower than geseq and CppTrader, and the document says where the time goes.
+- **The full flash1 conformance bar, met on CI** (`flash1-conformance.yml`):
+  - the 34-case gate;
+  - the 192-point state audit on all five scenarios;
+  - 100 scenario-seeds byte-identical to Liquibook.
+
+  The adapter was submitted to flash1.
+- **NASDAQ ITCH 5.0 replay** (`pkg/itch`, `cmd/itchbook`,
+  [`docs/ITCH.md`](docs/ITCH.md)). It decodes the order messages and rebuilds per-stock
+  books by applying the feed. The first 50 M messages of a real NASDAQ day decode on CI
+  with no anomaly.
+- **FIX 4.4 order entry** (`pkg/fix`, [`docs/FIX.md`](docs/FIX.md)).
+  - BodyLength and CheckSum are verified.
+  - NewOrderSingle and OrderCancelRequest come in; ExecutionReport and
+    OrderCancelReject go out of the event stream.
+  - Off-grid prices are refused, never rounded.
+  - There is no session layer.
+- **Exchange in a box** (`compose.yaml`, `cmd/obquote`,
+  [`docs/EXCHANGE-IN-A-BOX.md`](docs/EXCHANGE-IN-A-BOX.md)). One command starts the
+  gateway, a live market maker, order flow and the dashboard, and CI smoke-tests it,
+  including recovery across a restart.
+- **Stage attribution** ([`docs/STAGES.md`](docs/STAGES.md)).
+  `RunnerConfig.ObserveStages` and `Publisher.ObservePublish` are optional hooks.
+  `cmd/obgw` exports histograms for the queue wait, match, publish wait, fan-out and
+  each event sink.
+- **`orderbook.Config.IndexHint`** sizes a book's order index apart from its cap.
+  **`Config.Prealloc` / `matching.Config.PreallocOrders`** prefill the node and index
+  pools. Both default to the old behaviour.
+- **The README** opens with an order-type checklist, and its quickstart prints the book
+  after each call. A test holds the README to the program's real output.
+
 ### Fixed
+
+- **The market-data feed's gap-fill ring cost 7.8 MB of copying per update once full.**
+  It shifted all 65,536 slots on every eviction, on the matching goroutine, and was 96%
+  of the match stage. It is now circular. A publish into a full ring went from 258 µs to
+  16 ns, and the match stage's p90 from 500 µs to 25 µs.
+- **A group commit's `fsync` stalled the matcher's next append**, because `Writer.Sync`
+  held the log's lock through it. The `fsync` now runs outside the lock, and Sync's
+  durability promise is unchanged. The WAL append's p99 went from 5 ms to 100 µs. A
+  `Sync` after `Close` returns the new `wal.ErrClosed`.
+- **`TestRestartCostIsBoundedByRetentionNotByHistory` flaked under parallel load.** It
+  failed three times. Its timings are now interleaved, so load lands on both sides.
 
 - **`GetBidLevels` and `GetAskLevels` reserve for the levels present, not for `depth`.**
   Asking for every level with a huge depth reserved 16 GB at `math.MaxInt32` and
@@ -135,6 +187,14 @@ versions may include breaking changes).
   raised no alert. Standard library only, plus Chrome, Go and ffmpeg.
 
 ### Changed
+
+- **The benchmark gate enforces timing on four benchmarks instead of one.**
+  `Engine_MatchInto`, `TapeReplay/sink=nil` and `OrderBook_LevelChurn` join
+  `Engine_CancelReplaceInto`. The rule moved to the lower bound that can actually fail
+  a push, with 60 A/A runs and power studies behind it (BENCH-GATE §18–19).
+  `OrderBook_CancelReplace` failed power and stays report-only.
+- **The "cancel ~3× faster than liquibook" claim** (CHANGELOG v0.13.0) is qualified where it
+  was made. It measured queue depth as much as the engines, and it cannot be re-run.
 
 - **The docs page and SPEC.md no longer call the core lock-free.** The README dropped
   the word in September, because every add, remove and quantity update takes the

@@ -30,8 +30,10 @@ snapshot, not a scoreboard.
   170 ns. Nobody, including this project, has measured on a shared workload.
 - **An independent harness exists**: flash1-dev/matching-engine-benchmark. It replays one
   command stream through a C ABI into about 247 engines, about 30 of them Go, and checks
-  each engine's report stream against a consensus hash. **This project is not in it.**
-  Several Go books are, and geseq runs it nightly in CI.
+  each engine's report stream against a consensus hash. *Update 2026-10-08:* this
+  project's adapter now meets flash1's full conformance bar on CI and was submitted as
+  [their PR #5](https://github.com/flash1-dev/matching-engine-benchmark/pull/5)
+  ([`FLASH1.md`](FLASH1.md)). Listing is flash1's decision.
 - **Adoption is driven by things this project lacks**:
   - a picture-driven quickstart;
   - percentile tables with the machine named;
@@ -175,7 +177,8 @@ Published figures:
 6. A whole exchange you can run: go-trader, or DistributedATS on liquibook.
 7. A permissive license. GPL and unlicensed projects are admired and not embedded.
 8. Versioned releases with a changelog. Most Go competitors have none.
-9. Appearing in someone else's comparison. flash1 lists many Go books and not this one.
+9. Appearing in someone else's comparison. flash1 lists many Go books; this one was
+   submitted on 2026-10-08.
 
 What to avoid, also as observed: "lock-free" claims the code contradicts, and aggregate
 throughput presented as latency. Both cost credibility, and one Rust crate withdrew its

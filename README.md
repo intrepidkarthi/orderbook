@@ -319,6 +319,12 @@ gaps no library work can close, because they are properties of your deployment.
   an update recovers on the next one. Its test asserts the derived levels equal the
   engine's own snapshot after every command, which is how a long-standing depth bug
   was found.
+- **Checked by engines that share no code with it.** In flash1's independent
+  harness the adapter reproduces the consensus report hash on every scenario,
+  passes the 34-case conformance gate and the 192-point state audit, and is
+  byte-identical to Liquibook on 100 scenario-seeds ([docs/FLASH1.md](docs/FLASH1.md)).
+  On a shared tape, geseq/orderbook, OrderBook-rs and CppTrader each produce the
+  same trades and final book ([docs/CROSS-ENGINE.md](docs/CROSS-ENGINE.md)).
 - **Tested and benchmarked.** Race, fuzz, soak, and replay-recovery suites;
   microbenchmarks run in CI on every push.
 
@@ -511,6 +517,12 @@ web/ (React + TS)  ──▶  cmd/obwasm (Go → WASM)  ─┐
 | [LANDSCAPE.md](docs/LANDSCAPE.md) | Other open-source order books in Go, Rust and C++: what each offers, what each publishes about its speed and under what conditions, and what draws users. |
 | [ADOPTION-PLAN.md](docs/ADOPTION-PLAN.md) | The working plan that follows from it: credibility, then adoption, then engineering. |
 | [BENCH-GATE.md](docs/BENCH-GATE.md) | The benchmark gate: a committed tape another matcher can replay, a portable output digest, and a base-against-head comparison that can fail, with what it found. |
+| [CROSS-ENGINE.md](docs/CROSS-ENGINE.md) | This engine beside geseq/orderbook, OrderBook-rs and CppTrader on one tape, on CI: same trades and book first, then time, and where this engine's time goes. |
+| [C-API.md](docs/C-API.md) | The engine as a C shared library behind a versioned ABI, tested at the C boundary. |
+| [PYTHON.md](docs/PYTHON.md) | `pip install obook`: the bindings, how they are tested, and how the wheels are built and published. |
+| [FIX.md](docs/FIX.md) | FIX 4.4 order entry: the codec, NewOrderSingle and OrderCancelRequest in, ExecutionReports out of the event stream. No session layer. |
+| [ITCH.md](docs/ITCH.md) | Replaying NASDAQ TotalView-ITCH 5.0 into books, and the first real day it decoded. |
+| [EXCHANGE-IN-A-BOX.md](docs/EXCHANGE-IN-A-BOX.md) | `docker compose up`: a gateway, a market maker, order flow and the dashboard, smoke-tested on CI. |
 | [LEARN.md](docs/LEARN.md) | Order books and market making from first principles. |
 | [research-roadmap.md](docs/research-roadmap.md) | The microstructure research agenda: OFI, Kyle's λ, Avellaneda–Stoikov, delta/CVD — and [what data it runs on](docs/research-roadmap.md#0-data-and-scope). |
 | [research/ofi.md](docs/research/ofi.md) | Does order-flow imbalance predict the next move? Contemporaneous R² ≈ 0.24, predictive R² ≈ 0.0004 — a ~577× gap, and the little that remains points the other way. |
@@ -544,6 +556,11 @@ document nothing links to is a document nobody reads.
 | [PINNED-DEFECTS.md](docs/PINNED-DEFECTS.md) | One rejection that fails to undo and one that fails to announce: the two defects that were pinned as tests before they were repaired. |
 | [ICEBERG-ADMISSION.md](docs/ICEBERG-ADMISSION.md) | A fat-finger cap a client could switch off by choosing an order type, and the audit that found five admission checks measuring the wrong quantity. |
 | [ICEBERG-DURABILITY.md](docs/ICEBERG-DURABILITY.md) | A log record that cannot state the order it records, what a recovery is allowed to do about it, and the operator flag that makes the trade-off explicit. |
+| [FLASH1.md](docs/FLASH1.md) | The engine in flash1's independent harness: the adapter, the consensus hash on every scenario, and the full conformance bar met on CI. |
+| [STAGES.md](docs/STAGES.md) | Splitting a command's time in the venue into queue, log, match and publish, and the two stalls it found. |
+| [WAL-SYNC.md](docs/WAL-SYNC.md) | Moving the log's `fsync` out from under its lock without weakening what a sync promises, and the starvation the first version had. |
+| [BOUNDED-RECOVERY.md](docs/BOUNDED-RECOVERY.md) | Skipping a log prefix a snapshot already covers, without skipping the checks on it. |
+| [LOG-ROTATION.md](docs/LOG-ROTATION.md) | Bounding the log itself: segments, retention, and a crash at every step of a rotation. |
 | [PERFORMANCE-ROADMAP.md](docs/PERFORMANCE-ROADMAP.md) | The performance and production roadmap, with every milestone's status checked against the code rather than against what a spec intended. |
 | [TUTORIAL-SPEC.md](docs/TUTORIAL-SPEC.md) | The hands-on course (`web/learn.html`): learn the book by being every player in it. |
 | [DEMO-SPEC.md](docs/DEMO-SPEC.md) | The hosted explainer that runs the real Go engine in the browser via WebAssembly. |
@@ -567,6 +584,11 @@ The same core powers two additional layers, kept strictly above the library:
 - **Interactive demo** — the engine compiled to WebAssembly, running live in the
   [browser](https://intrepidkarthi.github.io/orderbook/) to visualize matching
   and market making.
+- **Real market data** — `pkg/itch` reads NASDAQ TotalView-ITCH 5.0 and rebuilds
+  the venue's books from it, applying the feed rather than re-matching it
+  ([docs/ITCH.md](docs/ITCH.md)).
+- **A venue in one command** — `docker compose up --build` runs the gateway, a
+  market maker, order flow and the dashboard ([docs/EXCHANGE-IN-A-BOX.md](docs/EXCHANGE-IN-A-BOX.md)).
 
 ```sh
 go run ./examples/basic         # place two orders and watch them match
@@ -578,6 +600,9 @@ go run ./cmd/ofistudy           # is order-flow imbalance predictive, or just co
 go run ./cmd/lambdastudy        # Kyle's λ: price impact, depth, and the cost of a block order
 go run ./cmd/flowstudy          # delta/CVD/absorption vs ground truth: what survives a control
 go run ./cmd/l2capture          # live order-flow imbalance on Coinbase data
+go run ./cmd/itchbook -symbol AAPL FILE.NASDAQ_ITCH50.gz   # rebuild a book from a NASDAQ day
+docker compose up --build       # the venue, a market maker and flow; dashboard on :8090
+pip install obook               # the same engine from Python
 ```
 
 ---

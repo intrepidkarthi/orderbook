@@ -274,14 +274,17 @@ What it gives you:
 
 What you still have to build:
 
-- **latency percentiles per operation.** `observability.Histogram` is there and
-  `cmd/obgw` feeds one for inbound message handling, but nothing wires submit / cancel /
-  match. Record into a lock-free histogram on the critical path and compute
+- **latency percentiles per operation.** `observability.Histogram` is there, and the
+  hooks are too: `RunnerConfig.ObserveStages` reports each command's queue wait and
+  match time, and `Publisher.ObservePublish` each batch's wait and fan-out
+  ([STAGES.md](STAGES.md)). `cmd/obgw` wires them, and times each event sink as well. Record into a lock-free histogram on the critical path and compute
   p50/p99/p999 on a separate goroutine — averaging pre-computed percentiles across
   shards hides the tail, and not correcting for coordinated omission makes your tail
   numbers lie.
 - **WAL fsync latency and snapshot duration, if you are not running `cmd/obgw`.**
-  Both stop the matching goroutine when they go slow. `obgw` exports them
+  A slow snapshot stops the matching goroutine. A slow `fsync` no longer does: it
+  runs outside the log's lock ([WAL-SYNC.md](WAL-SYNC.md)), but it still sets the
+  recovery point. `obgw` exports them
   (`obgw_wal_sync_latency_ns`, `obgw_wal_append_latency_ns`,
   `obgw_snapshot_duration_ns`, `obgw_snapshot_failures_total`), and
   `cmd/obgw/lagmetrics.go`, `synclog.go` and `timedlog.go` are the wiring to copy;
