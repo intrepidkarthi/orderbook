@@ -42,7 +42,7 @@ jobs:
             tag: macosx_12_0_arm64
             lib: libobook.dylib
             digest: false
-          - os: macos-13
+          - os: macos-15-intel
             tag: macosx_12_0_x86_64
             lib: libobook.dylib
             digest: false

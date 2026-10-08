@@ -96,7 +96,7 @@ The distribution name is **`obook`**, and it was free on PyPI.
   | `manylinux_2_28_x86_64` | the `quay.io/pypa/manylinux_2_28_x86_64` container |
   | `manylinux_2_28_aarch64` | the matching container, on an arm64 runner |
   | `macosx_12_0_arm64` | macOS 14 |
-  | `macosx_12_0_x86_64` | macOS 13 |
+  | `macosx_12_0_x86_64` | macOS 15 on Intel (`macos-15-intel`; `macos-13` is retired) |
 
   - The Linux wheels build inside the manylinux containers, so the library links
     against the glibc its tag claims. Go's `c-shared` output needs only libc and
