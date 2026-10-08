@@ -54,9 +54,9 @@ quoting both sides, a little order flow, and the operator dashboard on
 builds and smoke-tests it on every change to its parts.
 
 **From C or Python.** `cmd/libobook` builds the engine as a C shared library behind a
-versioned ABI ([docs/C-API.md](docs/C-API.md)). `python/` binds it with the standard
-library only: `make python` builds the library and runs the bindings' tests
-([docs/PYTHON.md](docs/PYTHON.md)). The bindings are not on PyPI yet.
+versioned ABI ([docs/C-API.md](docs/C-API.md)). The Python bindings use the standard
+library only, and ship with the library inside: `pip install obook` on Linux (x86_64,
+aarch64) and macOS 12+ ([docs/PYTHON.md](docs/PYTHON.md)).
 
 Before evaluating a change or trusting a claim, run the local gate:
 

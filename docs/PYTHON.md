@@ -1,6 +1,6 @@
 # Python Bindings — the C ABI, From the Standard Library
 
-Status: **implemented, tested on CI; step 2.1 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
+Status: **published on PyPI as `obook` 0.1.0 (2026-10-08); step 2.1 of [`ADOPTION-PLAN.md`](ADOPTION-PLAN.md)** ·
 Author: Karthikeyan NG · 2026-10-07
 
 ## 1. Why, and why this shape

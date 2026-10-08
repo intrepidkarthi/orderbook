@@ -139,11 +139,9 @@ Collected here as they come up, so nothing outward happens by default.
 - [x] The 2026-10-14 check: a one-time cloud routine, created 2026-10-08, runs at 10:00
   IST and reports whether the `pull_request` trigger may be added
   ([routine](https://claude.ai/code/routines/trig_0179Xh1Cza3a1CQcrm6j7T67)). Read-only.
-- [ ] Publish the Python bindings (2.1) as `obook`. Wheels for four platforms are
-  built and tested by `python-wheels.yml` (docs/PYTHON.md §6). Left: register the
-  PyPI pending publisher (project `obook`, owner `intrepidkarthi`, repo `orderbook`,
-  workflow `python-wheels.yml`, environment `pypi`), then dispatch with
-  `publish: true`.
+- [x] Publish the Python bindings (2.1): `obook` 0.1.0 is on PyPI since 2026-10-08,
+  four platform wheels published by trusted publishing, and a clean `pip install obook`
+  verified.
 - [x] Issue #6 (2.3): closed 2026-10-07, with the checklist mapped to the commits
   and the session layer and OrderCancelReplaceRequest left open for contributors.
 - [x] Submit the adapter to flash1 (1.3): opened 2026-10-08 as
