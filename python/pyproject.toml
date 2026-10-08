@@ -1,14 +1,12 @@
-# The distribution name and the wheel layout are not settled: publishing is a
-# maintainer decision (docs/PYTHON.md §5). This builds an sdist/wheel of the pure
-# Python package; the native library is built by `make python` and is not yet
-# packaged per platform.
+# One wheel per platform, each carrying its own libobook, built and published by
+# .github/workflows/python-wheels.yml (docs/PYTHON.md §6).
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "obook"
-version = "0.0.0"
+version = "0.1.0"
 description = "Python bindings for the intrepidkarthi/orderbook matching engine, over its C ABI"
 readme = "README.md"
 license = { text = "MIT" }

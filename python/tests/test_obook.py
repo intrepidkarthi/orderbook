@@ -13,7 +13,9 @@ sys.path.insert(0, os.path.join(HERE, ".."))
 import obook  # noqa: E402
 from obook import BUY, SELL, MARKET, IOC, FOK, Status, Reason, EventKind  # noqa: E402
 
-REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
+# The repository, for the digest test: next to the tests when run from a checkout,
+# or named by OBOOK_REPO when the tests run against an installed wheel.
+REPO = os.environ.get("OBOOK_REPO") or os.path.abspath(os.path.join(HERE, "..", ".."))
 
 
 class Commands(unittest.TestCase):
@@ -174,6 +176,8 @@ class Digest(unittest.TestCase):
         go = shutil.which("go")
         if not go:
             self.skipTest("no Go toolchain")
+        if not os.path.exists(os.path.join(REPO, "go.mod")):
+            self.skipTest("no repository at " + REPO + "; set OBOOK_REPO")
         tape = os.path.join(REPO, "internal/benchgate/testdata/bench-basic-v1.obt")
         digest = os.path.join(REPO, "internal/benchgate/testdata/bench-basic-v1.digest")
         with tempfile.TemporaryDirectory() as d:

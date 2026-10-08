@@ -4,9 +4,10 @@ Python bindings for the [orderbook](https://github.com/intrepidkarthi/orderbook)
 matching engine, over its C ABI, with the standard library only.
 
 ```sh
-make python                          # from the repository root: builds the library, runs the tests
-python3 python/examples/quickstart.py
+pip install obook        # Linux x86_64 and aarch64 (glibc 2.28+), macOS 12+ on arm64 and x86_64
 ```
+
+From a checkout, `make python` builds the library into the package and runs the tests.
 
 ```python
 import obook
@@ -21,4 +22,3 @@ Prices are integer ticks and quantities integer lots. A refused command is a res
 with a `Reason`, not an exception. The full interface, and how it is tested, is in
 [docs/PYTHON.md](https://github.com/intrepidkarthi/orderbook/blob/main/docs/PYTHON.md).
 
-Not on PyPI yet.

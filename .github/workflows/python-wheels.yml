@@ -1,0 +1,117 @@
+name: Python wheels
+
+# obook's wheels, one per platform with its own libobook, built, installed and tested
+# away from the source tree, and published to PyPI by trusted publishing on a manual
+# dispatch only (docs/PYTHON.md §6).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "python/**"
+      - "cmd/libobook/**"
+      - ".github/workflows/python-wheels.yml"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "upload the built wheels to PyPI (needs the pending publisher registered)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  wheel:
+    name: wheel · ${{ matrix.tag }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            tag: manylinux_2_28_x86_64
+            lib: libobook.so
+            digest: true
+          - os: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            tag: manylinux_2_28_aarch64
+            lib: libobook.so
+            digest: false
+          - os: macos-14
+            tag: macosx_12_0_arm64
+            lib: libobook.dylib
+            digest: false
+          - os: macos-13
+            tag: macosx_12_0_x86_64
+            lib: libobook.dylib
+            digest: false
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: false
+
+      - name: Python
+        shell: bash
+        run: |
+          if [ -x /opt/python/cp311-cp311/bin/python ]; then
+            echo "PY=/opt/python/cp311-cp311/bin/python" >> "$GITHUB_ENV"
+          else
+            echo "PY=python3" >> "$GITHUB_ENV"
+          fi
+
+      - name: libobook into the package
+        shell: bash
+        run: |
+          CGO_ENABLED=1 go build -trimpath -buildmode=c-shared -o "python/obook/${{ matrix.lib }}" ./cmd/libobook
+          rm -f python/obook/libobook.h
+          ls -l python/obook/
+
+      - name: Wheel, tagged for this platform
+        shell: bash
+        run: |
+          "$PY" -m pip install --quiet build wheel
+          "$PY" -m build --wheel python --outdir dist
+          "$PY" -m wheel tags --python-tag py3 --abi-tag none --platform-tag "${{ matrix.tag }}" --remove dist/*.whl
+          ls -l dist/
+          "$PY" -m zipfile -l dist/*.whl | grep -E "libobook|__init__"
+
+      - name: Install it fresh and run the tests against it
+        shell: bash
+        run: |
+          "$PY" -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet dist/*.whl
+          mkdir -p "$RUNNER_TEMP/t" && cp -r python/tests "$RUNNER_TEMP/t/"
+          if [ "${{ matrix.digest }}" = "true" ]; then export OBOOK_REPO="$GITHUB_WORKSPACE"; fi
+          cd "$RUNNER_TEMP/t"
+          "$RUNNER_TEMP/venv/bin/python" -c "import obook, os; print('loaded', obook.__file__)"
+          "$RUNNER_TEMP/venv/bin/python" -m unittest discover -s tests -v
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.tag }}
+          path: dist/*.whl
+
+  publish:
+    name: publish to PyPI
+    needs: wheel
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

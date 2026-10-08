@@ -136,9 +136,14 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
 
 Collected here as they come up, so nothing outward happens by default.
 
-- [ ] Reply on the scheduled 2026-10-14 check (routine proposed, not created).
-- [ ] Publish the Python bindings (2.1): choose the PyPI name (`obook` is a
-  placeholder), and decide how wheels carry the native library per platform.
+- [x] The 2026-10-14 check: a one-time cloud routine, created 2026-10-08, runs at 10:00
+  IST and reports whether the `pull_request` trigger may be added
+  ([routine](https://claude.ai/code/routines/trig_0179Xh1Cza3a1CQcrm6j7T67)). Read-only.
+- [ ] Publish the Python bindings (2.1) as `obook`. Wheels for four platforms are
+  built and tested by `python-wheels.yml` (docs/PYTHON.md §6). Left: register the
+  PyPI pending publisher (project `obook`, owner `intrepidkarthi`, repo `orderbook`,
+  workflow `python-wheels.yml`, environment `pypi`), then dispatch with
+  `publish: true`.
 - [x] Issue #6 (2.3): closed 2026-10-07, with the checklist mapped to the commits
   and the session layer and OrderCancelReplaceRequest left open for contributors.
 - [x] Submit the adapter to flash1 (1.3): opened 2026-10-08 as
