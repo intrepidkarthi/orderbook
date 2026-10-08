@@ -97,5 +97,6 @@ the audit baseline on CI
 
 The submission is drafted: `additional_references/intrepidkarthi_adapter/` with a
 README and a `build.sh` that builds `cmd/flash1engine` from a pinned commit of this
-repository. Opening it is **needs Karthik**.
+repository. It was opened on 2026-10-08 as
+[flash1-dev/matching-engine-benchmark#5](https://github.com/flash1-dev/matching-engine-benchmark/pull/5).
 

@@ -141,7 +141,7 @@ Collected here as they come up, so nothing outward happens by default.
   placeholder), and decide how wheels carry the native library per platform.
 - [x] Issue #6 (2.3): closed 2026-10-07, with the checklist mapped to the commits
   and the session layer and OrderCancelReplaceRequest left open for contributors.
-- [ ] Submit the adapter to flash1 (1.3). Draft ready: `additional_references/
-  intrepidkarthi_adapter/` (README and build.sh), checked by `flash1-conformance.yml`
-  against their 34-case gate, the state audit and a seed sweep. Opening the PR is
-  yours to approve.
+- [x] Submit the adapter to flash1 (1.3): opened 2026-10-08 as
+  [flash1-dev/matching-engine-benchmark#5](https://github.com/flash1-dev/matching-engine-benchmark/pull/5),
+  pinned to `eaf4049`. Whether and how it is listed is flash1's call; watch the PR for
+  review comments.
