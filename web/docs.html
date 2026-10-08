@@ -288,24 +288,21 @@ types      (Order, Trade, iceberg, errors)</code></pre>
 
       <section id="performance">
         <h2>Performance</h2>
-        <p>Core microbenchmarks (Apple M-series, Go 1.23, single-threaded). CI runs them on
-        every push; full methodology in
-        <a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a>.</p>
+        <p>Every number lives beside the conditions it was measured under, in the repository,
+        where it is kept current. None is copied here, because a figure without its machine and
+        workload is not comparable to anything.</p>
         <table class="tbl">
-          <thead><tr><th>Operation</th><th>ns/op</th><th>allocs/op</th></tr></thead>
+          <thead><tr><th>Question</th><th>Where it is answered</th></tr></thead>
           <tbody>
-            <tr><td>Best bid/ask read</td><td>5.8</td><td>0</td></tr>
-            <tr><td>Cancel (drain)</td><td>273</td><td>~0</td></tr>
-            <tr><td>Cancel / replace (MM churn)</td><td>172</td><td>~0</td></tr>
-            <tr><td>Match round-trip (<code>Match</code>)</td><td>329</td><td>0</td></tr>
-            <tr><td>Match round-trip (<code>Process</code> wrapper)</td><td>419</td><td>4</td></tr>
+            <tr><td>What does one call into the core cost?</td><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCHMARKS.md">BENCHMARKS.md</a>: microbenchmarks at stated book depths, tail percentiles by scenario, the durable path and scaling across cores.</td></tr>
+            <tr><td>How does it compare with other engines?</td><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/CROSS-ENGINE.md">CROSS-ENGINE.md</a>: one tape replayed beside geseq/orderbook, OrderBook-rs and CppTrader on CI, timed only after each reproduces the same trades and book.</td></tr>
+            <tr><td>Where does a command's time go in a running venue?</td><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/STAGES.md">STAGES.md</a>: queue, log, match and publish, measured separately.</td></tr>
+            <tr><td>What stops it getting slower?</td><td><a href="https://github.com/intrepidkarthi/orderbook/blob/main/docs/BENCH-GATE.md">BENCH-GATE.md</a>: a base-against-head gate that fails a push on an allocation increase or a calibrated timing regression.</td></tr>
           </tbody>
         </table>
-        <p><b>Tail latency</b> — a ~90%-cancel / 10%-new mix against a warm book:
-        <b>p50 83 ns · p99 167 ns · p999 250 ns</b>, 0 allocs/op. The zero-alloc
-        <code>Match(order, buf)</code> path appends value trades into a caller buffer;
-        <code>Process</code> is the ergonomic wrapper (4 allocs) for when convenience beats the
-        last nanosecond.</p>
+        <p>The match path has two entry points. <code>Match(order, buf)</code> appends value trades
+        into a caller-owned buffer and allocates nothing; <code>Process</code> is the ergonomic
+        wrapper, for when convenience beats the last nanosecond.</p>
       </section>
 
       <section id="docs-index">
