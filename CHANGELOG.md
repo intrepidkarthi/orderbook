@@ -49,7 +49,7 @@ versions may include breaking changes).
   - the 192-point state audit on all five scenarios;
   - 100 scenario-seeds byte-identical to Liquibook.
 
-  The adapter was submitted to flash1.
+  flash1 merged the adapter and lists the engine as conforming as shipped.
 - **NASDAQ ITCH 5.0 replay** (`pkg/itch`, `cmd/itchbook`,
   [`docs/ITCH.md`](docs/ITCH.md)). It decodes the order messages and rebuilds per-stock
   books by applying the feed. The first 50 M messages of a real NASDAQ day decode on CI

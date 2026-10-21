@@ -78,7 +78,7 @@ says the differential harness lacks.
     pinning and timing checks that a shared runner cannot promise.
   - **The anti-cheat state audit is skipped**, as geseq's own CI skips it, because it
     replays through a Liquibook build.
-- **Submission to flash1** is **needs Karthik**.
+- **Submission to flash1:** merged; see §6.
 
 ## 5. The full conformance bar (2026-10-07)
 
@@ -99,4 +99,15 @@ The submission is drafted: `additional_references/intrepidkarthi_adapter/` with 
 README and a `build.sh` that builds `cmd/flash1engine` from a pinned commit of this
 repository. It was opened on 2026-10-08 as
 [flash1-dev/matching-engine-benchmark#5](https://github.com/flash1-dev/matching-engine-benchmark/pull/5).
+
+## 6. Listed by flash1 (2026-10-08)
+
+flash1 merged the pull request on 2026-10-08 and ran the engine through its own gate.
+Its [`CONSENSUS_CONFORMING_ENGINES.md`](https://github.com/flash1-dev/matching-engine-benchmark/blob/main/CONSENSUS_CONFORMING_ENGINES.md)
+lists it as conforming **as shipped**, meaning unmodified, with no patch. flash1 also
+publishes a worst-case throughput figure on its own hardware. That is flash1's
+measurement, not this repository's claim, and it is read from their table rather than
+copied here. Their note records that the worst case uses `engine_on_batch`, and that
+per-message cgo delivery is slower: on this harness the cgo boundary is part of the
+cost.
 

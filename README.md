@@ -322,7 +322,8 @@ gaps no library work can close, because they are properties of your deployment.
 - **Checked by engines that share no code with it.** In flash1's independent
   harness the adapter reproduces the consensus report hash on every scenario,
   passes the 34-case conformance gate and the 192-point state audit, and is
-  byte-identical to Liquibook on 100 scenario-seeds ([docs/FLASH1.md](docs/FLASH1.md)).
+  byte-identical to Liquibook on 100 scenario-seeds. flash1 lists it among the
+  engines that conform as shipped ([docs/FLASH1.md](docs/FLASH1.md)).
   On a shared tape, geseq/orderbook, OrderBook-rs and CppTrader each produce the
   same trades and final book ([docs/CROSS-ENGINE.md](docs/CROSS-ENGINE.md)).
 - **Tested and benchmarked.** Race, fuzz, soak, and replay-recovery suites;
