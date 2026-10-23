@@ -6,7 +6,9 @@ name: Bench gate
 # not a reference. Pushes run with -enforce since the slice B calibration (§15): what
 # that fails on is decided by the judge, which is built from the base, so allocations
 # for every gated benchmark and the timing of the benchmarks calibration cleared.
-# Scheduled anchor runs and dispatches without the input stay report-only.
+# Scheduled anchor runs and dispatches without the input stay report-only. Pull
+# requests are enforced like pushes (§20); they carry no paths filter, because a
+# skipped workflow leaves a required check pending, so "Affected?" decides instead.
 #
 # Its own file rather than a job in bench.yml, because triggers apply to every job
 # in a workflow, and these would also run the publishing job.
@@ -22,6 +24,9 @@ on:
       - "cmd/benchgate/**"
       - "go.mod"
       - ".github/workflows/bench-gate.yml"
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       mode:
@@ -47,21 +52,46 @@ permissions:
 
 # Pushes to a branch queue behind each other. Dispatches do not share a group: an
 # A/A calibration fires several at once, and GitHub keeps only one pending run per
-# group, so a shared group would silently cancel all but one of them.
+# group, so a shared group would silently cancel all but one of them. A new push to
+# a pull request makes its running comparison moot, so that one is cancelled.
 concurrency:
-  group: bench-gate-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'push' }}
-  cancel-in-progress: false
+  group: bench-gate-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # A pull request is judged at its head commit, not GitHub's merge commit, so
+      # base..HEAD is the PR's own commits and its trailers are read from them.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # The push trigger's paths, applied as a step for pull requests (§20.2). Any
+      # other event is affected by definition: the trigger already filtered it.
+      - name: Affected?
+        id: affected
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then echo "yes=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          mb=$(git merge-base "$PR_BASE" HEAD)
+          if git diff --quiet "$mb" HEAD -- pkg internal/tape internal/refmatch \
+               internal/benchgate cmd/benchgate go.mod .github/workflows/bench-gate.yml; then
+            echo "## Benchmark gate: not affected" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "This pull request changes nothing the gate measures." >> "$GITHUB_STEP_SUMMARY"
+            echo "not affected"
+          else
+            echo "yes=1" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/setup-go@v5
+        if: steps.affected.outputs.yes == '1'
         with:
           go-version: "1.27"
           cache: true
@@ -71,6 +101,7 @@ jobs:
       # TestDigestVector; this checks the layout with something that is not the Go
       # encoder.
       - name: Digest vector, outside Go
+        if: steps.affected.outputs.yes == '1'
         working-directory: internal/benchgate/testdata
         run: |
           for chain in core full; do
@@ -89,18 +120,24 @@ jobs:
 
       - name: Choose the base
         id: base
+        if: steps.affected.outputs.yes == '1'
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           MODE: ${{ inputs.mode || (github.event_name == 'schedule' && 'anchor') || 'compare' }}
           INPUT_BASE: ${{ inputs.base }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           base=""
           case "$MODE" in
             aa)     base=$(git rev-parse HEAD) ;;
             anchor) base=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true) ;;
             *)
-              if [ "$EVENT" = "push" ]; then base="$BEFORE"; else base="${INPUT_BASE:-HEAD~1}"; fi ;;
+              case "$EVENT" in
+                push)         base="$BEFORE" ;;
+                pull_request) base=$(git merge-base "$PR_BASE" HEAD) ;;
+                *)            base="${INPUT_BASE:-HEAD~1}" ;;
+              esac ;;
           esac
           # A zero before (a new branch), or one that is not an ancestor (a force
           # push), is no base at all, and is said so rather than guessed.
@@ -150,11 +187,11 @@ jobs:
           "$RUNNER_TEMP/benchgate" compare \
             -base-dir "$RUNNER_TEMP/base" -head-dir . \
             -mode "${{ steps.base.outputs.mode }}" \
-            ${{ (github.event_name == 'push' || inputs.enforce) && '-enforce' || '' }} \
+            ${{ (github.event_name == 'push' || github.event_name == 'pull_request' || inputs.enforce) && '-enforce' || '' }} \
             -out bench-result.json
 
       - name: Not compared
-        if: steps.judge.outputs.ready != '1'
+        if: steps.affected.outputs.yes == '1' && steps.judge.outputs.ready != '1'
         run: |
           reason="${{ steps.base.outputs.reason }}${{ steps.judge.outputs.reason }}"
           echo "## Benchmark gate: not compared" >> "$GITHUB_STEP_SUMMARY"
