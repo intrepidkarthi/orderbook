@@ -1202,3 +1202,4 @@ this exists for contributors: a PR is judged before it is merged, not after.
 - **Scope G: defer the anchor comparison.** Not taken. Without it, cumulative drift (statistics A4) is invisible. It reuses the compare path with a different base and stays report-only.
 - **Scope A4: define and measure `AimLive` before freezing the target.** It was measured instead, and the knob was dropped (§2.1). The 50% target became a measured floor of 10%.
 - **Draft: put the `compare` job in `bench.yml`.** Changed. Workflow triggers apply to every job, so the new triggers would also run the publishing job. The gate gets its own file.
+
