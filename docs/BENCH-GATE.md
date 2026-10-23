@@ -1,8 +1,8 @@
 # Benchmark Gate — A Slowdown That Can Fail a Build, and a Tape Another Matcher Can Replay
 
-Status: **built: slice A, and slice B's calibration and enforcement (§15); `pull_request` pending** — part of milestone M10 in
+Status: **built: slice A, and slice B's calibration and enforcement (§15); `pull_request` specified (§20)** — part of milestone M10 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md), written before the code, as this
-repository does it · Author: Karthikeyan NG · Last updated: 2026-10-06
+repository does it · Author: Karthikeyan NG · Last updated: 2026-10-23
 
 > **Position as written.** `bench.yml` runs `go test -bench` once per package group
 > (`.github/workflows/bench.yml:36,46`) and pipes the raw output into the run summary
@@ -1136,6 +1136,59 @@ so a real 1.2× regression often reads below the 1.10 median threshold.
 - **The quiet week for `pull_request` keeps its 2026-10-07 start.** It restarts if a
   push now falsely fails on a newly enforced benchmark, and §14.1 waits for a full
   week without one.
+
+## 20. `pull_request` — written before its code
+
+§14.1 step 6, the last item of slice B. Changes still reach `main` by direct push, so
+this exists for contributors: a PR is judged before it is merged, not after.
+
+### 20.1 When
+
+- **The quiet week held.** No push has failed falsely since the clock's 2026-10-07
+  start, fourteen days before this was written.
+- **The evidence is thin, and that is accepted.** Only three enforced pushes ran after
+  §19 widened timing enforcement (`9aff8e1`, `db7bdca`, `eaf4049`), all passing, plus
+  two report-only anchor runs. A false failure on a PR costs a re-run, not a broken
+  `main`, so this is not a reason to wait. If a PR fails falsely, the quiet-week rule
+  applies again and the trigger goes back to report-only (`-enforce` dropped for
+  `pull_request`) until a week passes without one.
+
+### 20.2 What runs
+
+- **Trigger:** `pull_request` against `main`, types `opened`, `synchronize`, `reopened`.
+  Never `pull_request_target`: the job builds and runs the PR's code, so it gets the
+  read-only token a fork PR gets, and no secrets. The workflow uses none.
+- **No `paths:` filter on this trigger.** A path filter that skips a workflow leaves a
+  required check pending forever (§5.5). The path decision is a step: if the PR changes
+  nothing under the push trigger's paths, the job writes "not affected" to its summary
+  and succeeds.
+- **Head is the PR's head commit, not GitHub's merge commit.** Checkout uses
+  `pull_request.head.sha`, which the base repository holds for fork PRs too.
+- **Base is `git merge-base pull_request.base.sha head`.** The comparison is what the
+  PR changes, and `base..HEAD` is exactly the PR's commits, so §5.3 trailers are read
+  from those commits and nothing else.
+- **Enforced.** Same judge, built from base, same `-enforce`, as a push.
+- **Concurrency:** one group per PR, `cancel-in-progress: true`. A new push to the PR
+  makes the old result moot. Push and dispatch groups are unchanged.
+
+### 20.3 What it cannot do
+
+- **It cannot protect its own workflow file.** `pull_request` runs the workflow as the
+  PR has it, so a PR that edits `bench-gate.yml` can change what judges it. The judge
+  binary still comes from base, and `Bench-Gate-Change:` is still required, but only
+  if the edited workflow still runs the judge. A PR touching that file is reviewed by
+  reading it; the check passing says nothing.
+- **Squash merges can drop trailers.** The push run after the merge reads trailers from
+  the commit that lands on `main`. A squash that leaves out a `Bench-Accept:` fails that
+  push run even though the PR passed. Merge with the trailers in the final message.
+- **A fork's first run waits for approval**, by the repository's Actions setting. That
+  is GitHub's control, not the gate's.
+
+### 20.4 Done when
+
+- The PR trigger runs on a test PR from a branch that touches `pkg/`, and is enforced.
+- The same PR with only a docs change reports "not affected" and passes.
+- Status line and ADOPTION-PLAN 3.5 updated.
 
 ## Appendix: Review points not taken
 
