@@ -34,8 +34,10 @@ Or directly: `go test -race ./...`, `go vet ./...`.
 3. Make sure `make check` passes and `gofmt` is clean.
    If the change touches `pkg/matching` or `pkg/orderbook`, also run `make bench-check`.
    It compares your working tree against the merge base on this machine, the way CI's
-   bench gate does after a push ([docs/BENCH-GATE.md](docs/BENCH-GATE.md)). Changes reach
-   `main` by direct push, so this is the only comparison that happens before one does.
+   bench gate does ([docs/BENCH-GATE.md](docs/BENCH-GATE.md)). The gate also runs on your
+   PR, enforced; running it locally first saves a round trip. If a slowdown is
+   intended, say so with a `Bench-Accept:` trailer (§5.3), and keep it in the message if
+   the PR is squashed.
 4. Open a PR describing the change and how you verified it.
 
 ## Before a large PR — scope & quality bar

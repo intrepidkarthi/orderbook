@@ -1,6 +1,6 @@
 # Adoption Plan — the Go order book you can trust, proven in public
 
-Status: **in progress** · Started 2026-10-07 · Author: Karthikeyan NG
+Status: **done** · Started 2026-10-07, every step closed 2026-10-23 · Author: Karthikeyan NG
 
 This is the working checklist for the adoption program that follows the landscape
 survey in [`LANDSCAPE.md`](LANDSCAPE.md). It is executed one step at a time, and each
@@ -129,8 +129,12 @@ makes it easy to adopt. Phase 3 spends engineering where Phase 1's measurements 
   *Done 2026-10-07* ([`WAL-SYNC.md`](WAL-SYNC.md) §5): WAL append p99 5 ms → 100 µs, the
   client's p99.9 100 → 25 ms; the match stage rose a bucket, recorded as the next thing to
   attribute.
-- [ ] **3.5 `pull_request` for the gate**, no earlier than 2026-10-14 and only after a
+- [x] **3.5 `pull_request` for the gate**, no earlier than 2026-10-14 and only after a
   week of enforced pushes without a false failure.
+  *Done 2026-10-23* ([`BENCH-GATE.md`](BENCH-GATE.md) §20): enforced on pull requests,
+  judged at the PR's head against its merge base, with the path decision made in a
+  step. Trialled on two throwaway PRs: a `pkg/` change compared and passed, a docs
+  change reported "not affected".
 
 ## Needs Karthik
 

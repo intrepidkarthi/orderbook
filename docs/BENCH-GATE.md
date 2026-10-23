@@ -1,6 +1,6 @@
 # Benchmark Gate — A Slowdown That Can Fail a Build, and a Tape Another Matcher Can Replay
 
-Status: **built: slice A, and slice B's calibration and enforcement (§15); `pull_request` specified (§20)** — part of milestone M10 in
+Status: **built: slice A, and slice B's calibration and enforcement (§15); `pull_request` built and trialled (§20)** — part of milestone M10 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md), written before the code, as this
 repository does it · Author: Karthikeyan NG · Last updated: 2026-10-23
 
@@ -1189,6 +1189,21 @@ this exists for contributors: a PR is judged before it is merged, not after.
 - The PR trigger runs on a test PR from a branch that touches `pkg/`, and is enforced.
 - The same PR with only a docs change reports "not affected" and passes.
 - Status line and ADOPTION-PLAN 3.5 updated.
+
+### 20.5 What the trial found (2026-10-23)
+
+- **The gate change itself**, pushed as `d3caf3c` with `Bench-Gate-Change:`, passed
+  its own enforced push run
+  ([39918014074](https://github.com/intrepidkarthi/orderbook/actions/runs/39918014074)).
+- **A `pkg/` change** (draft PR #26, an unused constant in `pkg/matching`) was checked
+  out at its head `292d911`, not the merge commit, and compared against the merge base
+  `d3caf3c` under `-enforce`. All four timing-enforced benchmarks passed, at medians
+  0.994-1.021, with allocations unchanged
+  ([39918923581](https://github.com/intrepidkarthi/orderbook/actions/runs/39918923581)).
+- **A docs-only change** (draft PR #27) reported "not affected" and passed, with every
+  step after the path step skipped
+  ([39918928929](https://github.com/intrepidkarthi/orderbook/actions/runs/39918928929)).
+- Both PRs were closed unmerged and their branches deleted.
 
 ## Appendix: Review points not taken
 

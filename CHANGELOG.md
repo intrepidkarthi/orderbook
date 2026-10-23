@@ -7,6 +7,15 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Added
+
+- **The benchmark gate judges pull requests** ([`docs/BENCH-GATE.md`](docs/BENCH-GATE.md)
+  §20). It is enforced as on a push, at the PR's head commit against its merge base,
+  so trailers are read from the PR's own commits. A PR that touches nothing the gate
+  measures reports "not affected" and passes, so a required check never hangs. A PR
+  that edits `bench-gate.yml` runs its own version of the workflow, so that file is
+  reviewed by reading it.
+
 ## [0.28.0] - 2026-10-21
 
 ### Added
