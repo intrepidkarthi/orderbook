@@ -42,6 +42,10 @@ on:
         description: "fail the job on a timing or allocation failure"
         type: boolean
         default: false
+      head_pgo:
+        description: "committed CPU profile to build the head arm with (docs/PGO.md §4); dispatch only"
+        type: string
+        default: ""
   schedule:
     # Weekly drift report against the last release: ten commits at +8% each all
     # pass against their own base, and only this sees them add up. Report-only.
@@ -181,12 +185,18 @@ jobs:
           } > pkg/matching/zz_benchgate_layout_pad.go
           echo "layout pad: $n bytes"
 
+      # head_pgo is read only on dispatch, and passed through the environment so
+      # the input never becomes part of the script.
       - name: Compare
         if: steps.judge.outputs.ready == '1'
+        env:
+          HEAD_PGO: ${{ github.event_name == 'workflow_dispatch' && inputs.head_pgo || '' }}
         run: |
+          pgo=()
+          if [ -n "$HEAD_PGO" ]; then pgo=(-head-pgo "$HEAD_PGO"); fi
           "$RUNNER_TEMP/benchgate" compare \
             -base-dir "$RUNNER_TEMP/base" -head-dir . \
-            -mode "${{ steps.base.outputs.mode }}" \
+            -mode "${{ steps.base.outputs.mode }}" "${pgo[@]}" \
             ${{ (github.event_name == 'push' || github.event_name == 'pull_request' || inputs.enforce) && '-enforce' || '' }} \
             -out bench-result.json
 

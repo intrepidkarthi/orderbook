@@ -130,6 +130,7 @@ type Report struct {
 	TrailerProblems []string      `json:"trailer_problems"`
 	Trailers90d     int           `json:"trailers_90d"`
 	Failed          bool          `json:"failed"`
+	HeadPGO         string        `json:"head_pgo,omitempty"`
 }
 
 func compare(args []string) int {
@@ -140,7 +141,20 @@ func compare(args []string) int {
 	out := fs.String("out", "bench-result.json", "where to write the report")
 	mode := fs.String("mode", "compare", "recorded in the report: compare, aa or anchor")
 	only := fs.String("only", "", "regexp: restrict to matching benchmarks (local use)")
+	headPGO := fs.String("head-pgo", "", "CPU profile to build the head arm with (-pgo); never set on push or pull_request (docs/PGO.md §4)")
 	fs.Parse(args)
+	if *headPGO != "" {
+		abs, err := filepath.Abs(*headPGO)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "benchgate:", err)
+			return 2
+		}
+		if _, err := os.Stat(abs); err != nil {
+			fmt.Fprintln(os.Stderr, "benchgate: -head-pgo:", err)
+			return 2
+		}
+		*headPGO = abs
+	}
 	if *baseDir == "" {
 		fmt.Fprintln(os.Stderr, "benchgate: -base-dir is required")
 		return 2
@@ -148,7 +162,7 @@ func compare(args []string) int {
 
 	deadline := time.Now().Add(budget)
 	rep := &Report{Mode: *mode, Enforce: *enforce, Rounds: rounds, Benchtime: map[string]string{},
-		SourceHashes: map[string]string{}, Machine: machine()}
+		SourceHashes: map[string]string{}, Machine: machine(), HeadPGO: *headPGO}
 	work, err := os.MkdirTemp("", "benchgate-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -162,7 +176,13 @@ func compare(args []string) int {
 		t.sha = revision(t.dir)
 		for _, p := range pkgs {
 			bin := filepath.Join(work, t.arm+"-"+strings.ReplaceAll(p.path, "/", "_")+".test")
-			cmd := exec.Command("go", "test", "-c", "-o", bin, "./"+p.path)
+			// go test -c ignores a default.pgo, so the only way a profile reaches a
+			// test binary is the explicit flag, and only the head arm gets it.
+			buildArgs := []string{"test", "-c", "-o", bin}
+			if t.arm == "head" && *headPGO != "" {
+				buildArgs = append(buildArgs, "-pgo="+*headPGO)
+			}
+			cmd := exec.Command("go", append(buildArgs, "./"+p.path)...)
 			cmd.Dir = t.dir
 			if msg, err := cmd.CombinedOutput(); err != nil {
 				rep.Notes = append(rep.Notes, fmt.Sprintf("%s: %s did not build: %s", t.arm, p.path, firstLine(msg)))
@@ -598,6 +618,9 @@ func renderSummary(r *Report) string {
 	fmt.Fprintf(&b, "base `%s` · head `%s` · %s · %s %s/%s, %d CPUs · load %s → %s\n\n",
 		short(r.BaseSHA), short(r.HeadSHA), r.Round1Order, r.Machine.CPUModel, r.Machine.GOOS, r.Machine.GOARCH,
 		r.Machine.NumCPU, r.Machine.LoadBefore, r.Machine.LoadAfter)
+	if r.HeadPGO != "" {
+		fmt.Fprintf(&b, "Head built with `-pgo=%s`; base without.\n\n", filepath.Base(r.HeadPGO))
+	}
 	if r.DigestBase != r.DigestHead {
 		fmt.Fprintf(&b, "Digest on base's tape differs: base `%s`, head `%s`. TapeReplay timing is not compared.\n\n", short(r.DigestBase), short(r.DigestHead))
 	}
