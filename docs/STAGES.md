@@ -139,7 +139,11 @@ and not the median.
 **The match stage is now what the engine and its sinks actually cost.** The queue's
 p99, and the client's, swung between 5 ms and 250 ms across runs of either build.
 That tail does not belong to either ring. Each run also includes one or two
-checkpoints, taken on the matching goroutine at 13–14 ms each with about 640 resting
-orders. That fits the smaller tail spikes, not the large ones. The large spikes are
+checkpoints at 13–14 ms each with about 640 resting orders. *Corrected 2026-10-25:*
+that figure is `obgw_snapshot_duration_ns`, which times `wal.WriteSnapshot` on the
+checkpoint goroutine, not the matcher. The matcher's share is `TakeSnapshot`, which
+`BenchmarkTakeSnapshot` puts at about 0.1 ms per 1,000 resting orders on an M4
+(1.1 ms at 10,000, 19 ms at 100,000), so at 640 orders a checkpoint pauses trading
+for well under a millisecond and explains none of these spikes. The large spikes are
 most likely this laptop, as §5's 100 ms run of both builds suggested. Telling the two
 apart needs a quieter machine, and it is the next open question here.
