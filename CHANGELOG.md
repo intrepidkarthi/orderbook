@@ -9,6 +9,14 @@ versions may include breaking changes).
 
 ### Added
 
+- **PGO, measured and not adopted** ([`docs/PGO.md`](docs/PGO.md)). With a profile
+  taken from a different tape than the one timed, CI's go1.27 build ran 2-5% faster on
+  two of the four enforced benchmarks and no faster on the other two. The bar,
+  written before the data, was 5% in every run. No `default.pgo` is committed. A
+  Go library cannot pass PGO on to its importers in any case; only this
+  repository's own binaries could have used it. `cmd/benchgate compare -head-pgo`
+  and the `head_pgo` dispatch input keep the measurement one dispatch away.
+
 - **The benchmark gate judges pull requests** ([`docs/BENCH-GATE.md`](docs/BENCH-GATE.md)
   §20). It is enforced as on a push, at the PR's head commit against its merge base,
   so trailers are read from the PR's own commits. A PR that touches nothing the gate

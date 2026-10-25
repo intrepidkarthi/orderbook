@@ -1,6 +1,6 @@
 # PGO — Profile-Guided Optimisation, Measured Before It Is Adopted
 
-Status: **specified; measurement pending** · Part of M12 in
+Status: **measured 2026-10-25; not adopted (§6)** · Part of M12 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md), written before its code, as this
 repository does it · Author: Karthikeyan NG · 2026-10-25
 
@@ -101,4 +101,69 @@ If adopted:
 
 ## 6. Results
 
-*To be written after the measurement.*
+Measured 2026-10-25. Ratios are head ÷ base medians from the judge, so below 1 is
+faster. "—" means the judge called that benchmark inconclusive twice (too many tainted
+pairs), which is not a measurement.
+
+### 6.1 Profiles
+
+- **Out-of-sample:** `go test -run '^$' -bench 'BenchmarkSelfReplay$' -benchtime 10s
+  -cpuprofile basic.pprof` in `cmd/xeng`, committed as
+  `internal/benchgate/testdata/pgo/basic-selfreplay.pprof`.
+- **In-sample:** the same in `internal/benchgate` with
+  `-bench 'BenchmarkTapeReplay/sink=nil$'`. Not committed.
+- Most of both profiles is the Go runtime: allocation, GC and scheduling. PGO reshapes
+  the call graph of this repository's code, which is the smaller share.
+
+### 6.2 CI, go1.27, out-of-sample profile (the runs that decide)
+
+Three dispatches at `d054885`, base and head the same commit, all on AMD EPYC 7763
+([40213607364](https://github.com/intrepidkarthi/orderbook/actions/runs/40213607364),
+[40213610055](https://github.com/intrepidkarthi/orderbook/actions/runs/40213610055),
+[40213612777](https://github.com/intrepidkarthi/orderbook/actions/runs/40213612777)):
+
+| Benchmark | Run 1 | Run 2 | Run 3 |
+|---|---:|---:|---:|
+| `Engine_CancelReplaceInto` | 0.980 | 0.968 | 0.961 |
+| `Engine_MatchInto` | 0.998 | 0.994 | 0.997 |
+| `TapeReplay/sink=nil` | 0.953 | 0.954 | 0.969 |
+| `OrderBook_LevelChurn` | 1.004 | 0.998 | 1.016 |
+
+Digests agreed in all three, and allocations were unchanged.
+
+### 6.3 Local, M4, go1.23.5
+
+| Benchmark | Out-of-sample, 3 runs | In-sample, 3 runs |
+|---|---|---|
+| `Engine_CancelReplaceInto` | —, 0.896, 0.895 | —, —, 0.877 |
+| `Engine_MatchInto` | 0.972, —, 0.946 | —, —, 0.908 |
+| `TapeReplay/sink=nil` | 0.964, —, — | —, —, 0.921 |
+| `OrderBook_LevelChurn` | 1.005, —, 0.984 | 0.968, 0.971, 0.987 |
+
+The laptop tainted half the cells. Where it measured, gains are larger than on CI, and
+the in-sample profile does a little better than the out-of-sample one, as §3 expected.
+Digests agreed in all six runs.
+
+### 6.4 Against the rule
+
+1. **Fails.** No benchmark reached 0.95 in every run. The closest is
+   `TapeReplay/sink=nil` on CI at 0.953-0.969.
+2. Holds: the worst ratio is 1.016.
+3. Holds: every digest agreed, in nine runs.
+4. Holds.
+
+**Not adopted.** No `default.pgo` is committed. The rule was set before the data, and
+it is not moved now that the data is close to it.
+
+### 6.5 What this says
+
+- **PGO is worth about 2-5% on the engine's hot paths on CI's toolchain**, and nothing
+  on `Engine_MatchInto` or `OrderBook_LevelChurn`. The result is too small to be worth a
+  profile to keep fresh in four binaries.
+- **It is also below what the gate can see.** The detection floor is 1.2-1.5×, so a
+  regression of the size PGO wins back would pass the gate unnoticed.
+- **The gain is capped by the runtime's share of the profile.** Larger gains need less
+  allocation and fewer pointers for the GC to scan: M11's arena and hot/cold
+  experiments, not compiler flags.
+- `-head-pgo` and the `head_pgo` dispatch input stay, so a later Go release or a
+  changed profile can be re-measured with one dispatch.
