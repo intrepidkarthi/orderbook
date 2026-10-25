@@ -106,8 +106,10 @@ func BenchmarkReplayTail(b *testing.B) {
 	}
 }
 
-// BenchmarkWriteSnapshot — the pause a checkpoint imposes on the matching goroutine,
-// at several book sizes, since checkpoint cadence trades restart time against this.
+// BenchmarkWriteSnapshot — writing a checkpoint to disk, at several book sizes, since
+// checkpoint cadence trades restart time against this. It runs on the checkpointing
+// goroutine, not the matching one: the matcher's share of a checkpoint is
+// TakeSnapshot, measured by pkg/matching's BenchmarkTakeSnapshot.
 func BenchmarkWriteSnapshot(b *testing.B) {
 	for _, n := range []int{1_000, 10_000, 100_000} {
 		b.Run(fmt.Sprintf("%d_orders", n), func(b *testing.B) {

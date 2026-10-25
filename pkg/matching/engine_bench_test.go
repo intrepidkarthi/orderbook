@@ -1,6 +1,7 @@
 package matching
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -165,5 +166,28 @@ func BenchmarkEngine_CancelWithExpiries(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = e.Cancel(ids[i], "mm")
+	}
+}
+
+// BenchmarkTakeSnapshot is the half of a checkpoint that runs on the matching
+// goroutine: Runner.Checkpoint calls TakeSnapshot there, and trading waits for it.
+// Writing the snapshot to disk happens afterwards on the caller's goroutine, and is
+// pkg/wal's BenchmarkWriteSnapshot. The cost grows with the resting book, one copied
+// order at a time, so it is reported per order as well.
+func BenchmarkTakeSnapshot(b *testing.B) {
+	for _, n := range []int{1_000, 10_000, 100_000} {
+		b.Run(fmt.Sprintf("%d_orders", n), func(b *testing.B) {
+			e := NewEngine(Config{Symbol: "X", MaxOrders: n + 1})
+			for i := 0; i < n; i++ {
+				e.Process(mkOrder("u", types.SideBuy, int64(1000+i%4000), 1))
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = e.TakeSnapshot()
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(n), "ns/order")
+		})
 	}
 }
