@@ -49,7 +49,10 @@ an upper bound, not a result.
 - **The in-sample profile** (`bench-v1` replay) is measured as well and reported beside
   it, labelled as the upper bound. It decides nothing.
 
-Both profiles are captured on the same M4, and their commands are recorded in §6.
+Both profiles are captured on the same M4, and their commands are recorded in §6. The
+out-of-sample one is committed as `internal/benchgate/testdata/pgo/basic-selfreplay.pprof`
+so a CI dispatch can use it. That file is a measurement input, not an adoption: no
+`default.pgo` exists unless §5 passes.
 
 ## 4. How it is measured
 
