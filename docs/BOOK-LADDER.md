@@ -1,6 +1,6 @@
 # Book Ladder — Where the Book's Time Goes, and the Design That Follows From It
 
-Status: **accepted 2026-10-26 (§8 answered); phase 1 measured and reverted (§6.3); phase 2's first version failed the gate (§6.5); the revision is judged under §6.6** · Part of M11 in
+Status: **accepted 2026-10-26 (§8 answered); phase 1 measured and reverted (§6.3); phase 2 failed twice on CI (§6.5, §6.7); a hybrid is proposed in §8.4, awaiting a decision** · Part of M11 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) · Author: Karthikeyan NG ·
 2026-10-26
 
@@ -222,6 +222,37 @@ digests and the differential tests.
 Today that is `Engine_CancelReplaceInto`, `Engine_MatchInto`, `TapeReplay/sink=nil`
 and `OrderBook_LevelChurn`, and allocations for every gated benchmark.
 
+### 6.7 The revision, measured (2026-10-26): fails, worse
+
+Three CI dispatches, base `720d26c`, head `7f2cfb0`
+([40284461396](https://github.com/intrepidkarthi/orderbook/actions/runs/40284461396),
+[40284464561](https://github.com/intrepidkarthi/orderbook/actions/runs/40284464561),
+[40284467930](https://github.com/intrepidkarthi/orderbook/actions/runs/40284467930)):
+
+| Benchmark | Run 1 | Run 2 | Run 3 | §6.6 |
+|---|---:|---:|---:|---|
+| `TapeReplay/sink=nil` | 0.880 | 0.876 | 0.868 | passes |
+| `Engine_MatchInto` | 0.908 | 0.906 | 0.929 | passes |
+| `Engine_CancelReplaceInto` | 1.106 | 1.110 | 1.143 | **fails** |
+| `OrderBook_LevelChurn` | 1.327 | 1.316 | 1.333 | **fails** |
+
+Not adopted. §6.5's diagnosis was wrong. A deep lookup does not cost the pointer read.
+It costs the binary search itself: about eleven data-dependent branches over 2,000
+prices, against one hash of an integer key. A sorted array loses that comparison
+however it is laid out. The second slice also doubled the copying on every level
+insert and removal, which is what `LevelChurn` measures.
+
+**What the two versions establish together:**
+
+- Removing the map from **the best-level path** is worth 12-15% on the tape and 7-13%
+  on `Engine_MatchInto`, consistently, on two layouts.
+- Removing it from **deep lookups** costs 10-14% where a book is wide and accessed at
+  random depth. That is the cancel-heavy pattern of a market maker re-quoting across
+  many levels.
+- So the map should not go. It should stop being on the path that reads the best.
+
+§8.4 proposes that design. It needs a decision before any more code.
+
 ## 7. Later, each with its own design
 
 - **Account handles.** An engine entry point taking an account already interned to an
@@ -236,6 +267,23 @@ and `OrderBook_LevelChurn`, and allocations for every gated benchmark.
   `perf` on a runner), so there is something to point them at.
 
 ## 8. Open questions for review
+
+### 8.4 After §6.7: a hybrid, proposed 2026-10-26, not yet decided
+
+Keep the `price → level` map **and** the ladder of level pointers, best last. One
+slice: the price slice becomes the level slice, so there is no second slice to copy.
+
+- **Best level, peek, front order:** the ladder's last element. No map.
+- **Add:** probe the top four levels of the ladder first. On a miss, look up the map,
+  as today. A new level is inserted in both, as today.
+- **Remove of an emptied level:** at the best, a truncation plus a map delete.
+  Elsewhere, a map delete plus the same memmove as today's price slice.
+- **Expected:** the best-level gain of §6.5 on the tape and `MatchInto`. Deep
+  cancel-and-replace and level churn back to today's cost: the same map operations and
+  one slice moved. This is a prediction, and §6.7 shows how a prediction here can be
+  wrong.
+- **Judged** under §6.6 as it stands, on three CI dispatches.
+
 
 *Answered 2026-10-26: the proposals stand. (1) The model-test oracle plus the gate's
 base-against-head comparison is the A/B; no build tag. (2) Phases 1 and 2 only; §7
