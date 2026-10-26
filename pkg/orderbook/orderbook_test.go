@@ -323,3 +323,40 @@ func TestPreallocRestsWithoutAllocating(t *testing.T) {
 		t.Fatalf("without Prealloc: %v allocations for %d orders; the test no longer shows what the option removes", got, n)
 	}
 }
+
+// TestAddRefusesDuplicateIDs pins BOOK-LADDER §5.2: whichever way an id arrives, a
+// second order with it is not rested. A caller-supplied duplicate is caught by the
+// first lookup; an id the book assigns can still collide with one a caller supplied
+// earlier, and is caught by the second.
+func TestAddRefusesDuplicateIDs(t *testing.T) {
+	ob := New(Config{Symbol: "X"})
+
+	first := limit(t, "a", types.SideBuy, 100, 1)
+	first.ID = 7
+	if err := ob.Add(first); err != nil {
+		t.Fatal(err)
+	}
+	dup := limit(t, "b", types.SideBuy, 101, 1)
+	dup.ID = 7
+	if err := ob.Add(dup); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := ob.Get(7); got != first || ob.Count() != 1 {
+		t.Fatalf("supplied duplicate id rested: count %d, Get(7) is first: %v", ob.Count(), got == first)
+	}
+
+	// The book numbers from 1, so a caller-supplied id 1 is where its own counter
+	// lands next.
+	one := limit(t, "c", types.SideBuy, 99, 1)
+	one.ID = 1
+	if err := ob.Add(one); err != nil {
+		t.Fatal(err)
+	}
+	assigned := limit(t, "d", types.SideBuy, 98, 1)
+	if err := ob.Add(assigned); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := ob.Get(1); got != one || ob.Count() != 2 {
+		t.Fatalf("assigned id collided and rested: count %d, Get(1) is the supplied order: %v", ob.Count(), got == one)
+	}
+}
