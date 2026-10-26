@@ -7,7 +7,13 @@ package orderbook
 //
 // Both sides sort the same way by key: a bid's key is its price and an ask's is its
 // negated price, so on either side a larger key is a better price.
+//
+// The keys are kept in their own slice, in step with the levels, and searches read
+// only that. A binary search over the level pointers dereferenced one level per
+// comparison, and on a wide book that made a deep cancel-and-replace 11% slower than
+// the map it replaced (docs/BOOK-LADDER.md §6.5).
 type ladder struct {
+	keys   []int64
 	levels []*PriceLevel
 	sign   int64 // +1 for bids, -1 for asks
 }
@@ -35,10 +41,11 @@ func (l *ladder) at(i int) *PriceLevel { return l.levels[len(l.levels)-1-i] }
 // order, and whether it is there.
 func (l *ladder) search(price int64) (int, bool) {
 	k := l.key(price)
-	n := len(l.levels)
+	keys := l.keys
+	n := len(keys)
 	stop := max(n-probe, 0)
 	for i := n - 1; i >= stop; i-- {
-		switch lk := l.key(l.levels[i].Price); {
+		switch lk := keys[i]; {
 		case lk == k:
 			return i, true
 		case lk < k:
@@ -50,13 +57,13 @@ func (l *ladder) search(price int64) (int, bool) {
 	lo, hi := 0, stop
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
-		if l.key(l.levels[mid].Price) < k {
+		if keys[mid] < k {
 			lo = mid + 1
 		} else {
 			hi = mid
 		}
 	}
-	return lo, lo < stop && l.levels[lo].Price == price
+	return lo, lo < stop && keys[lo] == k
 }
 
 // get is price's level, or nil.
@@ -69,6 +76,9 @@ func (l *ladder) get(price int64) *PriceLevel {
 
 // insertAt puts lvl at index i, which search returned for its price.
 func (l *ladder) insertAt(i int, lvl *PriceLevel) {
+	l.keys = append(l.keys, 0)
+	copy(l.keys[i+1:], l.keys[i:])
+	l.keys[i] = l.key(lvl.Price)
 	l.levels = append(l.levels, nil)
 	copy(l.levels[i+1:], l.levels[i:])
 	l.levels[i] = lvl
@@ -79,12 +89,13 @@ func (l *ladder) remove(lvl *PriceLevel) {
 	n := len(l.levels)
 	if n > 0 && l.levels[n-1] == lvl {
 		l.levels[n-1] = nil
-		l.levels = l.levels[:n-1]
+		l.levels, l.keys = l.levels[:n-1], l.keys[:n-1]
 		return
 	}
 	if i, ok := l.search(lvl.Price); ok {
+		copy(l.keys[i:], l.keys[i+1:])
 		copy(l.levels[i:], l.levels[i+1:])
 		l.levels[n-1] = nil
-		l.levels = l.levels[:n-1]
+		l.levels, l.keys = l.levels[:n-1], l.keys[:n-1]
 	}
 }

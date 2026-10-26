@@ -222,6 +222,8 @@ func (ob *OrderBook) prefill(n int) {
 	// grow them either.
 	ob.bids.levels = make([]*PriceLevel, 0, len(levels))
 	ob.asks.levels = make([]*PriceLevel, 0, len(levels))
+	ob.bids.keys = make([]int64, 0, len(levels))
+	ob.asks.keys = make([]int64, 0, len(levels))
 }
 
 // Symbol returns the book's instrument symbol.

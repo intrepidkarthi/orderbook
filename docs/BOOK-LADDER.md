@@ -1,6 +1,6 @@
 # Book Ladder — Where the Book's Time Goes, and the Design That Follows From It
 
-Status: **accepted 2026-10-26 (§8 answered); phase 1 measured and reverted (§6.3); phase 2 next, judged on CI (§6.4)** · Part of M11 in
+Status: **accepted 2026-10-26 (§8 answered); phase 1 measured and reverted (§6.3); phase 2's first version failed the gate (§6.5); the revision is judged under §6.6** · Part of M11 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) · Author: Karthikeyan NG ·
 2026-10-26
 
@@ -183,6 +183,44 @@ Written after §6.3 and before any phase 2 code is built.
   ≤ 1.05, allocations unchanged or lower, digests equal.
 - **The code lives on a branch** until it passes, so a failure leaves `main` as it was.
 - Twenty local runs are still made and reported, but decide nothing.
+
+### 6.5 Phase 2, first version (2026-10-26): the gate fails it
+
+Three CI dispatches, base `720d26c`, head `effd11e`
+([40283694438](https://github.com/intrepidkarthi/orderbook/actions/runs/40283694438),
+[40283697849](https://github.com/intrepidkarthi/orderbook/actions/runs/40283697849),
+[40283701012](https://github.com/intrepidkarthi/orderbook/actions/runs/40283701012)):
+
+| Benchmark | Run 1 | Run 2 | Run 3 | §6.4 |
+|---|---:|---:|---:|---|
+| `TapeReplay/sink=nil` | 0.862 | 0.858 | 0.852 | ≤ 0.90, passes |
+| `Engine_MatchInto` | 0.915 | 0.872 | 0.885 | ≤ 0.95, passes |
+| `OrderBook_LevelChurn` | 0.879 | 0.851 | 0.881 | ≤ 1.05, passes |
+| `Engine_CancelReplaceInto` | **1.102** | **1.120** | **1.117** | not in §6.4; **the gate fails it** |
+
+Digests agreed. Allocations on the tape fell from 9,067 to 9,055.
+
+§6.4's own thresholds pass, but it named three benchmarks, and the gate enforces a
+fourth. A push of this version would fail on `main`. It is not adopted. §6.4 should
+have required every enforced benchmark to pass, and now does (§6.6).
+
+**Why.** `Engine_CancelReplaceInto` keeps 5,000 bids on 2,000 levels and cancels and
+re-adds at random depth, almost never near the best. That is the ladder's weak case:
+a probe that misses, then a binary search over 2,000 `*PriceLevel` pointers, reading
+`.Price` through each one. Profiled at a bounded iteration count, `ladder.search` was
+80 ms of flat time where the map lookup had been 10 ms.
+
+**The revision.** The ladder keeps its keys in a contiguous `[]int64`, in step with the
+level pointers, and searches only the keys. That is eight prices per cache line and no
+pointer read per comparison. The model test passes. The probe off-by-one, and a new
+sabotage that leaves a removed level's key behind, each fail the model test, the tape
+digests and the differential tests.
+
+### 6.6 The revision's rule, before its data
+
+§6.4 unchanged, plus: **every benchmark the gate enforces passes in all three runs.**
+Today that is `Engine_CancelReplaceInto`, `Engine_MatchInto`, `TapeReplay/sink=nil`
+and `OrderBook_LevelChurn`, and allocations for every gated benchmark.
 
 ## 7. Later, each with its own design
 
