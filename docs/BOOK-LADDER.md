@@ -1,6 +1,6 @@
 # Book Ladder — Where the Book's Time Goes, and the Design That Follows From It
 
-Status: **accepted 2026-10-26 (§8 answered); phase 1 measured and reverted (§6.3); phase 2 next, judged on CI (§6.4)** · Part of M11 in
+Status: **accepted 2026-10-26 (§8 answered); phase 1 measured and reverted (§6.3); phase 2 failed twice on CI (§6.5, §6.7); three versions measured, none passes §6.6 (§6.8); real NASDAQ flow decides v1 against today (§6.9)** · Part of M11 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) · Author: Karthikeyan NG ·
 2026-10-26
 
@@ -184,6 +184,130 @@ Written after §6.3 and before any phase 2 code is built.
 - **The code lives on a branch** until it passes, so a failure leaves `main` as it was.
 - Twenty local runs are still made and reported, but decide nothing.
 
+### 6.5 Phase 2, first version (2026-10-26): the gate fails it
+
+Three CI dispatches, base `720d26c`, head `effd11e`
+([40283694438](https://github.com/intrepidkarthi/orderbook/actions/runs/40283694438),
+[40283697849](https://github.com/intrepidkarthi/orderbook/actions/runs/40283697849),
+[40283701012](https://github.com/intrepidkarthi/orderbook/actions/runs/40283701012)):
+
+| Benchmark | Run 1 | Run 2 | Run 3 | §6.4 |
+|---|---:|---:|---:|---|
+| `TapeReplay/sink=nil` | 0.862 | 0.858 | 0.852 | ≤ 0.90, passes |
+| `Engine_MatchInto` | 0.915 | 0.872 | 0.885 | ≤ 0.95, passes |
+| `OrderBook_LevelChurn` | 0.879 | 0.851 | 0.881 | ≤ 1.05, passes |
+| `Engine_CancelReplaceInto` | **1.102** | **1.120** | **1.117** | not in §6.4; **the gate fails it** |
+
+Digests agreed. Allocations on the tape fell from 9,067 to 9,055.
+
+§6.4's own thresholds pass, but it named three benchmarks, and the gate enforces a
+fourth. A push of this version would fail on `main`. It is not adopted. §6.4 should
+have required every enforced benchmark to pass, and now does (§6.6).
+
+**Why.** `Engine_CancelReplaceInto` keeps 5,000 bids on 2,000 levels and cancels and
+re-adds at random depth, almost never near the best. That is the ladder's weak case:
+a probe that misses, then a binary search over 2,000 `*PriceLevel` pointers, reading
+`.Price` through each one. Profiled at a bounded iteration count, `ladder.search` was
+80 ms of flat time where the map lookup had been 10 ms.
+
+**The revision.** The ladder keeps its keys in a contiguous `[]int64`, in step with the
+level pointers, and searches only the keys. That is eight prices per cache line and no
+pointer read per comparison. The model test passes. The probe off-by-one, and a new
+sabotage that leaves a removed level's key behind, each fail the model test, the tape
+digests and the differential tests.
+
+### 6.6 The revision's rule, before its data
+
+§6.4 unchanged, plus: **every benchmark the gate enforces passes in all three runs.**
+Today that is `Engine_CancelReplaceInto`, `Engine_MatchInto`, `TapeReplay/sink=nil`
+and `OrderBook_LevelChurn`, and allocations for every gated benchmark.
+
+### 6.7 The revision, measured (2026-10-26): fails, worse
+
+Three CI dispatches, base `720d26c`, head `7f2cfb0`
+([40284461396](https://github.com/intrepidkarthi/orderbook/actions/runs/40284461396),
+[40284464561](https://github.com/intrepidkarthi/orderbook/actions/runs/40284464561),
+[40284467930](https://github.com/intrepidkarthi/orderbook/actions/runs/40284467930)):
+
+| Benchmark | Run 1 | Run 2 | Run 3 | §6.6 |
+|---|---:|---:|---:|---|
+| `TapeReplay/sink=nil` | 0.880 | 0.876 | 0.868 | passes |
+| `Engine_MatchInto` | 0.908 | 0.906 | 0.929 | passes |
+| `Engine_CancelReplaceInto` | 1.106 | 1.110 | 1.143 | **fails** |
+| `OrderBook_LevelChurn` | 1.327 | 1.316 | 1.333 | **fails** |
+
+Not adopted. §6.5's diagnosis was wrong. A deep lookup does not cost the pointer read.
+It costs the binary search itself: about eleven data-dependent branches over 2,000
+prices, against one hash of an integer key. A sorted array loses that comparison
+however it is laid out. The second slice also doubled the copying on every level
+insert and removal, which is what `LevelChurn` measures.
+
+**What the two versions establish together:**
+
+- Removing the map from **the best-level path** is worth 12-15% on the tape and 7-13%
+  on `Engine_MatchInto`, consistently, on two layouts.
+- Removing it from **deep lookups** costs 10-14% where a book is wide and accessed at
+  random depth. That is the cancel-heavy pattern of a market maker re-quoting across
+  many levels.
+- So the map should not go. It should stop being on the path that reads the best.
+
+§8.4 proposes that design. It needs a decision before any more code.
+
+### 6.8 The hybrid, measured (2026-10-26): fails, and the trade-off is real
+
+Three CI dispatches, base `720d26c`, head `95b3b2e`
+([40298147424](https://github.com/intrepidkarthi/orderbook/actions/runs/40298147424),
+[40298151367](https://github.com/intrepidkarthi/orderbook/actions/runs/40298151367),
+[40298155472](https://github.com/intrepidkarthi/orderbook/actions/runs/40298155472)):
+
+| Benchmark | Run 1 | Run 2 | Run 3 | §6.6 |
+|---|---:|---:|---:|---|
+| `TapeReplay/sink=nil` | 0.920 | 0.947 | 0.972 | ≤ 0.90, **fails** |
+| `Engine_MatchInto` | 1.044 | 1.044 | 1.041 | ≤ 0.95, **fails** |
+| `Engine_CancelReplaceInto` | **1.110** | 1.041 | 1.041 | the gate fails run 1 |
+| `OrderBook_LevelChurn` | 1.040 | 1.037 | 1.038 | ≤ 1.05, passes |
+
+Not adopted. §6.7's attribution was partly wrong too. Most of the first ladder's gain
+was not the map-free peek. It was creating and destroying price levels without a map
+write and a map delete. `Engine_MatchInto` does both on every op, and the hybrid puts
+them back.
+
+**What three versions establish:**
+
+| | No map (v1) | Today (map + price slice) | Hybrid |
+|---|---|---|---|
+| Top-of-book work: tape replay, match, level churn | **12-15% faster** | — | 3-8% faster on the tape, ~4% slower elsewhere |
+| Deep random cancel-and-replace on a wide book | **10-12% slower** | — | about even |
+
+No layout tried here wins both. **Which workload matters more is a product decision,
+not a measurement**, and this document stops there (§8.5).
+
+### 6.9 Real order flow decides between v1 and today (rule before data)
+
+§8.5 was decided on 2026-10-26 as: v1 if real flow does not penalise it, else today's
+structure. "Activity clusters near the touch" is the argument for v1, and it is a
+prediction of the kind that §6.5 and §6.7 got wrong. So it is measured.
+
+- **Data:** the first 50 M messages of a real NASDAQ TotalView-ITCH 5.0 day
+  (`01302019.NASDAQ_ITCH50.gz`, the file `itch.yml` already replays). Every stock's
+  book is built, as `pkg/itch` does: real adds, executions, cancels, deletes and
+  replaces, at the depths they actually land at.
+- **What is timed:** `itchbook -replays 3` decodes the messages into memory once,
+  then builds every book from them three times, each from empty, timing only the
+  builds. Download, decompression and decoding are outside the clock.
+- **Arms:** `itchbook` built from `main` at `720d26c` (today) and from `effd11e`
+  (v1), on one runner, ten invocations of each in ABBA order. A pair's ratio is head's
+  median build time over base's. The result is the median over the ten pairs.
+- **Correctness on real data:** both arms' summaries (message counts by type, the
+  anomaly counters, the number of books, and AAPL's top ten levels) must be
+  byte-identical.
+- **Runs:** three dispatches of `.github/workflows/itch-ab.yml`.
+- **Rule:** v1 is adopted if the result is **≤ 1.02 in all three runs** and the
+  summaries are identical. The synthetic benchmarks of §6.5 then stand as measured:
+  `Engine_CancelReplaceInto` is accepted with a `Bench-Accept` trailer, and the gate's
+  other enforced benchmarks must pass. Otherwise today's structure stays and the
+  branch is closed.
+
 ## 7. Later, each with its own design
 
 - **Account handles.** An engine entry point taking an account already interned to an
@@ -198,6 +322,38 @@ Written after §6.3 and before any phase 2 code is built.
   `perf` on a runner), so there is something to point them at.
 
 ## 8. Open questions for review
+
+### 8.5 After §6.8: which workload to favour
+
+*Decided 2026-10-26: option 1 (v1), on condition that real order flow does not
+penalise it, as measured under §6.9. Option 3 is declined: a knob users cannot reason
+about without this analysis, two structures to keep correct, and new public API.*
+
+1. **Adopt v1 (no map)** with a `Bench-Accept: Engine_CancelReplaceInto ratio<=1.25`
+   trailer (BENCH-GATE §5.3). Faster wherever activity is near the touch, which is
+   most venues, the tape and every flash1 scenario. Slower for a market maker
+   re-quoting at random depth across thousands of levels.
+2. **Keep today's structure.** Record the result, and the model test stays as a
+   guard.
+3. **Make it a `Config` choice**, defaulting to today's. An API addition, and two
+   structures to keep correct, which the model test makes affordable.
+
+### 8.4 After §6.7: a hybrid, proposed and accepted 2026-10-26
+
+Keep the `price → level` map **and** the ladder of level pointers, best last. One
+slice: the price slice becomes the level slice, so there is no second slice to copy.
+
+- **Best level, peek, front order:** the ladder's last element. No map.
+- **Add:** probe the top four levels of the ladder first. On a miss, look up the map,
+  as today. A new level is inserted in both, as today.
+- **Remove of an emptied level:** at the best, a truncation plus a map delete.
+  Elsewhere, a map delete plus the same memmove as today's price slice.
+- **Expected:** the best-level gain of §6.5 on the tape and `MatchInto`. Deep
+  cancel-and-replace and level churn back to today's cost: the same map operations and
+  one slice moved. This is a prediction, and §6.7 shows how a prediction here can be
+  wrong.
+- **Judged** under §6.6 as it stands, on three CI dispatches.
+
 
 *Answered 2026-10-26: the proposals stand. (1) The model-test oracle plus the gate's
 base-against-head comparison is the A/B; no build tag. (2) Phases 1 and 2 only; §7
