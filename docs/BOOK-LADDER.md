@@ -1,6 +1,6 @@
 # Book Ladder — Where the Book's Time Goes, and the Design That Follows From It
 
-Status: **accepted 2026-10-26 (§8 answered); phase 1 next** · Part of M11 in
+Status: **accepted 2026-10-26 (§8 answered); phase 1 measured and reverted (§6.3); phase 2 next, judged on CI (§6.4)** · Part of M11 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) · Author: Karthikeyan NG ·
 2026-10-26
 
@@ -146,6 +146,43 @@ old and new test binaries on the M4, plus the gate on push.
   for half of it.
 - **Either phase failing** is recorded in this document and reverted, as
   [`PGO.md`](PGO.md) was.
+
+### 6.3 Phase 1, measured (2026-10-26): failed, reverted
+
+Twenty alternating local runs, medians, head ÷ base:
+
+| Benchmark | Ratio |
+|---|---:|
+| `OrderBook_Add` | 1.037 |
+| `Engine_CancelReplaceInto` | 1.129 |
+| `Engine_MatchInto` | 1.049 |
+| `OrderBook_LevelChurn` | 0.996 |
+| `TapeReplay/sink=nil` | 0.983 |
+
+**Fails §6.2:** `Add` is not faster, and two benchmarks are above 1.02. Reverted. The
+test from §5.2, which pins duplicate-id refusal on both paths, stays, because it
+holds whatever `Add` does.
+
+The numbers say more about the method than about the change. Phase 1 removes one
+hash lookup, about 3 ns of a 260 ns add. `Engine_CancelReplaceInto` never reaches
+the changed line, yet read 1.129. Its own runs spread from 136 to 281 ns in the old
+build and 139 to 337 ns in the new one. On this laptop, a change smaller than about
+10% cannot be told from noise by twenty local runs. That is also the size of phase 2's
+bar.
+
+### 6.4 Phase 2's measurement, restated before its data
+
+Written after §6.3 and before any phase 2 code is built.
+
+- **Judged on CI, not the laptop.** Three `bench-gate.yml` dispatches in `compare`
+  mode, base the commit before the ladder and head the ladder, on CI's go1.27. The
+  medians are the judge's, from interleaved pairs on one runner. In the PGO runs they
+  agreed across dispatches to about ±2% (PGO §6.2).
+- **The thresholds of §6.2 are unchanged** and must hold in all three runs:
+  `TapeReplay/sink=nil` ≤ 0.90, `Engine_MatchInto` ≤ 0.95, `OrderBook_LevelChurn`
+  ≤ 1.05, allocations unchanged or lower, digests equal.
+- **The code lives on a branch** until it passes, so a failure leaves `main` as it was.
+- Twenty local runs are still made and reported, but decide nothing.
 
 ## 7. Later, each with its own design
 
