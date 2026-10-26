@@ -1,6 +1,6 @@
 # Snapshot Copy — the Checkpoint's Pause on the Matching Goroutine
 
-Status: **first run failed §5; rule restated in §6.2 before new data** · Written before its code · Author:
+Status: **adopted 2026-10-26** (first run failed §5; rule restated in §6.2 before new data, which passed it) · Written before its code · Author:
 Karthikeyan NG · 2026-10-26
 
 ## 1. The question
@@ -90,9 +90,26 @@ numbers.
   new build's median is no slower than 1.05× the old build's.
 - §5's criteria 3 and 4 stand.
 
-### 6.3 The restated run
+### 6.3 The restated run (2026-10-26)
 
-*To be written after the measurement.*
+Twenty fresh alternating runs per build, both binaries rebuilt. The 100,000-order case
+ran under `GOGC=off` with `-test.benchtime 30x`, which bounds the memory a run with
+no collection can take to about 1 GB.
+
+| Book | Old | New | Ratio | Rule | |
+|---|---:|---:|---:|---|---|
+| 1,000 orders | 57.8 µs | 40.9 µs | 0.707 | ≤ 0.80 | passes |
+| 10,000 orders | 736.1 µs | 367.5 µs | 0.499 | ≤ 0.80 | passes |
+| 100,000 orders, GC off | 9.02 ms | 6.39 ms | 0.709 | ≤ 1.05 | passes |
+
+Allocations went from 1,013, 10,020 and 100,030 to 4 at every size. The §4 tests pass,
+including the independence test and its sabotage. **Adopted**, subject to the bench
+gate on the push (criterion 4).
+
+**What it means for a venue:** the pause a checkpoint puts on trading is about halved
+at 10,000 resting orders (0.74 → 0.37 ms on an M4) and cut by about 30% at 1,000 and
+at 100,000. It still grows with the book, at about 40-65 ns per resting order. Going
+below that needs §7's redesign.
 
 ## 7. Not in this change
 

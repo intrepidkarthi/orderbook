@@ -7,6 +7,21 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Changed
+
+- **A checkpoint pauses trading for less** ([`docs/SNAPSHOT-COPY.md`](docs/SNAPSHOT-COPY.md)).
+  `TakeSnapshot`, the half of a checkpoint that runs on the matching goroutine, copies
+  the resting orders into one block instead of allocating each. Its allocations fall
+  from one per resting order to 4. On an M4 the pause at 10,000 resting orders goes
+  from 0.74 to 0.37 ms, and drops about 30% at 1,000 and 100,000. `EngineSnapshot`'s
+  fields are unchanged; holding one of its orders now keeps the whole block alive.
+
+### Fixed
+
+- **STAGES §7 put a 13-14 ms checkpoint on the matching goroutine.** That figure was
+  the disk write, which runs on the checkpoint goroutine. The matcher's share is
+  `TakeSnapshot`, now measured by `BenchmarkTakeSnapshot`.
+
 ### Added
 
 - **PGO, measured and not adopted** ([`docs/PGO.md`](docs/PGO.md)). With a profile
