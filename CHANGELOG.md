@@ -15,8 +15,6 @@ versions may include breaking changes).
   book from 50 M real NASDAQ ITCH messages 0.93×, with identical books. A re-quote at
   random depth across 2,000 levels is 1.10-1.12×, accepted with a `Bench-Accept`
   trailer. The public API, iteration order and every digest are unchanged.
-- **`itchbook -replays N`** decodes messages into memory and times only the book
-  builds, and `itch-ab.yml` compares two revisions that way on real NASDAQ flow.
 
 - **A checkpoint pauses trading for less** ([`docs/SNAPSHOT-COPY.md`](docs/SNAPSHOT-COPY.md)).
   `TakeSnapshot`, the half of a checkpoint that runs on the matching goroutine, copies
@@ -32,6 +30,9 @@ versions may include breaking changes).
   `TakeSnapshot`, now measured by `BenchmarkTakeSnapshot`.
 
 ### Added
+
+- **`itchbook -replays N`** decodes messages into memory and times only the book
+  builds, and `itch-ab.yml` compares two revisions that way on real NASDAQ flow.
 
 - **PGO, measured and not adopted** ([`docs/PGO.md`](docs/PGO.md)). With a profile
   taken from a different tape than the one timed, CI's go1.27 build ran 2-5% faster on
