@@ -242,12 +242,18 @@ Each records the choice, the rationale, and the alternative we deferred.
   allocation dominating the hot path. `shopspring/decimal` remains only for the
   `Instrument` boundary and display formatting.
 
-### 6.2 Book structure — **map + sorted ladder**
-- **Choice:** `map[price]→*PriceLevel` (O(1) lookup) + a price-sorted slice with
-  **binary-search insertion** (O(log n) new-level insert, O(1) best access).
-  Each level is a **FIFO queue** → price–time priority.
-- **Why:** best bid/ask is read constantly; it must be O(1). New price levels are
-  comparatively rare.
+### 6.2 Book structure — **a ladder per side, best level last**
+- **Choice:** each side's `*PriceLevel`s in one slice sorted so the best is last.
+  The best level is the last element (O(1), no map); a level is found by probing
+  four from the best, then binary search (O(log n)); emptying the best is a
+  truncation. Each level is a **FIFO queue** → price–time priority.
+- **Why:** measured, not assumed ([BOOK-LADDER.md](BOOK-LADDER.md)). Until 2026-10-26
+  this was a `map[price]→*PriceLevel` plus a sorted price slice. A profile put about
+  a fifth of the engine's time in that map, and removing it made the tape replay
+  14% faster and building books from 50 M real NASDAQ messages 7% faster. The cost:
+  a re-quote at random depth across thousands of levels is about 11% slower, since
+  the map's lookup there was O(1). Two layouts that tried to keep that case lost
+  the gain.
 - **Deferred, and *not attempted*:** heap / balanced BST / skip-list /
   radix-bucketed ladders. Stated this way deliberately — an earlier wording called
   them "benchmark alternatives", which entitles a reader to assume a comparison

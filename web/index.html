@@ -231,7 +231,7 @@
         </div>
         <div class="prod">
           <h3>How it handles things</h3>
-          <p>Each side is a <code>map[price]→level</code> plus a sorted price ladder; each level is
+          <p>Each side is a sorted ladder of price levels with the best one last; each level is
           a FIFO queue (that’s time priority). One writer per book keeps it correct; you scale
           out across symbols. IDs and timestamps are injected where determinism requires it.</p>
         </div>

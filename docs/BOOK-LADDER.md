@@ -1,6 +1,6 @@
 # Book Ladder — Where the Book's Time Goes, and the Design That Follows From It
 
-Status: **accepted 2026-10-26 (§8 answered); phase 1 measured and reverted (§6.3); phase 2 failed twice on CI (§6.5, §6.7); three versions measured, none passes §6.6 (§6.8); real NASDAQ flow decides v1 against today (§6.9)** · Part of M11 in
+Status: **adopted 2026-10-26 (§6.10)** · Part of M11 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) · Author: Karthikeyan NG ·
 2026-10-26
 
@@ -307,6 +307,32 @@ prediction of the kind that §6.5 and §6.7 got wrong. So it is measured.
   `Engine_CancelReplaceInto` is accepted with a `Bench-Accept` trailer, and the gate's
   other enforced benchmarks must pass. Otherwise today's structure stays and the
   branch is closed.
+
+### 6.10 Real order flow, measured (2026-10-26): v1 adopted
+
+Three dispatches of `itch-ab.yml`, base `720d26c`, head `effd11e`, 50 M messages of
+`01302019.NASDAQ_ITCH50.gz`, ten ABBA pairs each
+([40359794185](https://github.com/intrepidkarthi/orderbook/actions/runs/40359794185),
+[40359800349](https://github.com/intrepidkarthi/orderbook/actions/runs/40359800349),
+[40359806425](https://github.com/intrepidkarthi/orderbook/actions/runs/40359806425)):
+
+| Run | Base, ns/message | v1, ns/message | Median of 20 paired ratios | Range |
+|---|---:|---:|---:|---|
+| 1 | 9.27 | 8.66 | **0.935** | 0.906-0.996 |
+| 2 | 5.76 | 5.37 | **0.930** | 0.882-0.953 |
+| 3 | 4.99 | 4.66 | **0.931** | 0.872-0.970 |
+
+Both arms built byte-identical books in every invocation. **§6.9 passes: v1 is
+adopted** (`1c495af`), with `Bench-Accept: BenchmarkEngine_CancelReplaceInto
+ratio<=1.18` for the deep random re-quote that §6.5 measured at 1.10-1.12.
+
+On real flow v1 is not only no slower but 7% faster, which is consistent with §6.5's
+synthetic top-of-book results. The prediction behind it, that real activity sits near
+the touch, held this time. It was measured before it was relied on, because the two
+predictions before it had not held.
+
+The three rejected versions stay on the `book-ladder` branch, with the runs that
+judged them.
 
 ## 7. Later, each with its own design
 

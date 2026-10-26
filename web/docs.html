@@ -103,8 +103,9 @@ types      (Order, Trade, iceberg, errors)</code></pre>
       <section id="internals">
         <h2>Order book internals</h2>
         <h3>Data structure</h3>
-        <p>Each side of the book is a <code>map[price]→level</code> for O(1) level lookup,
-        plus a price-sorted slice maintained by binary-search insertion. Each level is a FIFO
+        <p>Each side of the book is one price-sorted slice of levels with the best level last:
+        reading or emptying the best is O(1), and any other level is found by a short probe
+        from the best, then binary search. Each level is a FIFO
         queue of orders (time priority). Cancels are O(1): an <code>orderID→node</code> index
         into intrusive doubly-linked lists unlinks a resting order without a scan. Book nodes
         and price levels are pooled, so steady-state add/cancel/match allocate nothing.</p>
