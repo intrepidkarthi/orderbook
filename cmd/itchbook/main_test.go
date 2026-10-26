@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -15,7 +16,7 @@ func TestSampleSummary(t *testing.T) {
 	}
 	defer f.Close()
 	var out, rate bytes.Buffer
-	if err := run(f, &out, &rate, "AAPL", 5, 0); err != nil {
+	if err := run(f, &out, &rate, "AAPL", 5, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	want := `messages 17, 572 bytes
@@ -42,13 +43,39 @@ func TestMaxStopsEarlyAndATruncatedFileFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := run(bytes.NewReader(b), &out, &bytes.Buffer{}, "", 5, 3); err != nil {
+	if err := run(bytes.NewReader(b), &out, &bytes.Buffer{}, "", 5, 3, 0); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.HasPrefix(out.Bytes(), []byte("messages 3,")) {
 		t.Fatalf("-n 3 read %q", out.String())
 	}
-	if err := run(bytes.NewReader(b[:len(b)-4]), &bytes.Buffer{}, &bytes.Buffer{}, "", 5, 0); err == nil {
+	if err := run(bytes.NewReader(b[:len(b)-4]), &bytes.Buffer{}, &bytes.Buffer{}, "", 5, 0, 0); err == nil {
 		t.Fatal("a truncated file replayed without an error")
+	}
+}
+
+// TestReplaysBuildTheSameBooks: -replays times builds from messages held in memory,
+// and the summary it prints must be the one a single pass prints, or the two arms of
+// BOOK-LADDER §6.9 would be compared on different work.
+func TestReplaysBuildTheSameBooks(t *testing.T) {
+	b, err := os.ReadFile("../../pkg/itch/testdata/sample.itch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once, replayed, rate bytes.Buffer
+	if err := run(bytes.NewReader(b), &once, &bytes.Buffer{}, "AAPL", 5, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(bytes.NewReader(b), &replayed, &rate, "AAPL", 5, 0, 3); err != nil {
+		t.Fatal(err)
+	}
+	if replayed.String() != once.String() {
+		t.Fatalf("replayed summary differs:\n%s\nsingle pass:\n%s", replayed.String(), once.String())
+	}
+	if got := strings.Count(rate.String(), "ns/message\n"); got != 3 {
+		t.Fatalf("%d build lines, want 3:\n%s", got, rate.String())
+	}
+	if !strings.Contains(rate.String(), "build_ns_per_message ") {
+		t.Fatalf("no median line:\n%s", rate.String())
 	}
 }

@@ -27,6 +27,7 @@ func main() {
 	symbol := flag.String("symbol", "", "build and print only this stock's book")
 	levels := flag.Int("levels", 5, "price levels to print on each side")
 	n := flag.Int64("n", 0, "stop after this many messages (0: read to the end)")
+	replays := flag.Int("replays", 0, "decode the messages into memory, then build the books this many times and time only the builds (0: one pass, timed with reading)")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: itchbook [-symbol SYM] [-levels N] [-n MAX] FILE|-")
 		flag.PrintDefaults()
@@ -41,7 +42,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "itchbook:", err)
 		os.Exit(1)
 	}
-	if err := run(in, os.Stdout, os.Stderr, *symbol, *levels, *n); err != nil {
+	if err := run(in, os.Stdout, os.Stderr, *symbol, *levels, *n, *replays); err != nil {
 		fmt.Fprintln(os.Stderr, "itchbook:", err)
 		os.Exit(1)
 	}
@@ -61,10 +62,13 @@ func open(path string) (io.Reader, error) {
 	return f, nil
 }
 
-func run(in io.Reader, out, rate io.Writer, symbol string, levels int, max int64) error {
+func run(in io.Reader, out, rate io.Writer, symbol string, levels int, max int64, replays int) error {
 	cfg := itch.Config{}
 	if symbol != "" {
 		cfg.Symbols = []string{symbol}
+	}
+	if replays > 0 {
+		return runReplays(in, out, rate, cfg, symbol, levels, max, replays)
 	}
 	books := itch.NewBooks(cfg)
 	r := itch.NewReader(in)
@@ -82,8 +86,60 @@ func run(in io.Reader, out, rate io.Writer, symbol string, levels int, max int64
 	}
 	elapsed := time.Since(start)
 
+	summarize(out, books, r.Offset(), symbol, levels)
+	if s := &books.Stats; s.Messages > 0 {
+		fmt.Fprintf(rate, "replayed %d messages in %v: %.0f ns/message\n",
+			s.Messages, elapsed.Round(time.Millisecond), float64(elapsed.Nanoseconds())/float64(s.Messages))
+	}
+	return nil
+}
+
+// runReplays decodes up to max messages into memory, then builds every book from
+// them replays times, each from empty, and times only the builds. Reading and
+// decoding stay outside the clock, so two builds of this command can be compared on
+// the book's own cost over real order flow (docs/BOOK-LADDER.md §6.9). The summary
+// is the last build's; each build of the same messages produces the same one.
+func runReplays(in io.Reader, out, rate io.Writer, cfg itch.Config, symbol string, levels int, max int64, replays int) error {
+	r := itch.NewReader(in)
+	var msgs []itch.Message
+	var m itch.Message
+	for max == 0 || int64(len(msgs)) < max {
+		err := r.Next(&m)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("after %d messages: %w", len(msgs), err)
+		}
+		msgs = append(msgs, m)
+	}
+	if len(msgs) == 0 {
+		return errors.New("no messages to replay")
+	}
+	var books *itch.Books
+	perMsg := make([]float64, 0, replays)
+	for i := 0; i < replays; i++ {
+		books = itch.NewBooks(cfg)
+		start := time.Now()
+		for j := range msgs {
+			books.Apply(&msgs[j])
+		}
+		ns := float64(time.Since(start).Nanoseconds()) / float64(len(msgs))
+		perMsg = append(perMsg, ns)
+		fmt.Fprintf(rate, "build %d: %.1f ns/message\n", i+1, ns)
+	}
+	summarize(out, books, r.Offset(), symbol, levels)
+	sort.Float64s(perMsg)
+	// One line a script can read: the median build over the replays.
+	fmt.Fprintf(rate, "build_ns_per_message %.2f\n", perMsg[len(perMsg)/2])
+	return nil
+}
+
+// summarize writes what the books hold: counts, anomalies and, for one stock, its
+// top levels.
+func summarize(out io.Writer, books *itch.Books, offset int64, symbol string, levels int) {
 	s := &books.Stats
-	fmt.Fprintf(out, "messages %d, %d bytes\n", s.Messages, r.Offset())
+	fmt.Fprintf(out, "messages %d, %d bytes\n", s.Messages, offset)
 	var types []string
 	for t, c := range s.ByType {
 		if c > 0 {
@@ -99,11 +155,6 @@ func run(in io.Reader, out, rate io.Writer, symbol string, levels int, max int64
 	if symbol != "" {
 		printBook(out, symbol, books.Book(symbol), levels)
 	}
-	if s.Messages > 0 {
-		fmt.Fprintf(rate, "replayed %d messages in %v: %.0f ns/message\n",
-			s.Messages, elapsed.Round(time.Millisecond), float64(elapsed.Nanoseconds())/float64(s.Messages))
-	}
-	return nil
 }
 
 func printBook(w io.Writer, symbol string, b *orderbook.OrderBook, levels int) {

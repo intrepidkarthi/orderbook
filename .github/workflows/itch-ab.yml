@@ -1,0 +1,127 @@
+name: ITCH A/B
+
+# Two builds of the book compared on real order flow (docs/BOOK-LADDER.md §6.9). The
+# first messages of a NASDAQ TotalView-ITCH 5.0 day are downloaded once, and itchbook,
+# built from each revision, decodes them into memory and times only building every
+# stock's book from them. Both arms run on this one runner, in ABBA order. The job
+# fails if the two arms build different books; the timing is reported, not judged.
+#
+# Both trees get THIS commit's cmd/itchbook, which has -replays, so the arms differ in
+# the libraries alone.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "base revision"
+        type: string
+        default: "720d26c0c3c9069d48e801404c92b303626ff9eb"
+      head:
+        description: "head revision"
+        type: string
+        default: "effd11e4ab2e1d13221917e415d445d253ac3e19"
+      file:
+        description: "sample file under emi.nasdaq.com/ITCH/Nasdaq ITCH/"
+        type: string
+        default: "01302019.NASDAQ_ITCH50.gz"
+      messages:
+        description: "messages to replay"
+        type: number
+        default: 50000000
+      pairs:
+        description: "ABBA pairs"
+        type: number
+        default: 10
+
+permissions:
+  contents: read
+
+jobs:
+  ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Build both arms
+        env:
+          BASE: ${{ inputs.base }}
+          HEAD: ${{ inputs.head }}
+        run: |
+          for arm in base head; do
+            rev=$BASE; [ "$arm" = head ] && rev=$HEAD
+            git worktree add --detach "$RUNNER_TEMP/$arm" "$rev"
+            rm -rf "$RUNNER_TEMP/$arm/cmd/itchbook"
+            cp -r cmd/itchbook "$RUNNER_TEMP/$arm/cmd/itchbook"
+            (cd "$RUNNER_TEMP/$arm" && go build -o "$RUNNER_TEMP/itchbook-$arm" ./cmd/itchbook)
+            echo "$arm: $(git rev-parse --short "$rev")"
+          done
+
+      # Decompressed to disk once, cut at a byte count well past the messages needed,
+      # so both arms read the same bytes and the network is outside every run.
+      - name: Download
+        env:
+          FILE: ${{ inputs.file }}
+        run: |
+          set +o pipefail
+          url="https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/${FILE}"
+          curl -sSfL "$url" | gzip -dc | head -c 4000000000 > "$RUNNER_TEMP/day.itch"
+          ls -l "$RUNNER_TEMP/day.itch"
+
+      - name: Replay, ABBA
+        env:
+          MESSAGES: ${{ inputs.messages }}
+          PAIRS: ${{ inputs.pairs }}
+        run: |
+          cd "$RUNNER_TEMP"
+          run() { # arm index
+            ./itchbook-$1 -symbol AAPL -levels 10 -n "$MESSAGES" -replays 3 day.itch > "sum-$1-$2.txt" 2> "rate-$1-$2.txt"
+            echo "$1 $(sed -n 's/^build_ns_per_message //p' "rate-$1-$2.txt")" >> times.txt
+          }
+          for i in $(seq 1 "$PAIRS"); do
+            if [ $((i % 2)) = 1 ]; then run base $i; run head $i; run head $i.b; run base $i.b
+            else run head $i; run base $i; run base $i.b; run head $i.b; fi
+          done
+          cat times.txt
+
+      - name: Judge
+        run: |
+          cd "$RUNNER_TEMP"
+          ref=$(ls sum-base-1.txt)
+          for f in sum-*.txt; do
+            if ! cmp -s "$f" "$ref"; then
+              echo "::error::$f differs from $ref: the two arms built different books"
+              diff "$ref" "$f" | head -20
+              exit 1
+            fi
+          done
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import statistics as st
+          rows = [l.split() for l in open("times.txt")]
+          base = [float(v) for a, v in rows if a == "base"]
+          head = [float(v) for a, v in rows if a == "head"]
+          # Runs come in ABBA groups of four; a pair is one base and one head from
+          # the same group, in order.
+          ratios = []
+          for g in range(0, len(rows), 4):
+              grp = rows[g:g + 4]
+              b = [float(v) for a, v in grp if a == "base"]
+              h = [float(v) for a, v in grp if a == "head"]
+              ratios += [hv / bv for hv, bv in zip(h, b)]
+          print("### ITCH A/B (docs/BOOK-LADDER.md §6.9)\n")
+          print(f"| | median ns/message | runs |\n|---|---:|---:|")
+          print(f"| base | {st.median(base):.2f} | {len(base)} |")
+          print(f"| head | {st.median(head):.2f} | {len(head)} |\n")
+          print(f"**Median of {len(ratios)} paired ratios, head ÷ base: {st.median(ratios):.3f}** "
+                f"(range {min(ratios):.3f}-{max(ratios):.3f}). Both arms built identical books.")
+          PY
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Runner CPU: $(lscpu | sed -n 's/^Model name: *//p')" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat sum-base-1.txt >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
