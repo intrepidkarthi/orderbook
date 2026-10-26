@@ -189,8 +189,8 @@ func New(config Config) *OrderBook {
 	}
 	ob := &OrderBook{
 		symbol:    config.Symbol,
-		bids:      ladder{sign: 1},
-		asks:      ladder{sign: -1},
+		bids:      newLadder(1, 0),
+		asks:      newLadder(-1, 0),
 		nodes:     newOrderIndex(config.IndexHint),
 		perUser:   newUserTable(),
 		maxOrders: config.MaxOrders,
@@ -220,10 +220,8 @@ func (ob *OrderBook) prefill(n int) {
 	}
 	// The ladders, sized for the same levels, so the first thousand prices do not
 	// grow them either.
-	ob.bids.levels = make([]*PriceLevel, 0, len(levels))
-	ob.asks.levels = make([]*PriceLevel, 0, len(levels))
-	ob.bids.keys = make([]int64, 0, len(levels))
-	ob.asks.keys = make([]int64, 0, len(levels))
+	ob.bids = newLadder(1, len(levels))
+	ob.asks = newLadder(-1, len(levels))
 }
 
 // Symbol returns the book's instrument symbol.
@@ -264,12 +262,10 @@ func (ob *OrderBook) Add(order *types.Order) error {
 	ob.sequenceNum++
 
 	lad := ob.side(order.Side)
-	var level *PriceLevel
-	if i, ok := lad.search(order.Price); ok {
-		level = lad.levels[i]
-	} else {
+	level := lad.get(order.Price)
+	if level == nil {
 		level = ob.getLevel(order.Price)
-		lad.insertAt(i, level)
+		lad.insert(level)
 	}
 
 	n := ob.getNode(order, level)

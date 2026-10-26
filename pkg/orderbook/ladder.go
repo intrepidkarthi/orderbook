@@ -1,26 +1,33 @@
 package orderbook
 
-// ladder is one side of the book: its price levels in one slice, sorted so the best
-// level is last (docs/BOOK-LADDER.md §5.1). The best level, which every match step
-// reads, is then the last element, with no map between the price and its level, and
-// emptying it is a truncation rather than a shift of every level behind it.
+// ladder is one side of the book: its price levels in one slice sorted so the best
+// level is last, and a price -> level map beside it (docs/BOOK-LADDER.md §8.4).
+//
+// The two serve different reads. The best level, which every match step reads, is
+// the slice's last element, with no map lookup, and emptying it is a truncation
+// rather than a shift of every level behind it. A level deep in a wide book is found
+// through the map, because a binary search over the slice lost to one hash of the
+// price wherever access was at random depth (§6.5, §6.7).
 //
 // Both sides sort the same way by key: a bid's key is its price and an ask's is its
 // negated price, so on either side a larger key is a better price.
-//
-// The keys are kept in their own slice, in step with the levels, and searches read
-// only that. A binary search over the level pointers dereferenced one level per
-// comparison, and on a wide book that made a deep cancel-and-replace 11% slower than
-// the map it replaced (docs/BOOK-LADDER.md §6.5).
 type ladder struct {
-	keys   []int64
-	levels []*PriceLevel
-	sign   int64 // +1 for bids, -1 for asks
+	levels  []*PriceLevel
+	byPrice map[int64]*PriceLevel
+	sign    int64 // +1 for bids, -1 for asks
 }
 
-// probe is how many levels from the best a search compares one at a time before it
-// falls back to binary search. Most adds and removals land at or near the touch.
+// probe is how many levels from the best a lookup compares before it asks the map.
+// Most adds and removals land at or near the touch.
 const probe = 4
+
+func newLadder(sign int64, capacity int) ladder {
+	return ladder{
+		levels:  make([]*PriceLevel, 0, capacity),
+		byPrice: make(map[int64]*PriceLevel, capacity),
+		sign:    sign,
+	}
+}
 
 func (l *ladder) key(price int64) int64 { return price * l.sign }
 
@@ -37,65 +44,63 @@ func (l *ladder) best() *PriceLevel {
 // at is the i-th best level: at(0) is the best.
 func (l *ladder) at(i int) *PriceLevel { return l.levels[len(l.levels)-1-i] }
 
-// search returns where price's level is, or where it would be inserted to keep the
-// order, and whether it is there.
-func (l *ladder) search(price int64) (int, bool) {
-	k := l.key(price)
-	keys := l.keys
-	n := len(keys)
-	stop := max(n-probe, 0)
-	for i := n - 1; i >= stop; i-- {
-		switch lk := keys[i]; {
-		case lk == k:
-			return i, true
-		case lk < k:
-			return i + 1, false
+// get is price's level, or nil: the top of the ladder first, then the map.
+func (l *ladder) get(price int64) *PriceLevel {
+	n := len(l.levels)
+	for i := n - 1; i >= max(n-probe, 0); i-- {
+		if l.levels[i].Price == price {
+			return l.levels[i]
 		}
 	}
-	// Every probed level is better than price, so it belongs below them: the first
-	// index in [0, stop) whose key is not smaller.
+	return l.byPrice[price]
+}
+
+// index is where a level at price belongs in the slice, which holds no level at it:
+// the top of the ladder first, then a binary search below it.
+func (l *ladder) index(price int64) int {
+	k := l.key(price)
+	n := len(l.levels)
+	stop := max(n-probe, 0)
+	for i := n - 1; i >= stop; i-- {
+		if l.key(l.levels[i].Price) < k {
+			return i + 1
+		}
+	}
 	lo, hi := 0, stop
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
-		if keys[mid] < k {
+		if l.key(l.levels[mid].Price) < k {
 			lo = mid + 1
 		} else {
 			hi = mid
 		}
 	}
-	return lo, lo < stop && keys[lo] == k
+	return lo
 }
 
-// get is price's level, or nil.
-func (l *ladder) get(price int64) *PriceLevel {
-	if i, ok := l.search(price); ok {
-		return l.levels[i]
-	}
-	return nil
-}
-
-// insertAt puts lvl at index i, which search returned for its price.
-func (l *ladder) insertAt(i int, lvl *PriceLevel) {
-	l.keys = append(l.keys, 0)
-	copy(l.keys[i+1:], l.keys[i:])
-	l.keys[i] = l.key(lvl.Price)
+// insert adds lvl, whose price has no level yet.
+func (l *ladder) insert(lvl *PriceLevel) {
+	i := l.index(lvl.Price)
 	l.levels = append(l.levels, nil)
 	copy(l.levels[i+1:], l.levels[i:])
 	l.levels[i] = lvl
+	l.byPrice[lvl.Price] = lvl
 }
 
 // remove takes lvl out. The best level, the common case, is a truncation.
 func (l *ladder) remove(lvl *PriceLevel) {
+	delete(l.byPrice, lvl.Price)
 	n := len(l.levels)
 	if n > 0 && l.levels[n-1] == lvl {
 		l.levels[n-1] = nil
-		l.levels, l.keys = l.levels[:n-1], l.keys[:n-1]
+		l.levels = l.levels[:n-1]
 		return
 	}
-	if i, ok := l.search(lvl.Price); ok {
-		copy(l.keys[i:], l.keys[i+1:])
+	// Below the best, the level is where a new one at its price would go: index
+	// finds the first position whose key is not smaller, which is lvl's own.
+	if i := l.index(lvl.Price); i < n && l.levels[i] == lvl {
 		copy(l.levels[i:], l.levels[i+1:])
 		l.levels[n-1] = nil
-		l.levels, l.keys = l.levels[:n-1], l.keys[:n-1]
+		l.levels = l.levels[:n-1]
 	}
 }

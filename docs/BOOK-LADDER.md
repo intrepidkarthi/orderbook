@@ -1,6 +1,6 @@
 # Book Ladder — Where the Book's Time Goes, and the Design That Follows From It
 
-Status: **accepted 2026-10-26 (§8 answered); phase 1 measured and reverted (§6.3); phase 2 failed twice on CI (§6.5, §6.7); a hybrid is proposed in §8.4, awaiting a decision** · Part of M11 in
+Status: **accepted 2026-10-26 (§8 answered); phase 1 measured and reverted (§6.3); phase 2 failed twice on CI (§6.5, §6.7); the §8.4 hybrid is being judged under §6.6** · Part of M11 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) · Author: Karthikeyan NG ·
 2026-10-26
 
@@ -268,7 +268,7 @@ insert and removal, which is what `LevelChurn` measures.
 
 ## 8. Open questions for review
 
-### 8.4 After §6.7: a hybrid, proposed 2026-10-26, not yet decided
+### 8.4 After §6.7: a hybrid, proposed and accepted 2026-10-26
 
 Keep the `price → level` map **and** the ladder of level pointers, best last. One
 slice: the price slice becomes the level slice, so there is no second slice to copy.
