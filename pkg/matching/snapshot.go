@@ -63,7 +63,7 @@ type EngineSnapshot struct {
 	MarkPrice      int64 // external mark/index reference (0 => use last trade)
 	State          EngineState
 	PausedUntil    time.Time          // active band-breach pause deadline (zero if none)
-	Orders         []*types.Order     // resting book, price-then-time order
+	Orders         []*types.Order     // resting book, price-then-time order; from TakeSnapshot, one shared block, so holding any one keeps all alive
 	Stops          []*types.StopOrder // pending stops
 	DedupKeys      []string           // accepted client-order-id keys, oldest first
 	Icebergs       []IcebergEntry     // hidden reserves behind resting displayed slices
@@ -145,8 +145,17 @@ func (e *Engine) TakeSnapshot() *EngineSnapshot {
 		Guard:          GuardWindow{Start: e.windowStart, Trades: e.windowTrades, Notional: e.windowNotional},
 		Busted:         e.bustRecords(),
 	}
-	for _, o := range e.book.Orders() {
-		snap.Orders = append(snap.Orders, copyOrder(o))
+	// One block for every resting copy, and the pointer slice at its final length:
+	// this runs on the matching goroutine, and one allocation per resting order was
+	// most of the pause (docs/SNAPSHOT-COPY.md).
+	resting := e.book.Orders()
+	if len(resting) > 0 {
+		block := make([]types.Order, len(resting))
+		snap.Orders = make([]*types.Order, len(resting))
+		for i, o := range resting {
+			block[i] = *o
+			snap.Orders[i] = &block[i]
+		}
 	}
 	for _, s := range e.stopBook.All() {
 		// Deep-copy so the snapshot is independent of the live engine (a pending
