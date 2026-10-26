@@ -1,6 +1,6 @@
 # Book Ladder — Where the Book's Time Goes, and the Design That Follows From It
 
-Status: **accepted 2026-10-26 (§8 answered); phase 1 measured and reverted (§6.3); phase 2 failed twice on CI (§6.5, §6.7); the §8.4 hybrid is being judged under §6.6** · Part of M11 in
+Status: **accepted 2026-10-26 (§8 answered); phase 1 measured and reverted (§6.3); phase 2 failed twice on CI (§6.5, §6.7); three versions measured, none passes §6.6 (§6.8); the choice in §8.5 is open** · Part of M11 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) · Author: Karthikeyan NG ·
 2026-10-26
 
@@ -253,6 +253,35 @@ insert and removal, which is what `LevelChurn` measures.
 
 §8.4 proposes that design. It needs a decision before any more code.
 
+### 6.8 The hybrid, measured (2026-10-26): fails, and the trade-off is real
+
+Three CI dispatches, base `720d26c`, head `95b3b2e`
+([40298147424](https://github.com/intrepidkarthi/orderbook/actions/runs/40298147424),
+[40298151367](https://github.com/intrepidkarthi/orderbook/actions/runs/40298151367),
+[40298155472](https://github.com/intrepidkarthi/orderbook/actions/runs/40298155472)):
+
+| Benchmark | Run 1 | Run 2 | Run 3 | §6.6 |
+|---|---:|---:|---:|---|
+| `TapeReplay/sink=nil` | 0.920 | 0.947 | 0.972 | ≤ 0.90, **fails** |
+| `Engine_MatchInto` | 1.044 | 1.044 | 1.041 | ≤ 0.95, **fails** |
+| `Engine_CancelReplaceInto` | **1.110** | 1.041 | 1.041 | the gate fails run 1 |
+| `OrderBook_LevelChurn` | 1.040 | 1.037 | 1.038 | ≤ 1.05, passes |
+
+Not adopted. §6.7's attribution was partly wrong too. Most of the first ladder's gain
+was not the map-free peek. It was creating and destroying price levels without a map
+write and a map delete. `Engine_MatchInto` does both on every op, and the hybrid puts
+them back.
+
+**What three versions establish:**
+
+| | No map (v1) | Today (map + price slice) | Hybrid |
+|---|---|---|---|
+| Top-of-book work: tape replay, match, level churn | **12-15% faster** | — | 3-8% faster on the tape, ~4% slower elsewhere |
+| Deep random cancel-and-replace on a wide book | **10-12% slower** | — | about even |
+
+No layout tried here wins both. **Which workload matters more is a product decision,
+not a measurement**, and this document stops there (§8.5).
+
 ## 7. Later, each with its own design
 
 - **Account handles.** An engine entry point taking an account already interned to an
@@ -267,6 +296,17 @@ insert and removal, which is what `LevelChurn` measures.
   `perf` on a runner), so there is something to point them at.
 
 ## 8. Open questions for review
+
+### 8.5 After §6.8: which workload to favour, open
+
+1. **Adopt v1 (no map)** with a `Bench-Accept: Engine_CancelReplaceInto ratio<=1.25`
+   trailer (BENCH-GATE §5.3). Faster wherever activity is near the touch, which is
+   most venues, the tape and every flash1 scenario. Slower for a market maker
+   re-quoting at random depth across thousands of levels.
+2. **Keep today's structure.** Record the result, and the model test stays as a
+   guard.
+3. **Make it a `Config` choice**, defaulting to today's. An API addition, and two
+   structures to keep correct, which the model test makes affordable.
 
 ### 8.4 After §6.7: a hybrid, proposed and accepted 2026-10-26
 
