@@ -1,6 +1,7 @@
 package matching
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -73,5 +74,44 @@ func TestLoadSnapshot_RequiresFreshEngine(t *testing.T) {
 	e.Process(lim(t, "a", types.SideBuy, 100, 1))
 	if err := e.LoadSnapshot(&EngineSnapshot{Symbol: "BTC-USD"}); err == nil {
 		t.Error("LoadSnapshot into a non-fresh engine should fail")
+	}
+}
+
+// TestSnapshotOrdersAreIndependentOfTheLiveBook is docs/SNAPSHOT-COPY.md §4: once
+// taken, a snapshot's resting orders must not move when the engine goes on trading.
+// The live engine fills, partially fills and cancels the very orders the snapshot
+// holds, and every one of them must still equal the copy made at snapshot time.
+func TestSnapshotOrdersAreIndependentOfTheLiveBook(t *testing.T) {
+	e := newEngine()
+	e.Process(lim(t, "a", types.SideSell, 101, 5))
+	e.Process(lim(t, "b", types.SideSell, 102, 5))
+	e.Process(lim(t, "c", types.SideSell, 103, 5))
+	e.Process(lim(t, "d", types.SideBuy, 99, 5))
+	e.Process(lim(t, "e", types.SideBuy, 98, 5))
+
+	snap := e.TakeSnapshot()
+	if len(snap.Orders) != 5 {
+		t.Fatalf("snapshot holds %d resting orders, want 5", len(snap.Orders))
+	}
+	want := make([]types.Order, len(snap.Orders))
+	for i, o := range snap.Orders {
+		want[i] = *o
+	}
+
+	e.Process(marketOrder(t, "taker", types.SideBuy, 7)) // fills 101, partially fills 102
+	live := e.Book().Orders()
+	for _, o := range live {
+		if o.UserID == "d" {
+			if _, err := e.Cancel(o.ID, "d"); err != nil {
+				t.Fatalf("Cancel: %v", err)
+			}
+		}
+	}
+	e.Process(lim(t, "f", types.SideBuy, 99, 1)) // rests where d was
+
+	for i, o := range snap.Orders {
+		if !reflect.DeepEqual(*o, want[i]) {
+			t.Errorf("snapshot order %d moved with the live book:\n now %+v\n was %+v", i, *o, want[i])
+		}
 	}
 }
