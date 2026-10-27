@@ -5,12 +5,12 @@ the harness is in-repo so anyone can reproduce them.
 
 > **The figures on this page are not regression targets.** A regression is caught by a
 > different mechanism: [`BENCH-GATE.md`](BENCH-GATE.md). It compares base against head
-> in one job on one runner, interleaved, with no stored baseline. Since its 60-run A/A
-> calibration it fails a push on any allocation increase in a core benchmark and on a
-> timing regression in `Engine_CancelReplaceInto` (it caught a ~1.20× slowdown in 20 of
-> 20 runs). It measures and reports the timing of four more, including a replay of a
-> committed 50,000-command tape, without failing on them. The numbers below are a local measurement on one machine and are
-> not what the gate compares. The three allocation ratios in
+> in one job on one runner, interleaved, with no stored baseline, on every push and
+> pull request. Since its calibrations it fails on any allocation increase in a core
+> benchmark, and on a timing regression in four: `Engine_CancelReplaceInto`,
+> `Engine_MatchInto`, a replay of a committed 50,000-command tape, and
+> `OrderBook_LevelChurn` (BENCH-GATE §19). The numbers below are a local measurement on
+> one machine and are not what the gate compares. The three allocation ratios in
 > `pkg/orderbook/alloc_test.go` (`TestCancelIsAllocationFree`,
 > `TestCancelReplaceIsAllocationFree`, `TestAddAloneDoesAllocate`) still fail ordinary
 > `go test` on their own. This page used to call its figures regression targets when
@@ -69,6 +69,25 @@ load-sensitive figures here.
 > The allocation figures were unaffected, because counting allocations is not a
 > timing. If you cannot quiesce the machine, measure allocations and leave the
 > nanoseconds alone.
+
+> **These figures predate the ladder (2026-10-26).** The book no longer keeps a price
+> map ([`BOOK-LADDER.md`](BOOK-LADDER.md)), so the rows it touches have moved. They have
+> not been re-measured here, because this machine was not idle enough to publish
+> nanoseconds when the change landed (see the note above). What *was* measured is the
+> change itself, as ratios on CI, base and head interleaved on one runner. The gate's
+> push run for `1c495af`
+> ([40361148828](https://github.com/intrepidkarthi/orderbook/actions/runs/40361148828)),
+> new ÷ old:
+>
+> | Benchmark | Ratio |
+> |---|---:|
+> | `Engine_MatchInto` | 0.873 |
+> | `OrderBook_LevelChurn` | 0.858 |
+> | tape replay (`TapeReplay/sink=nil`) | 0.849 |
+> | `Engine_CancelReplaceInto` (re-quote at random depth over 2,000 levels) | 1.121, accepted |
+> | building every book from 50 M real NASDAQ ITCH messages (`itch-ab.yml`) | 0.93 |
+>
+> Apply them to the rows below for an estimate, not a measurement.
 
 int64 ticks/lots, pooled book nodes/levels, single-writer engine:
 

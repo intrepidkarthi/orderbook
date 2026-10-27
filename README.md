@@ -364,7 +364,10 @@ the question each one answers:
 None of them includes the network, the wire codec, the order-entry session or the
 write-ahead log unless it says so.
 
-Core-library microbenchmarks (Apple M4, `go1.23.5 darwin/arm64`, single-threaded):
+Core-library microbenchmarks (Apple M4, `go1.23.5 darwin/arm64`, single-threaded).
+They predate the 2026-10-26 ladder, which on CI made matching ~13% and level churn ~14%
+faster and a re-quote at random depth ~12% slower; [BENCHMARKS.md](docs/BENCHMARKS.md#results)
+has the ratios and why the nanoseconds have not been re-measured yet:
 
 | Benchmark | ns/op | allocs/op | ~ops/sec |
 |---|---:|---:|---:|
