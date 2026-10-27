@@ -14,6 +14,7 @@ package orderbook
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/intrepidkarthi/orderbook/pkg/types"
@@ -98,14 +99,16 @@ func (pl *PriceLevel) Count() int { return pl.count }
 
 // OrderBook is a single-symbol CLOB.
 type OrderBook struct {
-	mu             sync.RWMutex
-	symbol         string
-	bids           ladder      // best (highest) last
-	asks           ladder      // best (lowest) last
-	nodes          *orderIndex // orderID -> node, for O(1) cancel
-	perUser        *userTable  // resting-order count per interned account
-	lastTradePrice int64
-	lastTradeTime  time.Time
+	mu      sync.RWMutex
+	symbol  string
+	bids    ladder      // best (highest) last
+	asks    ladder      // best (lowest) last
+	nodes   *orderIndex // orderID -> node, for O(1) cancel
+	perUser *userTable  // resting-order count per interned account
+	// lastTradePrice is atomic rather than under mu: the engine reads it on every
+	// command and sets it after every batch of trades, and a lock for one integer
+	// was most of what both cost (docs/LAST-TRADE.md).
+	lastTradePrice atomic.Int64
 	sequenceNum    uint64 // book version, bumped on each add
 	orderSeq       int64  // assigns ids to orders that arrive without one
 	maxOrders      int
@@ -402,19 +405,10 @@ func (ob *OrderBook) MidPrice() (int64, bool) {
 }
 
 // LastTradePrice returns the most recent execution price (ticks).
-func (ob *OrderBook) LastTradePrice() int64 {
-	ob.mu.RLock()
-	defer ob.mu.RUnlock()
-	return ob.lastTradePrice
-}
+func (ob *OrderBook) LastTradePrice() int64 { return ob.lastTradePrice.Load() }
 
-// SetLastTradePrice records the most recent execution price (ticks) and time.
-func (ob *OrderBook) SetLastTradePrice(price int64) {
-	ob.mu.Lock()
-	defer ob.mu.Unlock()
-	ob.lastTradePrice = price
-	ob.lastTradeTime = ob.clock().UTC()
-}
+// SetLastTradePrice records the most recent execution price (ticks).
+func (ob *OrderBook) SetLastTradePrice(price int64) { ob.lastTradePrice.Store(price) }
 
 // GetBidLevels returns up to depth aggregated bid levels, best first (copies).
 func (ob *OrderBook) GetBidLevels(depth int) []*PriceLevel {
@@ -607,7 +601,7 @@ func (ob *OrderBook) Snapshot(depth int) *Snapshot {
 		Symbol:         ob.symbol,
 		Bids:           make([]SnapshotLevel, 0, depth),
 		Asks:           make([]SnapshotLevel, 0, depth),
-		LastTradePrice: ob.lastTradePrice,
+		LastTradePrice: ob.lastTradePrice.Load(),
 		SequenceNum:    ob.sequenceNum,
 		Timestamp:      ob.clock().UTC(),
 	}

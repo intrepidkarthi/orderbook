@@ -360,3 +360,47 @@ func TestAddRefusesDuplicateIDs(t *testing.T) {
 		t.Fatalf("assigned id collided and rested: count %d, Get(1) is the supplied order: %v", ob.Count(), got == one)
 	}
 }
+
+// TestLastTradePriceIsSafeAcrossGoroutines is docs/LAST-TRADE.md §6: the last trade
+// price is set without the book's mutex, so a writer setting it while readers take it
+// and take snapshots must be clean under -race, and readers must only ever see a
+// value that was set.
+func TestLastTradePriceIsSafeAcrossGoroutines(t *testing.T) {
+	ob := New(Config{Symbol: "X"})
+	mustAdd(t, ob, limit(t, "a", types.SideBuy, 100, 1))
+	const n = 20_000
+	done := make(chan struct{})
+	errs := make(chan string, 2)
+	for range 2 {
+		go func() {
+			for {
+				select {
+				case <-done:
+					errs <- ""
+					return
+				default:
+				}
+				if p := ob.LastTradePrice(); p < 0 || p > n {
+					errs <- "read a price that was never set"
+					return
+				}
+				if s := ob.Snapshot(1); s.LastTradePrice < 0 || s.LastTradePrice > n {
+					errs <- "snapshot carried a price that was never set"
+					return
+				}
+			}
+		}()
+	}
+	for i := int64(1); i <= n; i++ {
+		ob.SetLastTradePrice(i)
+	}
+	close(done)
+	for range 2 {
+		if e := <-errs; e != "" {
+			t.Fatal(e)
+		}
+	}
+	if got := ob.LastTradePrice(); got != n {
+		t.Fatalf("last trade price %d after the writer finished, want %d", got, n)
+	}
+}
