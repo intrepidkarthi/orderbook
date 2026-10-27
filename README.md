@@ -452,15 +452,16 @@ one's digest exactly.
 
 | Engine | Language | Same trades and book | Median replay |
 |---|---|---|---:|
-| [CppTrader](https://github.com/chronoxor/CppTrader) | C++ | yes | 3.86 ms |
-| [geseq/orderbook](https://github.com/geseq/orderbook) | Go | yes | 4.56 ms |
-| this engine | Go | yes | 12.69 ms |
-| [OrderBook-rs](https://github.com/joaquinbejar/OrderBook-rs) | Rust | yes | 45.68 ms |
+| [CppTrader](https://github.com/chronoxor/CppTrader) | C++ | yes | 4.87 ms |
+| [geseq/orderbook](https://github.com/geseq/orderbook) | Go | yes | 6.44 ms |
+| this engine | Go | yes | 12.24 ms |
+| [OrderBook-rs](https://github.com/joaquinbejar/OrderBook-rs) | Rust | yes | 57.54 ms |
 
-[CI run 37588666344](https://github.com/intrepidkarthi/orderbook/actions/runs/37588666344),
-AMD EPYC 9V74, 4 vCPUs, one shared runner. On this tape this engine is about 3× slower
-than geseq and CppTrader. It is reported because it was measured, and finding where
-the time goes is the next performance step. The table ranks nothing outside this tape.
+[CI run 40479120157](https://github.com/intrepidkarthi/orderbook/actions/runs/40479120157),
+AMD EPYC 7763, 4 vCPUs, one shared runner, after v0.29.0's ladder. On this tape this
+engine is about 2.5× slower than CppTrader and 1.9× slower than geseq, down from about
+3.3× and 3× before the prefilled pools and the ladder. Where the rest goes is in
+[CROSS-ENGINE.md](docs/CROSS-ENGINE.md) §12. The table ranks nothing outside this tape.
 What each adapter pays inside its timed loop is in
 [CROSS-ENGINE.md](docs/CROSS-ENGINE.md) §8.
 

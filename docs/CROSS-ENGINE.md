@@ -245,3 +245,31 @@ time can already inject a counter.
   the self-trade and per-account checks. Each is a feature geseq does not have, so
   none is a free fix. Narrowing the gap further is a design question about those
   features' default cost, not a pooling question.
+
+## 12. After the ladder (2026-10-27)
+
+The book's price map went in v0.29.0 ([`BOOK-LADDER.md`](BOOK-LADDER.md)). Two runs on
+AMD EPYC 7763 (4 vCPUs), 11 rounds interleaved, all four engines agreeing on `core`
+([40479120157](https://github.com/intrepidkarthi/orderbook/actions/runs/40479120157),
+[40479124484](https://github.com/intrepidkarthi/orderbook/actions/runs/40479124484)):
+
+| Engine | Run 1 | Run 2 | This engine ÷ it |
+|---|---:|---:|---|
+| CppTrader | 4.87 ms | 4.74 ms | 2.51×, 2.47× |
+| geseq | 6.44 ms | 6.08 ms | 1.90×, 1.93× |
+| this engine | 12.24 ms | 11.72 ms | — |
+| OrderBook-rs | 57.54 ms | 56.73 ms | 0.21×, 0.21× |
+
+- **Against CppTrader the gap is about 2.5×**, from 3.9× in §9 and 3.3× after the
+  prefill (§11). CppTrader is the reference to read: across the CPU models these runs
+  have landed on, it slowed by about the same factor this engine did (§11's table,
+  1.21 against 1.22), where geseq swung by 1.86.
+- **Against geseq it reads 1.9×.** It is not comparable with §11's 1.8×, which came
+  from an Intel runner on which geseq alone slowed by 1.86×. Within these two runs it
+  is consistent.
+- This CPU is neither of §9's or §11's, so the absolute figures are not compared across
+  sections. As before, a ratio is read within one run.
+- What remains is §11's list minus the price map: the intake clock read, the
+  user-string interning (whose most that a hint could save was about 3% on CI,
+  [`ACCOUNT-HINT.md`](ACCOUNT-HINT.md)), and the self-trade and per-account checks.
+
