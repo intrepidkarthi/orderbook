@@ -7,6 +7,8 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-27
+
 ### Changed
 
 - **The book keeps each side as a ladder, best level last, with no price map**
@@ -3764,7 +3766,8 @@ trailing), GTC/IOC/FOK, self-trade prevention, a price-band circuit breaker, FIF
 and pro-rata allocation, L1/L2/L3 market data, a surveillance starter kit, and a
 market-microstructure research harness with a WebAssembly demo.
 
-[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.25.0...v0.26.0
