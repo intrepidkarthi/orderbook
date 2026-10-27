@@ -1,6 +1,6 @@
 # Account Hint — Interning an Account Once, Not on Every Add
 
-Status: **accepted 2026-10-27 (§7 answered); §5's upper bound is measured first** · Part of M11 in
+Status: **not built: §5's upper bound is below the bar (§8)** · Part of M11 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md), following
 [`BOOK-LADDER.md`](BOOK-LADDER.md) §7 · Author: Karthikeyan NG · 2026-10-27
 
@@ -109,3 +109,31 @@ measured first, with the 5% bar. (3) `obgw` and the bench replay in this change.
 2. **Measure first (§5)**, with the 5% bar, before any API is written?
 3. **Scope:** `obgw` and the bench replay in this change, with FIX, the C ABI and ITCH
    later?
+
+## 8. The upper bound, measured (2026-10-27): not worth the API
+
+Three CI dispatches, base `d30d2bb` (`main`), head `747aff2` on the throwaway
+`account-hint-bound` branch, where `intern` returns account 0 for every order after
+the first. Digests were unchanged on the tape, so timings were compared
+([40471139998](https://github.com/intrepidkarthi/orderbook/actions/runs/40471139998),
+[40471143511](https://github.com/intrepidkarthi/orderbook/actions/runs/40471143511),
+[40471147404](https://github.com/intrepidkarthi/orderbook/actions/runs/40471147404)):
+
+| Benchmark | Run 1 (Xeon 6973P) | Run 2 (EPYC 7763) | Run 3 (EPYC 7763) |
+|---|---:|---:|---:|
+| `TapeReplay/sink=nil` | 0.987 | 0.934 | 0.973 |
+| `Engine_MatchInto` | 0.986 | 0.962 | 0.952 |
+| `Engine_CancelReplaceInto` | 0.945 | 0.950 | 0.952 |
+| `OrderBook_LevelChurn` | 0.968 | 0.973 | 0.975 |
+
+**§5's rule fails:** `TapeReplay/sink=nil` reached 0.95 in one run of three. The most
+a hint could ever save on the tape is about 1-7%, median about 3%, and a real hint
+would keep a bounds check and a string compare of that. The M4 profile's 10% did not
+carry over to CI's machines. The tape has few distinct accounts, so their map entries
+stay hot in cache, and a hash of a short string is cheap there.
+
+**Not built.** No public field, no new methods. The throwaway branch stays as the
+record of what was measured. If a venue with many thousands of active accounts
+shows intern higher in its own profile, where the map stops fitting in cache, §4 is
+ready to be measured again against that workload.
+

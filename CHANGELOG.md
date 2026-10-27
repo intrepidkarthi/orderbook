@@ -34,6 +34,11 @@ versions may include breaking changes).
 - **`itchbook -replays N`** decodes messages into memory and times only the book
   builds, and `itch-ab.yml` compares two revisions that way on real NASDAQ flow.
 
+- **An account hint, measured and not built** ([`docs/ACCOUNT-HINT.md`](docs/ACCOUNT-HINT.md)).
+  Interning the account string on every add looked like 10% of the engine in a
+  profile. Skipping it entirely, the most any hint could save, was worth about 3% of
+  the tape replay on CI (0.934-0.987), under the 5% bar set before measuring, so no
+  public API was added for it.
 - **PGO, measured and not adopted** ([`docs/PGO.md`](docs/PGO.md)). With a profile
   taken from a different tape than the one timed, CI's go1.27 build ran 2-5% faster on
   two of the four enforced benchmarks and no faster on the other two. The bar,
