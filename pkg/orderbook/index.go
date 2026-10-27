@@ -187,6 +187,11 @@ func newUserTable() *userTable {
 
 // intern returns the id for account, assigning one if it is new.
 func (ut *userTable) intern(account string) int32 {
+	// THROWAWAY (ACCOUNT-HINT §5): every account after the first is account 0, so
+	// this measures what skipping the hash could ever save. Wrong by design.
+	if len(ut.counts) > 0 {
+		return 0
+	}
 	if id, ok := ut.ids[account]; ok {
 		return id
 	}
