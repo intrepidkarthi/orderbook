@@ -1,6 +1,6 @@
 # Last Trade Price — A Lock per Command for One Integer
 
-Status: **bound measured, passes (§4); design in §5, judged under §6** · Part of M11 in
+Status: **adopted 2026-10-27 (§8)** · Part of M11 in
 [`PERFORMANCE-ROADMAP.md`](PERFORMANCE-ROADMAP.md) · Author: Karthikeyan NG ·
 2026-10-27
 
@@ -109,4 +109,16 @@ result is not a pass.
 replaced by exactly one more dispatch, which must pass every enforced benchmark
 outright. A measured failure in it, or another inconclusive result, ends this change
 unadopted. Nothing is re-run beyond that one.
+
+## 8. The replacement run, and adoption (2026-10-27)
+
+One dispatch, as §7 allowed
+([40549110685](https://github.com/intrepidkarthi/orderbook/actions/runs/40549110685),
+EPYC 7763): `Engine_MatchInto` 0.842, `TapeReplay/sink=nil` 0.948,
+`Engine_CancelReplaceInto` 1.013, `OrderBook_LevelChurn` 1.002, every enforced
+benchmark passing and digests equal. **Adopted.**
+
+Across the four runs that measured it, the change makes `Engine_MatchInto` 16-24%
+faster and the tape replay 5-7% faster, and leaves the other two enforced benchmarks
+within the gate's noise.
 

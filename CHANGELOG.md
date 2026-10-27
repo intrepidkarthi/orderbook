@@ -7,6 +7,14 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+### Changed
+
+- **The book's last trade price is atomic, and no clock is read to stamp a time
+  nothing reads** ([`docs/LAST-TRADE.md`](docs/LAST-TRADE.md)). The engine read it
+  under the book's lock on every command and set it under the write lock, plus a clock
+  read, after every trade batch. On CI: `Engine_MatchInto` 0.76-0.84×, the tape replay
+  0.93-0.95×. The public API is unchanged.
+
 ## [0.29.0] - 2026-10-27
 
 ### Changed
