@@ -85,3 +85,28 @@ price. The change keeps that guarantee as it is and adds no new gap.
 - **Race test:** a test runs `SetLastTradePrice` on one goroutine against
   `LastTradePrice` and `Snapshot` on others. `-race` must be clean, which CI's race
   job enforces.
+
+## 7. The change, measured (2026-10-27)
+
+Three dispatches, base `b7742ec`, head `854aeaa` on the `last-trade` branch
+([40548106917](https://github.com/intrepidkarthi/orderbook/actions/runs/40548106917),
+[40548112794](https://github.com/intrepidkarthi/orderbook/actions/runs/40548112794),
+[40548118388](https://github.com/intrepidkarthi/orderbook/actions/runs/40548118388)):
+
+| Benchmark | Run 1 (EPYC 9V45) | Run 2 (EPYC 7763) | Run 3 (Xeon 8370C) |
+|---|---:|---:|---:|
+| `TapeReplay/sink=nil` | **0.928** | **0.944** | **0.937** |
+| `Engine_MatchInto` | 0.761 | inconclusive twice | 0.815 |
+| `Engine_CancelReplaceInto` | 0.976 | 1.005 | 0.966 |
+| `OrderBook_LevelChurn` | 0.995 | 1.007 | 0.987 |
+
+The tape bar passes in all three. Digests agreed. In run 2 `Engine_MatchInto` had 10
+tainted pairs, so the gate measured nothing for it and, under enforcement, failed the
+run. §6 asked for every enforced benchmark to *pass* in all three, and an inconclusive
+result is not a pass.
+
+**Restated before any further data:** an inconclusive run gives no measurement. It is
+replaced by exactly one more dispatch, which must pass every enforced benchmark
+outright. A measured failure in it, or another inconclusive result, ends this change
+unadopted. Nothing is re-run beyond that one.
+
