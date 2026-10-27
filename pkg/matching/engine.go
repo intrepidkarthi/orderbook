@@ -427,6 +427,7 @@ type Engine struct {
 	// client-order-id dedup (near-term replay guard): a ring of the most recent
 	// (user,clientID) keys plus a set for O(1) lookup.
 	dedupSeen map[string]struct{}
+	lastTP    int64 // THROWAWAY (LASTTRADE bound): the book's copy is never touched
 	dedupRing []string
 	dedupPos  int
 
@@ -1093,7 +1094,7 @@ func (e *Engine) settle(order *types.Order, admitQty int64, submitted bool, dst 
 	//
 	// lastBefore is the last trade price this venue had PUBLISHED before the walk.
 	// pendStart is where this walk's events begin in e.pending.
-	lastBefore := e.book.LastTradePrice()
+	lastBefore := e.lastTP
 	pendStart := len(e.pending)
 	dst, makerOrders := e.match(order, dst)
 
@@ -1155,7 +1156,7 @@ func (e *Engine) settle(order *types.Order, admitQty int64, submitted bool, dst 
 			// docs/DIFFERENTIAL-FINDINGS.md §3. Guarded on having printed, so a
 			// fill-or-kill that never traded does not restamp the trade clock.
 			if len(dst) > start {
-				e.book.SetLastTradePrice(lastBefore)
+				e.lastTP = lastBefore
 			}
 			// Drop the events describing what was just undone, and ONLY those. A
 			// rejection is not "nothing happened": this walk may have cancelled a
@@ -1199,7 +1200,7 @@ func (e *Engine) cascadeStops(dst []types.Trade) []types.Trade {
 		return dst
 	}
 	for range maxStopCascade {
-		mp := e.book.LastTradePrice()
+		mp := e.lastTP
 		if mp <= 0 {
 			return dst
 		}
@@ -1251,7 +1252,7 @@ func (e *Engine) ProcessStop(stop *types.StopOrder) *MatchResult {
 func (e *Engine) submitStopInto(stop *types.StopOrder, dst []types.Trade) ([]types.Trade, types.OrderStatus, error) {
 	e.nextID(stop.Order)
 
-	if mp := e.book.LastTradePrice(); mp > 0 && stop.ShouldTrigger(mp) {
+	if mp := e.lastTP; mp > 0 && stop.ShouldTrigger(mp) {
 		stop.Trigger()
 		// A stop that fires on arrival is still a stop that fired, and a consumer
 		// should not have to infer that from the absence of a PendingTrigger.
@@ -1324,7 +1325,7 @@ func (e *Engine) ProcessTrailingStop(ts *types.TrailingStop) *MatchResult {
 	}
 	e.nextID(ts.Order)
 
-	mp := e.book.LastTradePrice()
+	mp := e.lastTP
 	if mp > 0 {
 		ts.Observe(mp)
 		if ts.ShouldTrigger(mp) {
@@ -1712,7 +1713,7 @@ func (e *Engine) outsideBand(price int64) bool {
 	// lesson). Falls back to last trade when no mark is set.
 	ref := e.markPrice
 	if ref <= 0 {
-		ref = e.book.LastTradePrice()
+		ref = e.lastTP
 	}
 	if ref <= 0 {
 		return false
@@ -1822,7 +1823,7 @@ func (e *Engine) markDepthBand() int64 {
 	// ticks = mark * frac, evaluated off the current mark (or the new price if unset).
 	ref := e.markPrice
 	if ref <= 0 {
-		ref = e.book.LastTradePrice()
+		ref = e.lastTP
 	}
 	if ref <= 0 {
 		return math.MaxInt64
@@ -2075,7 +2076,7 @@ func proRataAllocate(orders []*types.Order, q int64) []int64 {
 // prints; a price is a DATUM, and restoring it makes it correct again.
 func (e *Engine) recordLast(dst []types.Trade, start int) []types.Trade {
 	if len(dst) > start {
-		e.book.SetLastTradePrice(dst[len(dst)-1].Price)
+		e.lastTP = dst[len(dst)-1].Price
 	}
 	return dst
 }
@@ -2644,7 +2645,7 @@ func (e *Engine) Spread() (int64, bool) { return e.book.Spread() }
 func (e *Engine) MidPrice() (int64, bool) { return e.book.MidPrice() }
 
 // LastTradePrice returns the most recent execution price (ticks).
-func (e *Engine) LastTradePrice() int64 { return e.book.LastTradePrice() }
+func (e *Engine) LastTradePrice() int64 { return e.lastTP }
 
 // OrderCount returns the number of resting orders.
 func (e *Engine) OrderCount() int { return e.book.Count() }

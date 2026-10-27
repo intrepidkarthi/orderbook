@@ -138,7 +138,7 @@ func (e *Engine) TakeSnapshot() *EngineSnapshot {
 		Seq:            e.orderSeq,
 		TradeSeq:       e.tradeSeq,
 		EventSeq:       e.eventSeq,
-		LastTradePrice: e.book.LastTradePrice(),
+		LastTradePrice: e.lastTP,
 		MarkPrice:      e.markPrice,
 		State:          e.state,
 		PausedUntil:    e.pausedUntil,
@@ -235,7 +235,7 @@ func (e *Engine) LoadSnapshot(snap *EngineSnapshot) error {
 		restedStops[ns.Order.ID] = ns
 	}
 	if snap.LastTradePrice > 0 {
-		e.book.SetLastTradePrice(snap.LastTradePrice)
+		e.lastTP = snap.LastTradePrice
 	}
 	for _, k := range snap.DedupKeys {
 		e.recordDedupKey(k) // oldest first, so a smaller ring keeps the newest
