@@ -27,6 +27,16 @@ layers around it. It has never run a live market, and
 [what that costs you](#experimental-use-at-your-own-risk) is written down rather
 than implied.
 
+**Faster since v0.28.0, measured on CI.** Replaying the gate's committed
+50,000-command tape takes 0.83-0.87× the time it did at v0.28.0, in three runs that
+put both versions on one runner
+([41045194635](https://github.com/intrepidkarthi/orderbook/actions/runs/41045194635)).
+Building every book from 50 M real NASDAQ ITCH messages takes 0.93×. The book no longer
+keeps a price map ([BOOK-LADDER](docs/BOOK-LADDER.md)), and its last trade price no
+longer takes a lock ([LAST-TRADE](docs/LAST-TRADE.md)). The price: re-quoting at random
+depth across thousands of levels is 1.10-1.14× slower. Three other ideas missed the bar
+set before they were measured, and are written up next to the ones that cleared it.
+
 | What | Supported |
 |---|---|
 | Order types | limit, market; stop and stop-limit; trailing stop; iceberg; one-cancels-other; pegged to bid, ask or mid (priced at entry, not re-pegged) |
@@ -237,8 +247,8 @@ gaps no library work can close, because they are properties of your deployment.
   floating-point on the money path.
 - **Low latency, zero allocation.** O(1) cancel, pooled book nodes and price
   levels, and a caller-buffer match path that allocates **0 B/op**. A realistic
-  cancel-heavy flow runs at **p50 83 ns · p99 167 ns · p999 250 ns** per
-  operation.
+  cancel-heavy flow ran at **p50 83 ns · p99 167 ns · p999 250 ns** per
+  operation on an M4 before v0.29.0's changes, which have not been re-timed on it yet.
 - **Single-writer core.** One matching goroutine owns the book, so nothing
   contends its mutex on the match path (the LMAX model). A `Runner` fronts it
   with an MPSC command queue so many producers can submit concurrently. Queue
@@ -365,9 +375,10 @@ None of them includes the network, the wire codec, the order-entry session or th
 write-ahead log unless it says so.
 
 Core-library microbenchmarks (Apple M4, `go1.23.5 darwin/arm64`, single-threaded).
-They predate the 2026-10-26 ladder, which on CI made matching ~13% and level churn ~14%
-faster and a re-quote at random depth ~12% slower; [BENCHMARKS.md](docs/BENCHMARKS.md#results)
-has the ratios and why the nanoseconds have not been re-measured yet:
+They predate the ladder and the atomic last trade price. Measured on CI against
+v0.28.0, the tape replay is 0.83-0.87×, level churn 0.86-0.90×, and a re-quote at random
+depth 1.10-1.14×; [BENCHMARKS.md](docs/BENCHMARKS.md#results) has the ratios and why the
+nanoseconds have not been re-measured yet:
 
 | Benchmark | ns/op | allocs/op | ~ops/sec |
 |---|---:|---:|---:|
@@ -458,7 +469,10 @@ one's digest exactly.
 | [OrderBook-rs](https://github.com/joaquinbejar/OrderBook-rs) | Rust | yes | 57.54 ms |
 
 [CI run 40479120157](https://github.com/intrepidkarthi/orderbook/actions/runs/40479120157),
-AMD EPYC 7763, 4 vCPUs, one shared runner, after v0.29.0's ladder. On this tape this
+AMD EPYC 7763, 4 vCPUs, one shared runner, after v0.29.0's ladder and before the atomic
+last trade price. A re-run on 2026-10-30 is not quoted: both Go engines slowed by
+1.6-2.5× on it while CppTrader did not move, on the same toolchain, which is the runner and
+not the code. On this tape this
 engine is about 2.5× slower than CppTrader and 1.9× slower than geseq, down from about
 3.3× and 3× before the prefilled pools and the ladder. Where the rest goes is in
 [CROSS-ENGINE.md](docs/CROSS-ENGINE.md) §12. The table ranks nothing outside this tape.

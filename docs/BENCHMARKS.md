@@ -87,6 +87,17 @@ load-sensitive figures here.
 > | `Engine_CancelReplaceInto` (re-quote at random depth over 2,000 levels) | 1.121, accepted |
 > | building every book from 50 M real NASDAQ ITCH messages (`itch-ab.yml`) | 0.93 |
 >
+> Measured end to end since, v0.28.0 against `main` at `2ba0f75` (the ladder plus the
+> atomic last trade price, [`LAST-TRADE.md`](LAST-TRADE.md)), three runs on three CPU
+> models
+> ([41045194635](https://github.com/intrepidkarthi/orderbook/actions/runs/41045194635),
+> [41045201356](https://github.com/intrepidkarthi/orderbook/actions/runs/41045201356),
+> [41045205623](https://github.com/intrepidkarthi/orderbook/actions/runs/41045205623)):
+> tape replay 0.831, 0.871, 0.863; `OrderBook_LevelChurn` 0.860, 0.896, 0.904;
+> `OrderBook_CancelReplace` 1.100, 1.143, 1.128. The gate did not compare
+> `Engine_MatchInto` across that range, because its source file changed in it; within
+> the range it was 0.873 for the ladder and 0.833 for the last trade price.
+>
 > Apply them to the rows below for an estimate, not a measurement.
 
 int64 ticks/lots, pooled book nodes/levels, single-writer engine:
