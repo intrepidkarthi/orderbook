@@ -7,6 +7,8 @@ versions may include breaking changes).
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-31
+
 ### Changed
 
 - **The book's last trade price is atomic, and no clock is read to stamp a time
@@ -14,6 +16,20 @@ versions may include breaking changes).
   under the book's lock on every command and set it under the write lock, plus a clock
   read, after every trade batch. On CI: `Engine_MatchInto` 0.76-0.84×, the tape replay
   0.93-0.95×. The public API is unchanged.
+
+### Fixed
+
+- **The benchmark pages described an engine that no longer exists.** `BENCHMARKS.md`
+  said the gate enforces timing on one benchmark (it is four, on pushes and pull
+  requests), and its M4 tables, like the README's, predated the ladder without saying
+  so. Both now carry the CI-measured ratios, and the README states the measured
+  speed-up since v0.28.0 after its intro: the tape replay at 0.83-0.87× in three runs
+  with both versions on one runner. The M4 nanoseconds are marked as older until they
+  are re-timed on an idle machine.
+- **The cross-engine standing after the ladder** ([`docs/CROSS-ENGINE.md`](docs/CROSS-ENGINE.md)
+  §12): 2.5× CppTrader, from 3.3×, and 1.9× geseq, all four engines agreeing. A later
+  re-run is not quoted, because both Go engines slowed 1.6-2.5× on it while CppTrader
+  did not, on the same toolchain.
 
 ## [0.29.0] - 2026-10-27
 
@@ -3774,7 +3790,8 @@ trailing), GTC/IOC/FOK, self-trade prevention, a price-band circuit breaker, FIF
 and pro-rata allocation, L1/L2/L3 market data, a surveillance starter kit, and a
 market-microstructure research harness with a WebAssembly demo.
 
-[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/intrepidkarthi/orderbook/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/intrepidkarthi/orderbook/compare/v0.26.0...v0.27.0
