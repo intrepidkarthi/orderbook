@@ -43,6 +43,11 @@ type L2Feed struct {
 	// touched records the levels a batch changed, so a command that moves one level
 	// three times produces one delta with its final quantity rather than three.
 	touched map[levelKey]struct{}
+	// settled holds the orders this batch has already reported in full. Events carry a
+	// pointer to the order and are read once the batch has run, so its status and
+	// RemainingQty are already net of every trade in the batch. Applying those trades
+	// again would count them twice.
+	settled map[int64]struct{}
 	out     []L2Delta
 	seq     int64
 }
@@ -81,6 +86,7 @@ func NewL2Feed() *L2Feed {
 		bids:    map[int64]int64{},
 		asks:    map[int64]int64{},
 		touched: map[levelKey]struct{}{},
+		settled: map[int64]struct{}{},
 	}
 }
 
@@ -95,27 +101,11 @@ func (f *L2Feed) OnEvents(evs []matching.Event) {
 		e := &evs[i]
 		f.seq = e.Seq
 		switch e.Kind {
-		case matching.EventAccepted:
+		case matching.EventAccepted, matching.EventReplaced, matching.EventCanceled:
 			if e.Order == nil {
 				continue
 			}
-			// An iceberg re-announces the same id when it reloads, so an Accepted for
-			// an order already tracked replaces its contribution rather than adding a
-			// second one.
-			f.forget(e.Order.ID)
-			f.remember(e.Order)
-
-		case matching.EventReplaced:
-			if e.Order == nil {
-				continue
-			}
-			f.resize(e.Order.ID, e.Order.RemainingQty)
-
-		case matching.EventCanceled:
-			if e.Order == nil {
-				continue
-			}
-			f.forget(e.Order.ID)
+			f.settle(e.Order)
 
 		case matching.EventTrade:
 			if e.Trade == nil {
@@ -124,10 +114,11 @@ func (f *L2Feed) OnEvents(evs []matching.Event) {
 			// A fill reduces whichever side was resting. The taker may never have
 			// rested at all, in which case it is simply not tracked and fill is a
 			// no-op for it.
-			f.fill(e.Trade.BuyOrderID, e.Trade.Quantity)
-			f.fill(e.Trade.SellOrderID, e.Trade.Quantity)
+			f.fillUnlessSettled(e.Trade.BuyOrderID, e.Trade.Quantity)
+			f.fillUnlessSettled(e.Trade.SellOrderID, e.Trade.Quantity)
 		}
 	}
+	clear(f.settled)
 	f.flush()
 }
 
@@ -138,9 +129,21 @@ func (f *L2Feed) sideMap(s types.Side) map[int64]int64 {
 	return f.asks
 }
 
+// settle makes the order's contribution match what it says now. An iceberg re-announces
+// the same id when it reloads, so this replaces any earlier contribution rather than
+// adding a second one.
+func (f *L2Feed) settle(o *types.Order) {
+	f.forget(o.ID)
+	f.settled[o.ID] = struct{}{}
+	f.remember(o)
+}
+
+// remember tracks an order that is resting now. A pending stop isn't active, so it adds
+// nothing to the depth. RemainingQty is the resting slice and never includes an iceberg's
+// reserve, which is why it's the right number to publish.
 func (f *L2Feed) remember(o *types.Order) {
-	if o.RemainingQty <= 0 {
-		return // filled on arrival; it never rested, so no level changed
+	if !o.IsActive() || o.RemainingQty <= 0 {
+		return
 	}
 	f.live[o.ID] = liveOrder{side: o.Side, price: o.Price, remaining: o.RemainingQty}
 	f.add(o.Side, o.Price, o.RemainingQty)
@@ -167,6 +170,12 @@ func (f *L2Feed) resize(id, remaining int64) {
 		return
 	}
 	f.live[id] = lo
+}
+
+func (f *L2Feed) fillUnlessSettled(id, qty int64) {
+	if _, ok := f.settled[id]; !ok {
+		f.fill(id, qty)
+	}
 }
 
 func (f *L2Feed) fill(id, qty int64) {
